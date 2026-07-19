@@ -1,0 +1,88 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"/Users/anudeepsharma/Programming/DevOS/.claude/hooks/safety-check.js\""
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"/Users/anudeepsharma/Programming/DevOS/.claude/hooks/inventory-check.js\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"/Users/anudeepsharma/Programming/DevOS/.claude/hooks/catalog-trigger.js\""
+          },
+          {
+            "type": "command",
+            "command": "node \"/Users/anudeepsharma/Programming/DevOS/.claude/hooks/drift-check.js\""
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"/Users/anudeepsharma/Programming/DevOS/.claude/hooks/pre-compact.js\""
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"/Users/anudeepsharma/Programming/DevOS/.claude/hooks/session-start-msg.js\""
+          },
+          {
+            "type": "command",
+            "command": "node \"/Users/anudeepsharma/Programming/DevOS/.claude/hooks/session-context.js\""
+          },
+          {
+            "type": "command",
+            "command": "node \"/Users/anudeepsharma/Programming/DevOS/.claude/hooks/session-router.js\""
+          },
+          {
+            "type": "command",
+            "command": "node \"/Users/anudeepsharma/Programming/DevOS/.claude/hooks/tracker-sync.js\" start"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"/Users/anudeepsharma/Programming/DevOS/.claude/hooks/session-log.js\""
+          },
+          {
+            "type": "command",
+            "command": "node \"/Users/anudeepsharma/Programming/DevOS/.claude/hooks/tracker-sync.js\" end"
+          }
+        ]
+      }
+    ]
+  }
+}

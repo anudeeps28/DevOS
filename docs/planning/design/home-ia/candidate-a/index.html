@@ -1,0 +1,258 @@
+<!doctype html>
+<!--
+  Candidate A — Projects Grid
+  Home screen = a grid of project cards. The PROJECT is the atom.
+  Optimizes for "lay of the land across all my repos." You drill INTO a
+  project to reach its agents + tracker. Live state (tracker mode, git,
+  agent count) is derived per-render per the map's registry decision.
+  Open this file directly in a browser. Static mock — no server.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Development OS — Projects</title>
+<style>
+  :root{
+    --bg:#0c0d10; --panel:#141519; --panel-2:#191b20; --line:#26282f;
+    --ink:#e7e9ee; --dim:#8b90a0; --faint:#5b6070;
+    --run:#4ade80; --idle:#5b6070; --need:#f5b544; --blocked:#f87171;
+    --accent:#7c9cff; --mono:ui-monospace,"SF Mono",Menlo,monospace;
+    --sans:-apple-system,"Segoe UI",Inter,system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+    font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+  a{color:inherit;text-decoration:none}
+  .app{display:grid;grid-template-columns:216px 1fr;min-height:100vh}
+
+  /* ---- left rail (shared language across candidates) ---- */
+  .rail{background:#0a0b0e;border-right:1px solid var(--line);padding:18px 12px;
+    display:flex;flex-direction:column;gap:4px;position:sticky;top:0;height:100vh}
+  .brand{display:flex;align-items:center;gap:9px;padding:6px 8px 16px}
+  .brand .dot{width:11px;height:11px;border-radius:3px;
+    background:linear-gradient(135deg,var(--accent),#a855f7);box-shadow:0 0 12px #7c9cff66}
+  .brand b{font-size:13.5px;letter-spacing:.2px}
+  .brand span{font-family:var(--mono);font-size:10px;color:var(--faint);display:block}
+  .nav a{display:flex;align-items:center;gap:10px;padding:7px 9px;border-radius:7px;
+    color:var(--dim);font-size:13px}
+  .nav a .ic{width:15px;text-align:center;opacity:.85}
+  .nav a:hover{background:#15171c;color:var(--ink)}
+  .nav a.on{background:#181b2b;color:#fff}
+  .nav a.on .ic{color:var(--accent)}
+  .nav .cnt{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--faint)}
+  .nav a.on .cnt{color:var(--need)}
+  .railfoot{margin-top:auto;border-top:1px solid var(--line);padding-top:12px;
+    display:flex;align-items:center;gap:9px;color:var(--dim);font-size:12px}
+  .railfoot .av{width:24px;height:24px;border-radius:50%;background:#2a2d38;
+    display:grid;place-items:center;font-size:11px}
+
+  /* ---- main ---- */
+  .main{padding:26px 32px 60px;max-width:1180px}
+  .head{display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:22px}
+  .head h1{font-size:21px;margin:0;font-weight:650;letter-spacing:-.2px}
+  .head p{margin:3px 0 0;color:var(--dim);font-size:13px}
+  .head .r{display:flex;gap:8px;align-items:center}
+  .btn{font-family:var(--sans);font-size:12.5px;color:var(--ink);background:var(--panel-2);
+    border:1px solid var(--line);padding:7px 13px;border-radius:8px;cursor:pointer}
+  .btn.p{background:linear-gradient(135deg,#5b74d6,#7c5cff);border:none;font-weight:550}
+  .btn:hover{border-color:#3a3d47}
+
+  .glance{display:flex;gap:10px;margin-bottom:24px;flex-wrap:wrap}
+  .kpi{background:var(--panel);border:1px solid var(--line);border-radius:11px;
+    padding:12px 15px;min-width:120px}
+  .kpi .n{font-size:22px;font-weight:650;font-family:var(--mono)}
+  .kpi .l{color:var(--dim);font-size:11.5px;margin-top:1px}
+  .kpi.alert .n{color:var(--need)}
+
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(310px,1fr));gap:14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:13px;
+    padding:16px 16px 14px;display:flex;flex-direction:column;gap:12px;
+    transition:border-color .15s,transform .15s;cursor:pointer;position:relative}
+  .card:hover{border-color:#3a3f4d;transform:translateY(-2px)}
+  .card.attn{border-color:#4a3a1e}
+  .card.attn:hover{border-color:#6b5124}
+  .ctop{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+  .cname{font-size:15px;font-weight:600;letter-spacing:-.1px}
+  .cpath{font-family:var(--mono);font-size:10.5px;color:var(--faint);margin-top:2px}
+  .badge{font-family:var(--mono);font-size:10px;padding:3px 7px;border-radius:20px;
+    border:1px solid var(--line);color:var(--dim);white-space:nowrap}
+  .badge.pin{color:var(--need);border-color:#4a3a1e}
+
+  .meta{display:flex;flex-wrap:wrap;gap:7px}
+  .chip{display:inline-flex;align-items:center;gap:5px;font-family:var(--mono);
+    font-size:10.5px;color:var(--dim);background:var(--panel-2);border:1px solid var(--line);
+    padding:3px 8px;border-radius:6px}
+  .chip .sw{width:7px;height:7px;border-radius:50%}
+  .git.dirty{color:#f5b544}
+
+  .agents{display:flex;flex-direction:column;gap:6px;border-top:1px solid var(--line);
+    padding-top:11px}
+  .arow{display:flex;align-items:center;gap:9px;font-size:12.5px}
+  .arow .st{width:8px;height:8px;border-radius:50%;flex:none}
+  .st.run{background:var(--run);box-shadow:0 0 8px #4ade8066}
+  .st.idle{background:var(--idle)}
+  .st.need{background:var(--need);box-shadow:0 0 8px #f5b54488}
+  .arow .cmd{font-family:var(--mono);font-size:11.5px;color:var(--ink)}
+  .arow .doing{color:var(--dim);font-size:11.5px;margin-left:2px;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .arow .tag{margin-left:auto;font-family:var(--mono);font-size:10px;
+    padding:2px 7px;border-radius:20px;flex:none}
+  .tag.need{background:#3a2c11;color:var(--need)}
+  .tag.run{background:#12241a;color:var(--run)}
+  .noagents{color:var(--faint);font-size:12px;font-family:var(--mono)}
+
+  .cfoot{display:flex;align-items:center;justify-content:space-between;
+    border-top:1px solid var(--line);padding-top:10px}
+  .next{font-size:12px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;
+    white-space:nowrap;max-width:70%}
+  .next b{color:var(--ink);font-weight:500}
+  .go{font-family:var(--mono);font-size:11px;color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- shared rail -->
+  <aside class="rail">
+    <div class="brand">
+      <div class="dot"></div>
+      <div><b>Development OS</b><span>localhost:4177</span></div>
+    </div>
+    <nav class="nav">
+      <a class="on"><span class="ic">▦</span> Projects <span class="cnt">4</span></a>
+      <a><span class="ic">◈</span> Agents <span class="cnt">4</span></a>
+      <a><span class="ic">✉</span> Inbox <span class="cnt">11</span></a>
+      <a><span class="ic">◷</span> History</a>
+      <a><span class="ic">⚙</span> Settings</a>
+    </nav>
+    <div class="railfoot"><div class="av">A</div> Anudeep</div>
+  </aside>
+
+  <!-- main -->
+  <main class="main">
+    <div class="head">
+      <div>
+        <h1>Projects</h1>
+        <p>4 projects · 4 agents live · 1 waiting on you</p>
+      </div>
+      <div class="r">
+        <button class="btn">＋ Register folder</button>
+        <button class="btn p">Spawn agent</button>
+      </div>
+    </div>
+
+    <div class="glance">
+      <div class="kpi"><div class="n">4</div><div class="l">Projects</div></div>
+      <div class="kpi"><div class="n">3</div><div class="l">Agents running</div></div>
+      <div class="kpi alert"><div class="n">1</div><div class="l">Waiting on you</div></div>
+      <div class="kpi"><div class="n">2</div><div class="l">Dirty worktrees</div></div>
+    </div>
+
+    <section class="grid">
+
+      <!-- harness -->
+      <article class="card">
+        <div class="ctop">
+          <div>
+            <div class="cname">claude-code-harness</div>
+            <div class="cpath">~/Programming/…/claude-code-harness</div>
+          </div>
+          <div class="badge pin">★ pinned</div>
+        </div>
+        <div class="meta">
+          <span class="chip"><span class="sw" style="background:#e0533d"></span>Todoist</span>
+          <span class="chip">⎇ GitHub</span>
+          <span class="chip git">main · clean</span>
+        </div>
+        <div class="agents">
+          <div class="arow"><span class="st run"></span><span class="cmd">/implement</span>
+            <span class="doing">Editing trackers/linear/create-issue.sh</span>
+            <span class="tag run">run</span></div>
+          <div class="arow"><span class="st idle"></span><span class="cmd">/code-review</span>
+            <span class="doing">Done · 3 findings, awaiting</span></div>
+        </div>
+        <div class="cfoot">
+          <div class="next">Next: <b>Add Linear tracker adapter</b></div>
+          <div class="go">open →</div>
+        </div>
+      </article>
+
+      <!-- quant-backtester (attention) -->
+      <article class="card attn">
+        <div class="ctop">
+          <div>
+            <div class="cname">quant-backtester</div>
+            <div class="cpath">~/Programming/quant-backtester</div>
+          </div>
+          <div class="badge">github</div>
+        </div>
+        <div class="meta">
+          <span class="chip"><span class="sw" style="background:#8b949e"></span>GitHub</span>
+          <span class="chip">⎇ GitHub</span>
+          <span class="chip git dirty">feat/vectorize · +14 −3</span>
+        </div>
+        <div class="agents">
+          <div class="arow"><span class="st need"></span><span class="cmd">/troubleshoot</span>
+            <span class="doing">Wants: rm data/cache/*.pkl</span>
+            <span class="tag need">needs you</span></div>
+        </div>
+        <div class="cfoot">
+          <div class="next">Next: <b>Fix Sharpe ratio regression</b></div>
+          <div class="go">open →</div>
+        </div>
+      </article>
+
+      <!-- papersummary-api -->
+      <article class="card">
+        <div class="ctop">
+          <div>
+            <div class="cname">papersummary-api</div>
+            <div class="cpath">~/Programming/papersummary-api</div>
+          </div>
+          <div class="badge">todoist</div>
+        </div>
+        <div class="meta">
+          <span class="chip"><span class="sw" style="background:#e0533d"></span>Todoist</span>
+          <span class="chip">⎇ GitHub</span>
+          <span class="chip git dirty">fix/rate-limit · +52 −8</span>
+        </div>
+        <div class="agents">
+          <div class="arow"><span class="st run"></span><span class="cmd">/story #42</span>
+            <span class="doing">Running pytest tests/integration</span>
+            <span class="tag run">run</span></div>
+        </div>
+        <div class="cfoot">
+          <div class="next">Next: <b>Rate-limit 429s on /summarize</b></div>
+          <div class="go">open →</div>
+        </div>
+      </article>
+
+      <!-- landing-site -->
+      <article class="card">
+        <div class="ctop">
+          <div>
+            <div class="cname">landing-site</div>
+            <div class="cpath">~/Programming/landing-site</div>
+          </div>
+          <div class="badge">local</div>
+        </div>
+        <div class="meta">
+          <span class="chip"><span class="sw" style="background:#6b7280"></span>Local</span>
+          <span class="chip">⎇ GitHub</span>
+          <span class="chip git">main · clean</span>
+        </div>
+        <div class="agents">
+          <div class="noagents">no agents running</div>
+        </div>
+        <div class="cfoot">
+          <div class="next">Next: <b>Dark mode for landing site</b></div>
+          <div class="go">open →</div>
+        </div>
+      </article>
+
+    </section>
+  </main>
+</div>
+</body>
+</html>

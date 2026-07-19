@@ -1,0 +1,223 @@
+<!doctype html>
+<!--
+  Candidate B — Agent Fleet View
+  Home screen = every live agent SESSION across all projects, as the atom.
+  Organized into attention lanes: Needs you / Running / Idle. Projects are a
+  grouping/filter, not the headline. Optimizes for the steer/unblock loop —
+  "what needs me right now." Mirrors the SDK message-stream state model
+  (running=messages flowing, idle=last event was result, blocked=canUseTool
+  pending) from the session-driving research.
+  Open this file directly in a browser. Static mock — no server.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Development OS — Agents</title>
+<style>
+  :root{
+    --bg:#0c0d10; --panel:#141519; --panel-2:#191b20; --line:#26282f;
+    --ink:#e7e9ee; --dim:#8b90a0; --faint:#5b6070;
+    --run:#4ade80; --idle:#5b6070; --need:#f5b544; --blocked:#f87171;
+    --accent:#7c9cff; --mono:ui-monospace,"SF Mono",Menlo,monospace;
+    --sans:-apple-system,"Segoe UI",Inter,system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+    font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+  .app{display:grid;grid-template-columns:216px 1fr;min-height:100vh}
+
+  /* shared rail */
+  .rail{background:#0a0b0e;border-right:1px solid var(--line);padding:18px 12px;
+    display:flex;flex-direction:column;gap:4px;position:sticky;top:0;height:100vh}
+  .brand{display:flex;align-items:center;gap:9px;padding:6px 8px 16px}
+  .brand .dot{width:11px;height:11px;border-radius:3px;
+    background:linear-gradient(135deg,var(--accent),#a855f7);box-shadow:0 0 12px #7c9cff66}
+  .brand b{font-size:13.5px;letter-spacing:.2px}
+  .brand span{font-family:var(--mono);font-size:10px;color:var(--faint);display:block}
+  .nav a{display:flex;align-items:center;gap:10px;padding:7px 9px;border-radius:7px;
+    color:var(--dim);font-size:13px;cursor:pointer}
+  .nav a .ic{width:15px;text-align:center;opacity:.85}
+  .nav a:hover{background:#15171c;color:var(--ink)}
+  .nav a.on{background:#181b2b;color:#fff}
+  .nav a.on .ic{color:var(--accent)}
+  .nav .cnt{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--faint)}
+  .nav a.on .cnt{color:var(--need)}
+  .railfoot{margin-top:auto;border-top:1px solid var(--line);padding-top:12px;
+    display:flex;align-items:center;gap:9px;color:var(--dim);font-size:12px}
+  .railfoot .av{width:24px;height:24px;border-radius:50%;background:#2a2d38;
+    display:grid;place-items:center;font-size:11px}
+
+  /* main */
+  .main{padding:26px 30px 60px;max-width:1220px}
+  .head{display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:20px}
+  .head h1{font-size:21px;margin:0;font-weight:650;letter-spacing:-.2px}
+  .head p{margin:3px 0 0;color:var(--dim);font-size:13px}
+  .head .filters{display:flex;gap:6px}
+  .fchip{font-family:var(--mono);font-size:11px;color:var(--dim);background:var(--panel-2);
+    border:1px solid var(--line);padding:5px 10px;border-radius:20px;cursor:pointer}
+  .fchip.on{color:#fff;border-color:#3a3d5a;background:#181b2b}
+
+  .lane{margin-bottom:26px}
+  .lanehd{display:flex;align-items:center;gap:9px;margin-bottom:11px}
+  .lanehd .lbl{font-size:12px;font-weight:600;letter-spacing:.06em;text-transform:uppercase}
+  .lanehd .n{font-family:var(--mono);font-size:11px;color:var(--faint)}
+  .lanehd .bar{flex:1;height:1px;background:var(--line)}
+  .lane.need .lbl{color:var(--need)}
+  .lane.run .lbl{color:var(--run)}
+  .lane.idle .lbl{color:var(--dim)}
+
+  .sess{display:flex;flex-direction:column;gap:9px}
+  .s{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:14px;
+    background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:13px 16px;transition:border-color .15s;cursor:pointer}
+  .s:hover{border-color:#3a3f4d}
+  .s.attn{background:linear-gradient(90deg,#1a140a,#141519 60%);border-color:#4a3a1e}
+  .s.attn:hover{border-color:#6b5124}
+
+  .pulse{width:11px;height:11px;border-radius:50%;flex:none}
+  .pulse.run{background:var(--run);box-shadow:0 0 0 0 #4ade8055;animation:p 1.8s infinite}
+  .pulse.need{background:var(--need);box-shadow:0 0 0 0 #f5b54455;animation:p 1.4s infinite}
+  .pulse.idle{background:var(--idle)}
+  @keyframes p{0%{box-shadow:0 0 0 0 currentColor}70%{box-shadow:0 0 0 7px transparent}100%{box-shadow:0 0 0 0 transparent}}
+
+  .sbody .l1{display:flex;align-items:center;gap:9px}
+  .cmd{font-family:var(--mono);font-size:13px;color:#fff;font-weight:500}
+  .proj{font-family:var(--mono);font-size:11px;color:var(--accent)}
+  .proj::before{content:"▸ ";color:var(--faint)}
+  .trk{font-family:var(--mono);font-size:10px;color:var(--dim);border:1px solid var(--line);
+    padding:1px 6px;border-radius:20px}
+  .sbody .l2{color:var(--dim);font-size:12.5px;margin-top:3px;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:560px}
+  .sbody .l2 .k{font-family:var(--mono);color:#c9cdd8}
+
+  .sright{display:flex;align-items:center;gap:14px;justify-content:flex-end}
+  .stat{text-align:right}
+  .stat .t{font-family:var(--mono);font-size:12px;color:var(--ink)}
+  .stat .u{font-family:var(--mono);font-size:10px;color:var(--faint)}
+  .act{font-family:var(--sans);font-size:12px;padding:6px 13px;border-radius:8px;
+    border:1px solid var(--line);background:var(--panel-2);color:var(--ink);cursor:pointer}
+  .act.prime{background:linear-gradient(135deg,#c99327,#e0a83a);border:none;color:#1a1206;font-weight:600}
+  .act.ghost{color:var(--dim)}
+  .act:hover{border-color:#3a3d47}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <aside class="rail">
+    <div class="brand">
+      <div class="dot"></div>
+      <div><b>Development OS</b><span>localhost:4177</span></div>
+    </div>
+    <nav class="nav">
+      <a><span class="ic">▦</span> Projects <span class="cnt">4</span></a>
+      <a class="on"><span class="ic">◈</span> Agents <span class="cnt">1</span></a>
+      <a><span class="ic">✉</span> Inbox <span class="cnt">11</span></a>
+      <a><span class="ic">◷</span> History</a>
+      <a><span class="ic">⚙</span> Settings</a>
+    </nav>
+    <div class="railfoot"><div class="av">A</div> Anudeep</div>
+  </aside>
+
+  <main class="main">
+    <div class="head">
+      <div>
+        <h1>Agent fleet</h1>
+        <p>4 sessions across 3 projects · 1 waiting on you</p>
+      </div>
+      <div class="filters">
+        <span class="fchip on">all projects</span>
+        <span class="fchip">running</span>
+        <span class="fchip">blocked</span>
+      </div>
+    </div>
+
+    <!-- NEEDS YOU -->
+    <section class="lane need">
+      <div class="lanehd"><span class="lbl">Needs you</span><span class="n">1</span><span class="bar"></span></div>
+      <div class="sess">
+        <div class="s attn">
+          <div class="pulse need"></div>
+          <div class="sbody">
+            <div class="l1">
+              <span class="cmd">/troubleshoot</span>
+              <span class="proj">quant-backtester</span>
+              <span class="trk">github</span>
+            </div>
+            <div class="l2">Permission request — wants to run <span class="k">rm data/cache/*.pkl</span> to reset the fixture cache</div>
+          </div>
+          <div class="sright">
+            <div class="stat"><div class="t">2m 40s</div><div class="u">blocked</div></div>
+            <button class="act ghost">Deny</button>
+            <button class="act prime">Allow →</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- RUNNING -->
+    <section class="lane run">
+      <div class="lanehd"><span class="lbl">Running</span><span class="n">2</span><span class="bar"></span></div>
+      <div class="sess">
+        <div class="s">
+          <div class="pulse run"></div>
+          <div class="sbody">
+            <div class="l1">
+              <span class="cmd">/implement</span>
+              <span class="proj">claude-code-harness</span>
+              <span class="trk">todoist</span>
+            </div>
+            <div class="l2">Editing <span class="k">trackers/linear/create-issue.sh</span> · task 3/7 · “Add Linear tracker adapter”</div>
+          </div>
+          <div class="sright">
+            <div class="stat"><div class="t">14.2k tok</div><div class="u">$0.21 · 6m</div></div>
+            <button class="act">Open</button>
+            <button class="act">Interrupt</button>
+          </div>
+        </div>
+        <div class="s">
+          <div class="pulse run"></div>
+          <div class="sbody">
+            <div class="l1">
+              <span class="cmd">/story #42</span>
+              <span class="proj">papersummary-api</span>
+              <span class="trk">todoist</span>
+            </div>
+            <div class="l2">Running <span class="k">pytest tests/integration</span> · verifying rate-limit fix</div>
+          </div>
+          <div class="sright">
+            <div class="stat"><div class="t">31.8k tok</div><div class="u">$0.47 · 12m</div></div>
+            <button class="act">Open</button>
+            <button class="act">Interrupt</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- IDLE -->
+    <section class="lane idle">
+      <div class="lanehd"><span class="lbl">Idle · turn complete</span><span class="n">1</span><span class="bar"></span></div>
+      <div class="sess">
+        <div class="s">
+          <div class="pulse idle"></div>
+          <div class="sbody">
+            <div class="l1">
+              <span class="cmd">/code-review</span>
+              <span class="proj">claude-code-harness</span>
+              <span class="trk">todoist</span>
+            </div>
+            <div class="l2">Finished — 3 findings (1 high, 2 low). Awaiting your reply to continue.</div>
+          </div>
+          <div class="sright">
+            <div class="stat"><div class="t">done</div><div class="u">idle 4m</div></div>
+            <button class="act">Open</button>
+            <button class="act ghost">Close</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+</body>
+</html>

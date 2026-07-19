@@ -1,0 +1,279 @@
+<!doctype html>
+<!--
+  Candidate C — Unified Tracker Inbox
+  Home screen = one cross-project task list pulled from every project's OWN
+  .claude/trackers/active adapter (github/todoist/local/ado all normalize here).
+  The TASK is the atom; project + agent are attributes of a task. Optimizes for
+  planning + kicking off work — "what should I work on next" — and leans on the
+  tracker-adapter layer that is this harness's differentiator.
+  Grouped by priority; each row can spawn an agent inline.
+  Open this file directly in a browser. Static mock — no server.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Development OS — Inbox</title>
+<style>
+  :root{
+    --bg:#0c0d10; --panel:#141519; --panel-2:#191b20; --line:#26282f;
+    --ink:#e7e9ee; --dim:#8b90a0; --faint:#5b6070;
+    --run:#4ade80; --idle:#5b6070; --need:#f5b544; --blocked:#f87171;
+    --p1:#f87171; --p2:#f5b544; --p3:#7c9cff; --p4:#5b6070;
+    --accent:#7c9cff; --mono:ui-monospace,"SF Mono",Menlo,monospace;
+    --sans:-apple-system,"Segoe UI",Inter,system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+    font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+  .app{display:grid;grid-template-columns:216px 1fr;min-height:100vh}
+
+  /* shared rail */
+  .rail{background:#0a0b0e;border-right:1px solid var(--line);padding:18px 12px;
+    display:flex;flex-direction:column;gap:4px;position:sticky;top:0;height:100vh}
+  .brand{display:flex;align-items:center;gap:9px;padding:6px 8px 16px}
+  .brand .dot{width:11px;height:11px;border-radius:3px;
+    background:linear-gradient(135deg,var(--accent),#a855f7);box-shadow:0 0 12px #7c9cff66}
+  .brand b{font-size:13.5px;letter-spacing:.2px}
+  .brand span{font-family:var(--mono);font-size:10px;color:var(--faint);display:block}
+  .nav a{display:flex;align-items:center;gap:10px;padding:7px 9px;border-radius:7px;
+    color:var(--dim);font-size:13px;cursor:pointer}
+  .nav a .ic{width:15px;text-align:center;opacity:.85}
+  .nav a:hover{background:#15171c;color:var(--ink)}
+  .nav a.on{background:#181b2b;color:#fff}
+  .nav a.on .ic{color:var(--accent)}
+  .nav .cnt{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--faint)}
+  .nav a.on .cnt{color:var(--accent)}
+  .railfoot{margin-top:auto;border-top:1px solid var(--line);padding-top:12px;
+    display:flex;align-items:center;gap:9px;color:var(--dim);font-size:12px}
+  .railfoot .av{width:24px;height:24px;border-radius:50%;background:#2a2d38;
+    display:grid;place-items:center;font-size:11px}
+
+  /* main */
+  .main{padding:26px 30px 60px;max-width:1080px}
+  .head{display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:18px}
+  .head h1{font-size:21px;margin:0;font-weight:650;letter-spacing:-.2px}
+  .head p{margin:3px 0 0;color:var(--dim);font-size:13px}
+  .head .r{display:flex;gap:6px}
+  .seg{display:flex;background:var(--panel-2);border:1px solid var(--line);border-radius:9px;overflow:hidden}
+  .seg span{font-size:12px;padding:6px 12px;color:var(--dim);cursor:pointer}
+  .seg span.on{background:#181b2b;color:#fff}
+
+  .srcbar{display:flex;align-items:center;gap:8px;margin-bottom:22px;flex-wrap:wrap}
+  .src{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px;
+    color:var(--dim);background:var(--panel);border:1px solid var(--line);padding:4px 10px;border-radius:20px}
+  .src .sw{width:7px;height:7px;border-radius:50%}
+  .srcbar .note{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--faint)}
+
+  .group{margin-bottom:20px}
+  .ghd{display:flex;align-items:center;gap:9px;margin-bottom:9px}
+  .pflag{font-family:var(--mono);font-size:10px;font-weight:700;padding:2px 8px;border-radius:5px}
+  .pflag.p1{background:#2c1414;color:var(--p1)}
+  .pflag.p2{background:#2c2411;color:var(--p2)}
+  .pflag.p3{background:#151b2e;color:var(--p3)}
+  .ghd .n{font-family:var(--mono);font-size:11px;color:var(--faint)}
+  .ghd .bar{flex:1;height:1px;background:var(--line)}
+
+  .list{display:flex;flex-direction:column;gap:6px}
+  .t{display:grid;grid-template-columns:22px 1fr auto;align-items:center;gap:13px;
+    background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    padding:11px 15px;transition:border-color .15s;cursor:pointer}
+  .t:hover{border-color:#3a3f4d}
+  .t:hover .spawn{opacity:1}
+  .ck{width:17px;height:17px;border-radius:5px;border:1.5px solid #3a3d47}
+  .t.doing .ck{border-color:var(--run);background:
+    radial-gradient(circle,var(--run) 0 4px,transparent 5px)}
+
+  .tbody .title{font-size:13.5px;color:var(--ink)}
+  .tbody .doing-tag{font-family:var(--mono);font-size:10px;color:var(--run);
+    background:#12241a;padding:1px 7px;border-radius:20px;margin-left:8px}
+  .tmeta{display:flex;align-items:center;gap:9px;margin-top:4px}
+  .proj{font-family:var(--mono);font-size:10.5px;color:var(--accent)}
+  .proj::before{content:"▸ ";color:var(--faint)}
+  .trk{display:inline-flex;align-items:center;gap:5px;font-family:var(--mono);font-size:10px;color:var(--dim)}
+  .trk .sw{width:6px;height:6px;border-radius:50%}
+  .tid{font-family:var(--mono);font-size:10px;color:var(--faint)}
+
+  .tright{display:flex;align-items:center;gap:10px;justify-content:flex-end}
+  .who{font-family:var(--mono);font-size:10.5px;color:var(--dim)}
+  .who.agent{color:var(--run)}
+  .spawn{font-family:var(--sans);font-size:11.5px;padding:5px 11px;border-radius:7px;
+    border:1px solid var(--line);background:var(--panel-2);color:var(--ink);cursor:pointer;
+    opacity:0;transition:opacity .15s}
+  .spawn:hover{border-color:#3a3d5a}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <aside class="rail">
+    <div class="brand">
+      <div class="dot"></div>
+      <div><b>Development OS</b><span>localhost:4177</span></div>
+    </div>
+    <nav class="nav">
+      <a><span class="ic">▦</span> Projects <span class="cnt">4</span></a>
+      <a><span class="ic">◈</span> Agents <span class="cnt">4</span></a>
+      <a class="on"><span class="ic">✉</span> Inbox <span class="cnt">11</span></a>
+      <a><span class="ic">◷</span> History</a>
+      <a><span class="ic">⚙</span> Settings</a>
+    </nav>
+    <div class="railfoot"><div class="av">A</div> Anudeep</div>
+  </aside>
+
+  <main class="main">
+    <div class="head">
+      <div>
+        <h1>Inbox</h1>
+        <p>11 open tasks across 4 projects · 3 in progress</p>
+      </div>
+      <div class="r">
+        <div class="seg"><span class="on">Priority</span><span>By project</span><span>Board</span></div>
+      </div>
+    </div>
+
+    <div class="srcbar">
+      <span class="src"><span class="sw" style="background:#e0533d"></span>Todoist · 2 projects</span>
+      <span class="src"><span class="sw" style="background:#8b949e"></span>GitHub · 1 project</span>
+      <span class="src"><span class="sw" style="background:#6b7280"></span>Local · 1 project</span>
+      <span class="note">unified via each project's trackers/active adapter</span>
+    </div>
+
+    <!-- P1 -->
+    <section class="group">
+      <div class="ghd"><span class="pflag p1">P1</span><span class="n">2</span><span class="bar"></span></div>
+      <div class="list">
+        <div class="t doing">
+          <div class="ck"></div>
+          <div class="tbody">
+            <div class="title">Fix Sharpe ratio regression<span class="doing-tag">/troubleshoot · blocked</span></div>
+            <div class="tmeta">
+              <span class="proj">quant-backtester</span>
+              <span class="trk"><span class="sw" style="background:#8b949e"></span>GitHub #212</span>
+            </div>
+          </div>
+          <div class="tright"><span class="who agent">◈ agent · needs you</span>
+            <button class="spawn">Open →</button></div>
+        </div>
+        <div class="t doing">
+          <div class="ck"></div>
+          <div class="tbody">
+            <div class="title">Add Linear tracker adapter<span class="doing-tag">/implement · running</span></div>
+            <div class="tmeta">
+              <span class="proj">claude-code-harness</span>
+              <span class="trk"><span class="sw" style="background:#e0533d"></span>Todoist</span>
+              <span class="tid">6gx8vQrP</span>
+            </div>
+          </div>
+          <div class="tright"><span class="who agent">◈ agent · task 3/7</span>
+            <button class="spawn">Open →</button></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- P2 -->
+    <section class="group">
+      <div class="ghd"><span class="pflag p2">P2</span><span class="n">4</span><span class="bar"></span></div>
+      <div class="list">
+        <div class="t doing">
+          <div class="ck"></div>
+          <div class="tbody">
+            <div class="title">Rate-limit 429s on /summarize<span class="doing-tag">/story #42 · running</span></div>
+            <div class="tmeta">
+              <span class="proj">papersummary-api</span>
+              <span class="trk"><span class="sw" style="background:#e0533d"></span>Todoist</span>
+            </div>
+          </div>
+          <div class="tright"><span class="who agent">◈ agent · testing</span>
+            <button class="spawn">Open →</button></div>
+        </div>
+        <div class="t">
+          <div class="ck"></div>
+          <div class="tbody">
+            <div class="title">Pin dev dependency versions in package.json</div>
+            <div class="tmeta">
+              <span class="proj">claude-code-harness</span>
+              <span class="trk"><span class="sw" style="background:#e0533d"></span>Todoist</span>
+              <span class="tid">6gx8vRW2</span>
+            </div>
+          </div>
+          <div class="tright"><span class="who">unassigned</span>
+            <button class="spawn">⚡ Spawn agent</button></div>
+        </div>
+        <div class="t">
+          <div class="ck"></div>
+          <div class="tbody">
+            <div class="title">Add c8 coverage report to CI output</div>
+            <div class="tmeta">
+              <span class="proj">claude-code-harness</span>
+              <span class="trk"><span class="sw" style="background:#e0533d"></span>Todoist</span>
+              <span class="tid">6gx8vRx5</span>
+            </div>
+          </div>
+          <div class="tright"><span class="who">unassigned</span>
+            <button class="spawn">⚡ Spawn agent</button></div>
+        </div>
+        <div class="t">
+          <div class="ck"></div>
+          <div class="tbody">
+            <div class="title">Add GitHub Actions CI to run npm test on PRs</div>
+            <div class="tmeta">
+              <span class="proj">claude-code-harness</span>
+              <span class="trk"><span class="sw" style="background:#e0533d"></span>Todoist</span>
+              <span class="tid">6gx8vQXV</span>
+            </div>
+          </div>
+          <div class="tright"><span class="who">unassigned</span>
+            <button class="spawn">⚡ Spawn agent</button></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- P3 -->
+    <section class="group">
+      <div class="ghd"><span class="pflag p3">P3</span><span class="n">3</span><span class="bar"></span></div>
+      <div class="list">
+        <div class="t">
+          <div class="ck"></div>
+          <div class="tbody">
+            <div class="title">Dark mode for landing site</div>
+            <div class="tmeta">
+              <span class="proj">landing-site</span>
+              <span class="trk"><span class="sw" style="background:#6b7280"></span>Local</span>
+            </div>
+          </div>
+          <div class="tright"><span class="who">unassigned</span>
+            <button class="spawn">⚡ Spawn agent</button></div>
+        </div>
+        <div class="t">
+          <div class="ck"></div>
+          <div class="tbody">
+            <div class="title">Add blank agent.template.md for contributors</div>
+            <div class="tmeta">
+              <span class="proj">claude-code-harness</span>
+              <span class="trk"><span class="sw" style="background:#e0533d"></span>Todoist</span>
+              <span class="tid">6gx8vRJ7</span>
+            </div>
+          </div>
+          <div class="tright"><span class="who">unassigned</span>
+            <button class="spawn">⚡ Spawn agent</button></div>
+        </div>
+        <div class="t">
+          <div class="ck"></div>
+          <div class="tbody">
+            <div class="title">Add E2E workflow test: issue to merged PR</div>
+            <div class="tmeta">
+              <span class="proj">claude-code-harness</span>
+              <span class="trk"><span class="sw" style="background:#e0533d"></span>Todoist</span>
+              <span class="tid">6gx8vR5J</span>
+            </div>
+          </div>
+          <div class="tright"><span class="who">unassigned</span>
+            <button class="spawn">⚡ Spawn agent</button></div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+</body>
+</html>

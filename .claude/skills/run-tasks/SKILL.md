@@ -1,0 +1,218 @@
+---
+name: run-tasks
+description: Execute XML tasks from the story plan wave by wave (Phase 3 only — no understand, no plan, no PR). Use when resuming a story that already has a task plan. Usage: /run-tasks <story-id> [--auto]
+argument-hint: Story ID e.g. 9950
+---
+
+**Core Philosophy:** Execute only — read the XML plan from the story's `plan.md` and run each wave; planning and PR are /story's job.
+
+**Triggers:** "run tasks for #9950", "execute the task plan", "continue execution", "pick up from Phase 3", "resume wave execution"
+
+---
+
+Parse `$ARGUMENTS`:
+1. **Extract flags:** strip `--auto` if present. `--auto` → auto-run all waves without pausing between them (still stops on failure).
+2. **Story ID:** the remaining argument after stripping flags.
+
+You run the pending XML tasks for story **#[story ID]** from `tasks/stories/[story ID]/plan.md`. No planning, no PR — just execution.
+
+---
+
+## Step 1 — Find the task plan
+
+Read `/Users/anudeepsharma/Programming/DevOS\tasks\stories\$ARGUMENTS\plan.md` — the always-local story plan that `/story` and `/implement` write. It is the source of truth for the task plan in **every** tracker mode; `todo.md` is only a generated dashboard and never holds the XML plan.
+
+Search for a `<tasks story="$ARGUMENTS">` block. Extract all `<task>` elements from it. Skip any task already marked `✅`.
+
+If no `<tasks>` block exists for this story, stop immediately and say:
+
+> No XML task plan found in tasks/stories/$ARGUMENTS/plan.md for #$ARGUMENTS. Run `/story $ARGUMENTS` first to generate one.
+
+---
+
+## Step 2 — Check git state + goal
+
+Run:
+```bash
+cd /Users/anudeepsharma/Programming/DevOS && git status && git branch --show-current
+```
+
+Confirm you are on the correct feature branch for story #$ARGUMENTS. If you are on `master`, say so and ask Anudeep to confirm the branch before continuing.
+
+**Goal check:** Read `tasks/stories/$ARGUMENTS/test-strategy.md` (or `tasks/stories/$ARGUMENTS/plan.md` if no test-strategy exists). Look for a defined e2e gate / acceptance criteria / goal definition.
+
+- If a goal exists: display it as a one-liner — "Goal: [modality] — [concrete gate]" — so Anudeep can confirm it's still correct before execution begins.
+- If NO goal is defined: warn before proceeding:
+
+  > "No goal definition found for #$ARGUMENTS. Without a goal, there's no e2e gate to run after execution — 'done' will mean 'tasks passed' rather than 'goal met.' Options:
+  > (A) Define the goal now (I'll run Phase 1.5 — quick goal definition interview)
+  > (B) Proceed without a goal gate — tasks only"
+
+  If Anudeep picks (A), run Phase 1.5 from `/story` (the goal definition step: modality menu → machine oracle → acceptance criteria as gate → observability). Write the result to `tasks/stories/$ARGUMENTS/test-strategy.md`. Then continue to Step 3.
+
+  If Anudeep picks (B), proceed — but skip any e2e gate at the end (Step 5 runs local tests only, no goal gate).
+
+---
+
+## Step 3 — Group tasks into waves
+
+Parse the `parallel_group` attribute on each `<task>`. Group tasks by their `parallel_group` value. Waves execute in ascending group order.
+
+If any task is missing a `parallel_group` attribute, treat it as its own group (sequential, one task per wave) and note this in your output.
+
+Build a wave summary table and show it before starting execution:
+
+| Wave | Task IDs | Task Names | Type |
+|---|---|---|---|
+| 1 | 1, 2 | "Add QueryFilters record", "Update ConversationManager" | auto, auto |
+| 2 | 3 | "Update RagQueryService" | auto |
+| 3 | 4 | "Update DependencyInjection.cs" | auto |
+| 4 | 5 | "Deploy to Azure" | manual |
+
+If `--auto` was passed, use mode B. If there is only 1 wave, use mode A. In both cases, skip the mode question and say **"[N] wave(s) planned. Starting Wave 1."**
+
+Otherwise (2+ waves, no `--auto`), ask Anudeep:
+
+---
+**[N] waves planned. Choose execution mode:**
+- **(A) Wave-by-wave** — I'll pause after each wave for your approval before continuing (default)
+- **(B) Auto-run** — I'll run all waves back-to-back and pause only at the end (or on failure)
+
+*(Say "A" or "B", or just "go" for wave-by-wave. Tip: use `--auto` flag to skip this question next time.)*
+
+---
+
+Do NOT start execution until Anudeep responds.
+
+---
+
+## Step 4 — Execute wave by wave
+
+**Seed the live progress checklist first.** Before launching Wave 1, create a `TodoWrite` list with
+one item per pending `<task>` (across all waves), using the task names from the plan. This gives
+Anudeep live visibility and locks in the work order before any code changes. Mark the first wave's
+task(s) `in_progress` as you launch them. The story plan (`tasks/stories/$ARGUMENTS/plan.md`) stays the
+source of truth — the `TodoWrite` list is its in-session mirror. See `rules/progress-tracking.md`.
+
+For **each wave**, in ascending group order:
+
+### A. Announce the wave
+
+Say: **"Wave [n]/[total] — launching [k] task(s) in parallel: [task names]"**
+
+### B. Launch all tasks in the wave
+
+For **each task** in the wave:
+
+- If `type="auto"` or `type="test"`: spawn a `story-executor-agent` as a **background agent** with `isolation: "worktree"`, passing:
+  - The single `<task>` XML block
+  - Story ID: $ARGUMENTS
+
+  A `type="test"` task is mechanically identical to `auto` — the executor writes the test/eval and runs its `<verify>`. No special handling.
+
+- If `type="manual"`: do NOT spawn an agent. Instead, display the full `<action>` content as instructions for Anudeep to follow, then treat it as BLOCKED pending human confirmation.
+
+Launch ALL auto/test tasks in the wave simultaneously (one Agent call per task, all in the same message). Do not wait for one before launching the next.
+
+### C. Wait for all background agents to complete
+
+Do not output anything while waiting. The platform will notify you as each agent finishes. Collect all results before proceeding.
+
+### D. Show the consolidated wave result
+
+Display a result table:
+
+| Task | Name | Result | Summary |
+|---|---|---|---|
+| 1 | "Add QueryFilters record" | ✅ PASS | Created QueryFilters record, updated QueryRequest |
+| 2 | "Update ConversationManager" | ✅ PASS | Replaced LastEmployer/LastPlanYear with LastFilters |
+| 3 | "Update RagQueryService" | ❌ FAIL | Build error: CS0246 type not found |
+
+For any BLOCKED task, show:
+
+| 4 | "Deploy to cloud" | ⚠️ BLOCKED | Anudeep — must upgrade search tier |
+
+### E. Mark PASSed tasks done in the plan
+
+For each task that returned PASS: mark it done in `tasks/stories/$ARGUMENTS/plan.md` by prepending `✅` to its `<task>` name line. Do all updates in one Edit pass — not one per task. **In the same pass, mark each PASSed task `completed` in the `TodoWrite` list, and mark the next wave's task(s) `in_progress`.** A FAILed or BLOCKED task stays `in_progress` until resolved. Never hand-edit `tasks/todo.md` — it is a generated dashboard (D9), not the task plan.
+
+### F. STOP after every wave (behavior depends on execution mode):
+
+**If mode A (wave-by-wave)** — say exactly:
+
+---
+**STOP — Wave [n] complete: [k passed] ✅ [j failed] ❌ [m blocked] ⚠️**
+
+[If any FAIL]: Task [id] failed — "[error summary]". Try a different approach? (Say "retry" to re-run that task, or "debug" to invoke /debug.)
+[If any BLOCKED]: Task [id] blocked — "[what is needed from whom]". Resolve this externally, then say "continue".
+[If all passed]: All [k] tasks in Wave [n] passed.
+
+*Continue to Wave [n+1]: "[wave n+1 task names]"? (Say "yes" to continue, or "stop" to pause.)*
+
+---
+
+Do NOT start the next wave until Anudeep says "yes" (or "retry" / "continue" for failures/blockers).
+
+**If mode B (auto-run):**
+- Show the wave result table (step D) so Anudeep can see progress in real-time.
+- **If all tasks passed**: say "Wave [n] ✅ — continuing to Wave [n+1]..." and proceed immediately. Do NOT wait for confirmation.
+- **If any task FAILED or BLOCKED**: STOP and show the full STOP message above — auto-run pauses on failure. Anudeep must respond before continuing.
+- After the **final wave** (all waves done, all passed), show the full summary and proceed to Step 5.
+
+### G. On failure — 3-attempt rule (per task, not per wave)
+
+Track failure attempts per task ID independently.
+
+- Attempt 1 failed: include the full error in the retry agent prompt. Spawn fresh background worktree agent for that task only. Re-run the rest of the wave's passing tasks are NOT re-run.
+- Attempt 2 failed: spawn again with both previous errors included.
+- Attempt 3 failed: **STOP. Say "3-attempt rule triggered on task [id]. Invoking /debug."** Then invoke `/debug`. Do NOT attempt a 4th time.
+
+A wave is not complete until all its tasks have either PASSed or been escalated (to /debug or manual resolution). Do not advance to the next wave with an unresolved failure.
+
+---
+
+## Step 5 — Local verification
+
+After all waves pass, run `/local-test 2` to verify the full build, all tests, and end-to-end smoke test pass with the changes.
+
+If `/local-test` fails:
+- Show the failure to Anudeep
+- Do NOT proceed to commit — fix the issue first
+- If Docker is not available, fall back to `/local-test 1` (build + unit tests only) and note that integration testing was skipped
+
+If `/local-test` passes, proceed to Step 6.
+
+---
+
+## Step 6 — Goal gate (if goal was defined)
+
+If a goal was defined in Step 2 (or the user defined one via option A), run the e2e gate now:
+
+- **Automated modality** (API/integration test, UI automation, graded eval): run it via `/local-test e2e`.
+- **Structured human acceptance** (no machine oracle): show the ACTUAL behavior using the story's observability plan, then ask Anudeep to sign off against each acceptance criterion.
+
+**If the gate is green (or Anudeep accepts):** proceed to Step 7.
+
+**If the gate FAILS:** do NOT blind-retry. Observe the actual state → compare intended vs implemented vs observed → root-cause → fix → re-run. The 3-attempt rule applies to the gate too. Three evidence-based re-approaches without a green gate → invoke `/debug`.
+
+If no goal was defined (user chose option B in Step 2), skip this step.
+
+---
+
+## Step 7 — When all waves are done
+
+Say:
+
+> All [N] tasks across [W] waves for #$ARGUMENTS are complete. Local tests passed. [If goal gate ran: "Goal gate green."] Run `/story $ARGUMENTS` Phase 4 to commit and raise the PR, or handle git manually using the steps in `tasks/lessons.md`.
+
+---
+
+## Hard rules
+
+- Never commit anything — that is Phase 4's job
+- In mode A, never skip a STOP checkpoint between waves. In mode B, always stop on failure/blocked — never auto-continue past errors
+- Never start Wave N+1 while Wave N has an unresolved FAIL or BLOCKED
+- If Anudeep says "stop" at any point — stop immediately, show which tasks are ✅ done and which are pending, and which wave you were on
+- 3 failures on any single task → invoke `/debug`, never attempt a 4th time
+- Manual tasks are never spawned as agents — always displayed as human instructions
+- A task is only ✅ when its `<verify>` command passes — verify commands MUST include running relevant tests
