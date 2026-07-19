@@ -6,22 +6,22 @@ Running log of decisions, conventions, known fixes, and things to remember. Clau
 
 ## Code Conventions
 
-> Define your project's coding style here. Agents read this section to follow your patterns.
-> Below is an example — replace with your own conventions.
+**Language:** TypeScript (Node LTS >= 20). Monorepo via **npm workspaces** — `server/` (Node/`ws`, built with `tsc`, run with `tsx` in dev) and `web/` (React + Vite + Tailwind v3 + shadcn/ui).
 
-**Language:** [your language — e.g. TypeScript, Python, Go, C#]
-
-**Build command:** [e.g. `npm run build`, `go build ./...`, `dotnet build`]
-**Test command:** [e.g. `npm test`, `pytest`, `go test ./...`]
-**Lint command:** [e.g. `npm run lint`, `ruff check`, `golangci-lint run`]
+**Build command:** `npm run build`  (→ `web/dist` via Vite, then `server/dist` via `tsc`)
+**Test command:** `npm test`  (Vitest, unit + integration)
+**Lint command:** `npm run lint`  (ESLint 9 flat config — `eslint.config.js`)
 
 **Naming:**
-- [e.g. camelCase for functions, PascalCase for types]
-- [e.g. test files: `*.test.ts` or `*_test.go`]
+- camelCase for functions/variables, PascalCase for types/React components
+- test files: `*.test.ts` / `*.test.tsx` co-located next to source; integration tests under `server/test/integration/`; e2e specs under `e2e/`
 
 **Patterns:**
-- [e.g. use async/await, not callbacks]
-- [e.g. error handling: return errors, don't throw]
+- Immutable: return new objects, never mutate (heartbeat frames + WS client state are fresh each tick — see global coding rules)
+- async/await, not callbacks
+- Validate at boundaries (WS payloads parsed + shape-checked on the client; malformed frames dropped + logged, never thrown into the app)
+- Small focused files (200–400 lines); comprehensive error handling (fail fast with clear messages, e.g. `EADDRINUSE`)
+- TS is strict: `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `verbatimModuleSyntax` (base config in `tsconfig.base.json`, both workspaces extend it)
 
 ---
 
@@ -55,21 +55,32 @@ Options:
 > Fill in every command that applies to your project. Leave others as `<!-- not applicable -->`.
 
 **Level 1 — Build + Unit Tests (no external dependencies):**
-- Build: `<!-- your build command (e.g., npm run build, go build ./..., dotnet build) -->`
-- Unit tests: `<!-- your unit test command (e.g., npm test, pytest tests/unit/, go test ./... -short) -->`
+- Build: `npm run build`  (also: `npm run typecheck` for `tsc -b` across both workspaces)
+- Unit tests: `npm test`  (Vitest run — `server` node project + `web` jsdom project)
 
 **Level 2 — Integration Tests (may require Docker/emulators):**
-- Setup: `<!-- command to start dependencies (e.g., docker compose up -d, or "not applicable") -->`
-- Integration tests: `<!-- your integration test command (e.g., npm run test:integration, pytest tests/integration/) -->`
-- Cleanup: `<!-- command to stop dependencies (e.g., docker compose down) -->`
+- Setup: not applicable — integration tests boot the real server in-process (no Docker/emulators)
+- Integration tests: `npx vitest run server/test/integration`
+- Cleanup: not applicable (in-process; server torn down in `afterAll`)
 
 **Level 3 — Dev Server (for manual testing):**
-- Dev server: `<!-- command to start the app (e.g., npm run dev, go run ./cmd/server/, uvicorn main:app --reload) -->`
-- Dev server URL: `<!-- e.g., http://localhost:3000 -->`
+- Dev server: `npm run dev`  (Vite + `tsx watch` for the server, run concurrently)
+- Dev server URL: `http://127.0.0.1:5173`  (Vite; proxies `/ws` → Node server on `127.0.0.1:8787`)
+- Prod (single process): `npm run build && npm start` → `http://127.0.0.1:8787`  (serves `web/dist` + WS on the same origin)
+- e2e: `npx playwright test`  (drives the prod app; specs control their own server child process)
 
 **Test filtering (for verify commands):**
-- Run a specific test class: `<!-- e.g., npm test -- --grep "ClassName", pytest tests/test_file.py -->`
-- Run a specific test: `<!-- e.g., npm test -- --testNamePattern "test name", pytest tests/test_file.py::test_name -->`
+- Run a specific file: `npx vitest run <path>`  (e.g. `npx vitest run server/src/heartbeat.test.ts`)
+- Run a specific test: `npx vitest run <path> -t "<name>"`
+- e2e: `npx playwright test`  (single spec: `npx playwright test e2e/heartbeat.spec.ts`)
+
+---
+
+## Worktree setup
+
+- **Files to copy into a new worktree:** none yet — no gitignored config files are required to build (no `.env`/secrets in V1).
+- **Restore command (run after creating a worktree):** `npm install`  (npm workspaces — one install resolves both `server/` and `web/`).
+- **Shared automatically (do NOT copy):** `tasks/`, the `.git` history.
 
 ---
 
@@ -91,6 +102,7 @@ Options:
 | 2026-07-18 | V1 stack: Node/TS server, Agent SDK in-process (primary) + `claude -p` (fallback), React+Vite+Tailwind+shadcn/ui, WebSocket, SQLite via better-sqlite3 (raw, no ORM) | Locked in wayfinder ticket G; better-sqlite3 raw chosen — thin-anchor store is ~4 tiny tables, ORM is overkill |
 | 2026-07-18 | PTY/tmux terminal-attach → deferred to post-V1 | Owned sessions run headless (no terminal exists); the UI transcript is the sole view. PTY only mirrors hand-opened foreign terminals — a side-case, not the main workflow (assign→watch→steer→gates→PR, all in-UI) |
 | 2026-07-18 | **[VERIFIED]** Programmatic sessions authenticate via the Claude **subscription** (OAuth), NOT the pay-per-token API | Probed on this Mac with `ANTHROPIC_API_KEY` empty: both Agent SDK `query()` and `claude -p` ran successfully — both inherit the CLI's keychain OAuth login. Operating cost ≈ $0 metered; the real cap is plan **rate limits**, not budget. `total_cost_usd` from the stream is a usage indicator, not a bill. Multi-provider model routing (implies API keys) stays post-V1 per SPEC §9. Boundary: a headless host without the keychain login would need an API key (not a V1 scenario) |
+| 2026-07-19 | Scaffold foundation: monorepo = **npm workspaces** (`server/` + `web/`); WS lib = **`ws`**; server binds **`127.0.0.1:8787`**; test tooling = **Vitest** (unit + integration) + **Playwright** (e2e). Origin-check / local WS token **deferred** to the M1 localhost-security task | server and web have genuinely different toolchains (Vite/React vs `tsc`/`tsx`) → workspaces give one install/lockfile with isolated configs. `ws` is lightweight and exposes the raw HTTP `upgrade` event the deferred security task needs. Loopback-only bind is the core V1 security boundary (ARCHITECTURE §6) |
 | 2026-07-19 | Project-lifecycle level (map `6h6gPPWFfHr5PwG8`, T1–T3) folded into docs — IN V1 | **T1** stage model = harness's New→Decide→Define→Build→Ship(→Learn); sticky high-water badge, `max(precedence)` detection, live-derived. **T2** "Kick off next stage" = launcher only (emergent advance), light gating, project-bound Team room (one component, two bindings). **T3** birth = shell out to harness installer ("New Idea"/"Add Project"), land at New, auto-launch `/wayfinder`. Compiled into ARCHITECTURE.md §9 + SPEC §4/§6/§9. Deferred fog: new-milestone reset, reliable Learn detection |
 
 ---

@@ -1,0 +1,17 @@
+{
+  // No-emit typecheck pass for the web workspace INCLUDING test files (the build
+  // config `tsconfig.json` excludes *.test.ts(x) and src/test). Same compiler
+  // options as the app config so JSX + the `@` alias resolve identically.
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "types": [],
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  },
+  "include": ["src"]
+}
