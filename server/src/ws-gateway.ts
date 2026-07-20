@@ -11,9 +11,19 @@ import type { Server } from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
 import { HEARTBEAT_INTERVAL_MS, WS_PATH } from './config.js';
 import { createHeartbeat, type HeartbeatMessage } from './heartbeat.js';
+import type { Registry } from './registry/registry.js';
+import {
+  MAX_WS_PAYLOAD_BYTES,
+  parseInboundMessage,
+  type OutboundMessage,
+} from './ws-protocol.js';
+
+/** Every frame the gateway is allowed to push over the wire. */
+type ServerFrame = HeartbeatMessage | OutboundMessage;
 
 export interface WsGatewayOptions {
   readonly intervalMs?: number;
+  readonly registry: Registry;
 }
 
 export interface WsGateway {
@@ -21,7 +31,7 @@ export interface WsGateway {
   readonly close: () => Promise<void>;
 }
 
-function sendFrame(socket: WebSocket, message: HeartbeatMessage): void {
+function sendFrame(socket: WebSocket, message: ServerFrame): void {
   if (socket.readyState !== WebSocket.OPEN) return; // guard: never send on a closing/closed socket
   try {
     socket.send(JSON.stringify(message));
@@ -30,11 +40,29 @@ function sendFrame(socket: WebSocket, message: HeartbeatMessage): void {
   }
 }
 
-export function attachWsGateway(server: Server, options?: WsGatewayOptions): WsGateway {
-  const intervalMs = options?.intervalMs ?? HEARTBEAT_INTERVAL_MS;
+export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGateway {
+  const intervalMs = options.intervalMs ?? HEARTBEAT_INTERVAL_MS;
+  const { registry } = options;
 
-  // `ws` handles the HTTP upgrade itself, filtered to WS_PATH.
-  const wss = new WebSocketServer({ server, path: WS_PATH });
+  // `ws` handles the HTTP upgrade itself, filtered to WS_PATH. maxPayload caps the
+  // per-frame size (ws defaults to 100 MiB) so a client can't push huge blobs.
+  const wss = new WebSocketServer({ server, path: WS_PATH, maxPayload: MAX_WS_PAYLOAD_BYTES });
+
+  // Build a fresh registry snapshot and push it to every OPEN client so multiple
+  // browser tabs stay in sync after any mutation. Reading the registry is guarded
+  // — a read failure must never crash the gateway.
+  const broadcastRegistry = (): void => {
+    let snapshot: OutboundMessage;
+    try {
+      snapshot = { type: 'registry', projects: registry.listProjects() };
+    } catch (err) {
+      console.error('[ws] failed to read registry for broadcast', err);
+      return;
+    }
+    for (const client of wss.clients) {
+      sendFrame(client, snapshot);
+    }
+  };
 
   wss.on('connection', (socket: WebSocket) => {
     console.log('[ws] client connected');
@@ -44,6 +72,46 @@ export function attachWsGateway(server: Server, options?: WsGatewayOptions): WsG
       emit: (message) => sendFrame(socket, message),
     });
     heartbeat.start();
+
+    // Send an initial snapshot so a freshly-connected client renders current
+    // state without waiting for a mutation.
+    try {
+      sendFrame(socket, { type: 'registry', projects: registry.listProjects() });
+    } catch (err) {
+      console.error('[ws] failed to send initial registry snapshot', err);
+    }
+
+    socket.on('message', (data) => {
+      // Boundary: validate every inbound frame; malformed input is dropped, never thrown.
+      const message = parseInboundMessage(data.toString());
+      if (message === null) {
+        console.warn('[ws] dropped malformed inbound frame');
+        return;
+      }
+
+      try {
+        if (message.type === 'pin') {
+          registry.pin(message.path, {
+            // Conditional spreads keep optional fields absent (never `undefined`)
+            // so the call satisfies exactOptionalPropertyTypes.
+            ...(message.displayName !== undefined ? { displayName: message.displayName } : {}),
+            ...('uiPrefs' in message ? { uiPrefs: message.uiPrefs } : {}),
+          });
+        } else {
+          registry.unpin(message.path);
+        }
+        broadcastRegistry();
+      } catch (err) {
+        const errMessage = err instanceof Error ? err.message : String(err);
+        console.error(`[ws] registry ${message.type} failed`, err);
+        sendFrame(socket, {
+          type: 'registry:error',
+          op: message.type,
+          path: message.path,
+          message: errMessage,
+        });
+      }
+    });
 
     socket.on('close', () => {
       console.log('[ws] client disconnected');

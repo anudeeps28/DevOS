@@ -29,3 +29,8 @@ coverage/
 playwright-report/
 test-results/
 *.tsbuildinfo
+
+# SQLite thin-anchor store (generated at runtime)
+*.db
+*.db-wal
+*.db-shm

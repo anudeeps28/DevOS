@@ -4,6 +4,7 @@ import {
   createWsClient,
   type ConnectionStatus,
   type Heartbeat,
+  type RegistryProject,
   type WebSocketLike,
 } from '@/lib/ws-client';
 
@@ -20,9 +21,15 @@ class FakeSocket implements WebSocketLike {
   onerror: ((ev: unknown) => void) | null = null;
   onmessage: ((ev: { readonly data: unknown }) => void) | null = null;
   closedByClient = false;
+  sent: string[] = [];
 
   constructor(public readonly url: string) {
     FakeSocket.instances.push(this);
+  }
+
+  /** Record frames the client sends (pin/unpin). */
+  send(data: string): void {
+    this.sent.push(data);
   }
 
   /** Simulate the server accepting the connection. */
@@ -163,5 +170,142 @@ describe('ws-client', () => {
 
     // ...and no status is emitted to already-removed subscribers after close.
     expect(statuses).toEqual(['connecting', 'connected']);
+  });
+});
+
+/** A well-formed registry entry matching the ProjectAnchor contract. */
+function sampleProject(path: string): RegistryProject {
+  return {
+    path,
+    displayName: 'Sample',
+    pinned: true,
+    uiPrefs: { theme: 'dark' },
+    createdAt: 1700000000000,
+  };
+}
+
+function registryFrame(projects: readonly unknown[]): string {
+  return JSON.stringify({ type: 'registry', projects });
+}
+
+describe('ws-client pin/unpin', () => {
+  beforeEach(() => {
+    FakeSocket.instances = [];
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('pin() sends a pin frame once the socket is OPEN', () => {
+    const { client } = makeClient();
+    const socket = FakeSocket.instances[0]!;
+    socket.open();
+
+    client.pin('/abs/path/to/project');
+
+    expect(socket.sent).toEqual([
+      JSON.stringify({ type: 'pin', path: '/abs/path/to/project' }),
+    ]);
+  });
+
+  it('pin() with opts includes displayName and uiPrefs', () => {
+    const { client } = makeClient();
+    const socket = FakeSocket.instances[0]!;
+    socket.open();
+
+    client.pin('/abs/path', { displayName: 'My Project', uiPrefs: { theme: 'dark' } });
+
+    expect(socket.sent).toHaveLength(1);
+    expect(JSON.parse(socket.sent[0]!)).toEqual({
+      type: 'pin',
+      path: '/abs/path',
+      displayName: 'My Project',
+      uiPrefs: { theme: 'dark' },
+    });
+  });
+
+  it('unpin() sends an unpin frame once the socket is OPEN', () => {
+    const { client } = makeClient();
+    const socket = FakeSocket.instances[0]!;
+    socket.open();
+
+    client.unpin('/abs/path/to/project');
+
+    expect(socket.sent).toEqual([
+      JSON.stringify({ type: 'unpin', path: '/abs/path/to/project' }),
+    ]);
+  });
+
+  it('drops (and warns) when pin() is called before the socket is OPEN', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { client } = makeClient();
+    const socket = FakeSocket.instances[0]!;
+    // NOTE: socket is still CONNECTING (readyState 0) — never opened.
+
+    client.pin('/abs/path');
+    client.unpin('/abs/path');
+
+    expect(socket.sent).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('ws-client registry frames', () => {
+  beforeEach(() => {
+    FakeSocket.instances = [];
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function makeRegistryClient() {
+    const received: (readonly RegistryProject[])[] = [];
+    const client = createWsClient({
+      url: 'ws://localhost/ws',
+      createWebSocket: (url) => new FakeSocket(url),
+    });
+    const off = client.onRegistry((projects) => received.push(projects));
+    const socket = FakeSocket.instances[0]!;
+    socket.open();
+    return { client, received, off, socket };
+  }
+
+  it('delivers a valid registry frame as a frozen projects array', () => {
+    const { received, socket } = makeRegistryClient();
+    const project = sampleProject('/abs/one');
+
+    socket.message(registryFrame([project]));
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toEqual([project]);
+    expect(Object.isFrozen(received[0])).toBe(true);
+    expect(Object.isFrozen(received[0]![0])).toBe(true);
+  });
+
+  it('stops delivery after the returned unsubscribe is called', () => {
+    const { received, off, socket } = makeRegistryClient();
+
+    socket.message(registryFrame([sampleProject('/abs/one')]));
+    expect(received).toHaveLength(1);
+
+    off();
+    socket.message(registryFrame([sampleProject('/abs/two')]));
+    expect(received).toHaveLength(1); // no further delivery
+  });
+
+  it('drops malformed registry frames without emitting to listeners', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { received, socket } = makeRegistryClient();
+
+    socket.message(42); // non-string data
+    socket.message('{ not json'); // bad JSON
+    socket.message(JSON.stringify({ type: 'registry' })); // missing projects
+    socket.message(JSON.stringify({ type: 'not-registry', projects: [] })); // wrong type
+    socket.message(registryFrame([{ path: 123 }])); // malformed entry
+
+    expect(received).toEqual([]);
+    expect(warn).toHaveBeenCalled();
   });
 });

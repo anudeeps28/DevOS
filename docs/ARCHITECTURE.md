@@ -161,6 +161,8 @@ anchors + history. Everything real is read live every render and discarded — n
 | `cost_ledger(id PK, session_id FK, input_tokens, output_tokens, cost_usd, at)` | Per-session usage figures | The "cost today" / usage indicator |
 | `ui_state(key PK, value_json)` | Layouts, tab state, last-open | Remember the workspace |
 
+**DB file location.** The SQLite file lives in the OS app-data directory — `~/Library/Application Support/DevOS/devos.db` (macOS), `$XDG_DATA_HOME/DevOS/devos.db` or `~/.local/share/DevOS/devos.db` (Linux), `%APPDATA%\DevOS\devos.db` (Windows) — created on first run. Override the full path with the `DEVOS_DB_PATH` env var (used by tests to point at a throwaway file, and for backup/relocation). The file is gitignored (`*.db`, `*.db-wal`, `*.db-shm`).
+
 ### Never stored — derived fresh every read
 
 - Git state (branch / dirty / ahead-behind) — Git State Reader

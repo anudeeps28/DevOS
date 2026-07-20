@@ -65,7 +65,9 @@ function collectHeartbeats(url: string, count: number, timeoutMs: number): Promi
         return;
       }
       if (!isHeartbeatFrame(parsed)) {
-        finish(new Error(`Received a malformed frame: ${JSON.stringify(parsed)}`));
+        // Other frame types (e.g. the registry snapshot the gateway pushes on
+        // connect) legitimately coexist with heartbeats on the same socket —
+        // skip them rather than treating them as malformed.
         return;
       }
       // Immutable accumulate — snapshot then decide.

@@ -79,7 +79,21 @@ export interface ServerHarness {
   readonly getLogs: () => readonly string[];
 }
 
-export function createServerHarness(fixedPort?: number): ServerHarness {
+/** Optional configuration for a server harness. All fields are optional. */
+export interface ServerHarnessOptions {
+  /** Pin the child to a specific port instead of picking a free one. */
+  readonly fixedPort?: number;
+  /**
+   * Extra env vars merged into the spawned child's environment (after the
+   * harness defaults, so these win). Used e.g. to inject DEVOS_DB_PATH so a spec
+   * writes to a throwaway tmp DB instead of the real app-data database.
+   */
+  readonly extraEnv?: Readonly<Record<string, string>>;
+}
+
+export function createServerHarness(options?: ServerHarnessOptions): ServerHarness {
+  const fixedPort = options?.fixedPort;
+  const extraEnv = options?.extraEnv;
   let child: ChildProcess | null = null;
   let logs: string[] = [];
   // Chosen once on first start() and reused across restarts: the reconnect test
@@ -99,6 +113,8 @@ export function createServerHarness(fixedPort?: number): ServerHarness {
         NODE_ENV: 'production',
         HOST: HARNESS_HOST,
         PORT: String(port),
+        // Spec-supplied overrides win last (e.g. DEVOS_DB_PATH → tmp DB).
+        ...extraEnv,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
