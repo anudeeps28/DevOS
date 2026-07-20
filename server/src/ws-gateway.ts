@@ -10,6 +10,7 @@
 import type { Server } from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
 import { HEARTBEAT_INTERVAL_MS, WS_PATH } from './config.js';
+import { scanCandidates } from './discovery/scanner.js';
 import { createHeartbeat, type HeartbeatMessage } from './heartbeat.js';
 import type { Registry } from './registry/registry.js';
 import {
@@ -21,9 +22,16 @@ import {
 /** Every frame the gateway is allowed to push over the wire. */
 type ServerFrame = HeartbeatMessage | OutboundMessage;
 
+// Minimum interval between two `discover` scans on the SAME socket. Discovery is
+// filesystem I/O and the client auto-discovers on every (re)connect, so a flapping
+// connection or a spammed frame would otherwise re-scan repeatedly. Repeats inside
+// this window are dropped (the client already has, or is about to get, a snapshot).
+const DISCOVER_MIN_INTERVAL_MS = 500;
+
 export interface WsGatewayOptions {
   readonly intervalMs?: number;
   readonly registry: Registry;
+  readonly projectRoots: readonly string[];
 }
 
 export interface WsGateway {
@@ -67,6 +75,9 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
   wss.on('connection', (socket: WebSocket) => {
     console.log('[ws] client connected');
 
+    // Per-socket throttle for `discover` — see DISCOVER_MIN_INTERVAL_MS.
+    let lastDiscoverAt = 0;
+
     const heartbeat = createHeartbeat({
       intervalMs,
       emit: (message) => sendFrame(socket, message),
@@ -81,11 +92,31 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
       console.error('[ws] failed to send initial registry snapshot', err);
     }
 
-    socket.on('message', (data) => {
+    socket.on('message', async (data) => {
       // Boundary: validate every inbound frame; malformed input is dropped, never thrown.
       const message = parseInboundMessage(data.toString());
       if (message === null) {
         console.warn('[ws] dropped malformed inbound frame');
+        return;
+      }
+
+      // Discovery scan: reply to the requesting socket only (never broadcast).
+      // The whole flow is guarded so a scan/read failure never crashes the gateway.
+      if (message.type === 'discover') {
+        // Throttle: drop repeats within the min-interval on this socket.
+        const now = Date.now();
+        if (now - lastDiscoverAt < DISCOVER_MIN_INTERVAL_MS) return;
+        lastDiscoverAt = now;
+
+        try {
+          const pinnedPaths = new Set(registry.listProjects().map((p) => p.path));
+          const candidates = await scanCandidates(options.projectRoots, pinnedPaths);
+          sendFrame(socket, { type: 'candidates', candidates });
+        } catch (err) {
+          console.error('[ws] discovery scan failed', err);
+          // Send an empty snapshot so the client isn't left hanging.
+          sendFrame(socket, { type: 'candidates', candidates: [] });
+        }
         return;
       }
 

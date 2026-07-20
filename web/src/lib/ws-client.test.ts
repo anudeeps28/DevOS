@@ -4,6 +4,7 @@ import {
   createWsClient,
   type ConnectionStatus,
   type Heartbeat,
+  type RegistryCandidate,
   type RegistryProject,
   type WebSocketLike,
 } from '@/lib/ws-client';
@@ -307,5 +308,98 @@ describe('ws-client registry frames', () => {
 
     expect(received).toEqual([]);
     expect(warn).toHaveBeenCalled();
+  });
+});
+
+/** A well-formed candidate entry matching the Candidate contract. */
+function sampleCandidate(path: string): RegistryCandidate {
+  return { path, displayName: 'p', hasClaudeInstall: true };
+}
+
+function candidatesFrame(candidates: readonly unknown[]): string {
+  return JSON.stringify({ type: 'candidates', candidates });
+}
+
+describe('ws-client candidates frames', () => {
+  beforeEach(() => {
+    FakeSocket.instances = [];
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function makeCandidatesClient() {
+    const received: (readonly RegistryCandidate[])[] = [];
+    const client = createWsClient({
+      url: 'ws://localhost/ws',
+      createWebSocket: (url) => new FakeSocket(url),
+    });
+    const off = client.onCandidates((candidates) => received.push(candidates));
+    const socket = FakeSocket.instances[0]!;
+    socket.open();
+    return { client, received, off, socket };
+  }
+
+  it('delivers a valid candidates frame as a frozen candidates array', () => {
+    const { received, socket } = makeCandidatesClient();
+    const candidate = sampleCandidate('/p');
+
+    socket.message(candidatesFrame([candidate]));
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toEqual([candidate]);
+    expect(received[0]![0]).toEqual({
+      path: '/p',
+      displayName: 'p',
+      hasClaudeInstall: true,
+    });
+    expect(Object.isFrozen(received[0])).toBe(true);
+    expect(Object.isFrozen(received[0]![0])).toBe(true);
+  });
+
+  it('drops malformed candidates frames without emitting to listeners', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { received, socket } = makeCandidatesClient();
+
+    // Entry missing hasClaudeInstall.
+    socket.message(candidatesFrame([{ path: '/p', displayName: 'p' }]));
+    // candidates not an array.
+    socket.message(JSON.stringify({ type: 'candidates', candidates: 'nope' }));
+
+    expect(received).toEqual([]);
+    expect(warn).toHaveBeenCalled();
+  });
+});
+
+describe('ws-client discover', () => {
+  beforeEach(() => {
+    FakeSocket.instances = [];
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('discover() sends a discover frame once the socket is OPEN', () => {
+    const { client } = makeClient();
+    const socket = FakeSocket.instances[0]!;
+    socket.open();
+
+    client.discover();
+
+    expect(socket.sent).toEqual([JSON.stringify({ type: 'discover' })]);
+  });
+
+  it('drops (and warns) when discover() is called before the socket is OPEN', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { client } = makeClient();
+    const socket = FakeSocket.instances[0]!;
+    // NOTE: socket is still CONNECTING (readyState 0) — never opened.
+
+    client.discover();
+
+    expect(socket.sent).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
   });
 });

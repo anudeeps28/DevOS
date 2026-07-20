@@ -35,6 +35,17 @@ export interface RegistryProject {
   readonly createdAt: number;
 }
 
+/**
+ * A validated discovery candidate entry. Mirrors the server's Candidate
+ * (server/src/ws-protocol.ts) — duplicated typed contract, no shared package.
+ * Frozen — never mutated after construction.
+ */
+export interface RegistryCandidate {
+  readonly path: string;
+  readonly displayName: string | null;
+  readonly hasClaudeInstall: boolean;
+}
+
 /** The slice of the WebSocket API this client depends on (keeps fakes tiny). */
 export interface WebSocketLike {
   readonly readyState: number;
@@ -71,6 +82,7 @@ export interface WsClientOptions {
 export type StatusListener = (status: ConnectionStatus) => void;
 export type HeartbeatListener = (heartbeat: Heartbeat) => void;
 export type RegistryListener = (projects: readonly RegistryProject[]) => void;
+export type CandidateListener = (candidates: readonly RegistryCandidate[]) => void;
 
 /** Public, framework-agnostic client surface. */
 export interface WsClient {
@@ -81,10 +93,14 @@ export interface WsClient {
   readonly onHeartbeat: (listener: HeartbeatListener) => () => void;
   /** Subscribe to validated registry snapshots. */
   readonly onRegistry: (listener: RegistryListener) => () => void;
+  /** Subscribe to validated discovery-candidate snapshots. */
+  readonly onCandidates: (listener: CandidateListener) => () => void;
   /** Pin a project by absolute path; no-op (warns) when the socket is not open. */
   readonly pin: (path: string, opts?: { displayName?: string; uiPrefs?: unknown }) => void;
   /** Unpin a project by absolute path; no-op (warns) when the socket is not open. */
   readonly unpin: (path: string) => void;
+  /** Request a fresh discovery of candidate projects; no-op (warns) when the socket is not open. */
+  readonly discover: () => void;
   /** Tear down: cancels reconnects, closes the socket, drops subscribers. */
   readonly close: () => void;
 }
@@ -194,6 +210,55 @@ function parseRegistry(data: unknown): readonly RegistryProject[] | null {
 }
 
 /**
+ * Validate a single raw entry against the Candidate contract:
+ * `{ path: string, displayName: string|null, hasClaudeInstall: boolean }`.
+ * Returns a frozen RegistryCandidate, or null for anything malformed.
+ */
+function parseCandidate(entry: unknown): RegistryCandidate | null {
+  if (typeof entry !== 'object' || entry === null) return null;
+
+  const record = entry as Record<string, unknown>;
+  const { path, displayName, hasClaudeInstall } = record;
+
+  if (typeof path !== 'string' || path.length === 0) return null;
+  if (displayName !== null && typeof displayName !== 'string') return null;
+  if (typeof hasClaudeInstall !== 'boolean') return null;
+
+  return Object.freeze({ path, displayName, hasClaudeInstall });
+}
+
+/**
+ * Validate a raw WS frame against the pinned candidates contract:
+ * `{ type: 'candidates', candidates: Candidate[] }`.
+ * Returns a frozen array of frozen candidates, or null for anything malformed.
+ */
+function parseCandidates(data: unknown): readonly RegistryCandidate[] | null {
+  if (typeof data !== 'string') return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return null;
+  }
+
+  if (typeof parsed !== 'object' || parsed === null) return null;
+
+  const frame = parsed as Record<string, unknown>;
+  if (frame.type !== 'candidates') return null;
+  if (!Array.isArray(frame.candidates)) return null;
+
+  const candidates: RegistryCandidate[] = [];
+  for (const entry of frame.candidates) {
+    const candidate = parseCandidate(entry);
+    if (candidate === null) return null;
+    candidates.push(candidate);
+  }
+
+  return Object.freeze(candidates);
+}
+
+/**
  * Peek the `type` discriminant of a raw frame without full validation, so
  * handleMessage can route to the right parser. Returns null for anything that
  * is not a JSON object with a string `type`. Never throws.
@@ -226,6 +291,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
   const statusListeners = new Set<StatusListener>();
   const heartbeatListeners = new Set<HeartbeatListener>();
   const registryListeners = new Set<RegistryListener>();
+  const candidateListeners = new Set<CandidateListener>();
 
   let state: ClientState = {
     status: 'connecting',
@@ -250,6 +316,10 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
 
   function emitRegistry(projects: readonly RegistryProject[]): void {
     for (const listener of registryListeners) listener(projects);
+  }
+
+  function emitCandidates(candidates: readonly RegistryCandidate[]): void {
+    for (const listener of candidateListeners) listener(candidates);
   }
 
   // Write a frame only when the socket is OPEN; otherwise drop + warn (never throw).
@@ -289,6 +359,16 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
         return;
       }
       emitRegistry(projects);
+      return;
+    }
+
+    if (type === 'candidates') {
+      const candidates = parseCandidates(data);
+      if (candidates === null) {
+        console.warn('[ws-client] dropped malformed frame:', data);
+        return;
+      }
+      emitCandidates(candidates);
       return;
     }
 
@@ -346,6 +426,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     statusListeners.clear();
     heartbeatListeners.clear();
     registryListeners.clear();
+    candidateListeners.clear();
 
     if (state.reconnectHandle !== null) {
       timers.clearTimeout(state.reconnectHandle);
@@ -376,6 +457,10 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     sendFrame({ type: 'unpin', path });
   }
 
+  function discover(): void {
+    sendFrame({ type: 'discover' });
+  }
+
   connect();
 
   return {
@@ -399,8 +484,15 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
         registryListeners.delete(listener);
       };
     },
+    onCandidates: (listener) => {
+      candidateListeners.add(listener);
+      return () => {
+        candidateListeners.delete(listener);
+      };
+    },
     pin,
     unpin,
+    discover,
     close,
   };
 }
