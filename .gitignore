@@ -18,3 +18,14 @@ _prototype/
 grill-summary.md
 .DS_Store
 .coverage
+
+# Node / build artifacts
+node_modules/
+dist/
+web/dist/
+server/dist/
+coverage/
+.vite/
+playwright-report/
+test-results/
+*.tsbuildinfo

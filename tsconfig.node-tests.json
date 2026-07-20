@@ -1,0 +1,18 @@
+{
+  // No-emit typecheck pass for node-side files the build graph excludes:
+  // server unit + integration tests, e2e specs/harness, and the root runner
+  // configs. `tsc -b` (build) skips all of these; this closes that gap.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["node"]
+  },
+  "include": [
+    "server/src/**/*.test.ts",
+    "server/test/**/*.ts",
+    "e2e/**/*.ts",
+    "vitest.config.ts",
+    "playwright.config.ts"
+  ]
+}
