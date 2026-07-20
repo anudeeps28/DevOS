@@ -35,6 +35,9 @@ function makeFakeClient() {
         heartbeatListener = null;
       };
     },
+    onRegistry: () => () => {},
+    pin: () => {},
+    unpin: () => {},
     close,
   };
 

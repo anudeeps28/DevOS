@@ -4,6 +4,9 @@
 // hard-pinned to 127.0.0.1 / localhost / ::1 and the process refuses to start if
 // asked to bind anything else (e.g. 0.0.0.0). This is validated at the boundary.
 
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
 const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(['127.0.0.1', 'localhost', '::1']);
 
 /**
@@ -38,6 +41,40 @@ function resolvePort(): number {
 
 export const HOST: string = resolveHost();
 export const PORT: number = resolvePort();
+
+/**
+ * Resolve the SQLite database file path. An explicit non-empty `DEVOS_DB_PATH`
+ * env var always wins; otherwise fall back to the OS app-data directory joined
+ * with `DevOS/devos.db`:
+ *   - macOS   → ~/Library/Application Support
+ *   - Windows → %APPDATA% (falls back to the home dir if unset)
+ *   - Linux/other → $XDG_DATA_HOME || ~/.local/share
+ */
+export function resolveDbPath(): string {
+  const explicit = process.env.DEVOS_DB_PATH;
+  if (explicit !== undefined && explicit.length > 0) {
+    return explicit;
+  }
+
+  const appDataDir = resolveAppDataDir();
+  return join(appDataDir, 'DevOS', 'devos.db');
+}
+
+function resolveAppDataDir(): string {
+  if (process.platform === 'darwin') {
+    return join(homedir(), 'Library', 'Application Support');
+  }
+  if (process.platform === 'win32') {
+    const appData = process.env.APPDATA;
+    return appData !== undefined && appData.length > 0 ? appData : homedir();
+  }
+  const xdgDataHome = process.env.XDG_DATA_HOME;
+  return xdgDataHome !== undefined && xdgDataHome.length > 0
+    ? xdgDataHome
+    : join(homedir(), '.local', 'share');
+}
+
+export const DB_PATH: string = resolveDbPath();
 
 // Heartbeat cadence (ms) — pinned WS contract shared with the web client.
 export const HEARTBEAT_INTERVAL_MS = 1000;

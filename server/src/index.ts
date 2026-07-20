@@ -7,13 +7,16 @@
 import http from 'node:http';
 import { pathToFileURL } from 'node:url';
 import type { AddressInfo } from 'node:net';
-import { HOST, PORT, WS_PATH, assertLoopbackHost } from './config.js';
+import { DB_PATH, HOST, PORT, WS_PATH, assertLoopbackHost } from './config.js';
+import { openDatabase } from './db/database.js';
+import { createRegistry } from './registry/registry.js';
 import { createStaticHandler } from './static-server.js';
 import { attachWsGateway } from './ws-gateway.js';
 
 export interface CreateServerOptions {
   readonly host?: string;
   readonly port?: number;
+  readonly dbPath?: string;
 }
 
 export interface DevOsServer {
@@ -29,9 +32,12 @@ export function createServer(options?: CreateServerOptions): DevOsServer {
   const host = assertLoopbackHost(options?.host ?? HOST);
   const port = options?.port ?? PORT;
 
+  const db = openDatabase(options?.dbPath ?? DB_PATH);
+  const registry = createRegistry(db);
+
   const staticHandler = createStaticHandler();
   const server = http.createServer((req, res) => staticHandler(req, res));
-  const gateway = attachWsGateway(server);
+  const gateway = attachWsGateway(server, { registry });
 
   const start = (): Promise<AddressInfo> =>
     new Promise((resolve, reject) => {
@@ -56,6 +62,7 @@ export function createServer(options?: CreateServerOptions): DevOsServer {
     await new Promise<void>((resolve, reject) => {
       server.close((err) => (err ? reject(err) : resolve()));
     });
+    db.close();
   };
 
   return { server, start, stop };

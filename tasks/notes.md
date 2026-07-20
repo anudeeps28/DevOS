@@ -79,8 +79,9 @@ Options:
 ## Worktree setup
 
 - **Files to copy into a new worktree:** none yet — no gitignored config files are required to build (no `.env`/secrets in V1).
-- **Restore command (run after creating a worktree):** `npm install`  (npm workspaces — one install resolves both `server/` and `web/`).
+- **Restore command (run after creating a worktree):** `npm install`  (npm workspaces — one install resolves both `server/` and `web/`; this also rebuilds the `better-sqlite3` native addon in the fresh worktree).
 - **Shared automatically (do NOT copy):** `tasks/`, the `.git` history.
+- **SQLite DB — nothing to copy:** the thin-anchor store is generated at runtime in the default OS app-data dir (e.g. `~/Library/Application Support/DevOS/devos.db` on macOS; override with the `DEVOS_DB_PATH` env var) and is gitignored (`*.db` / `*.db-wal` / `*.db-shm`), so there is no DB file to carry into a new worktree.
 
 ---
 
