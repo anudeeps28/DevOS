@@ -57,18 +57,36 @@ export interface RegistryError {
   readonly message: string;
 }
 
+/** A discovered project candidate (not yet pinned) as sent to the client. */
+export interface Candidate {
+  readonly path: string;
+  readonly displayName: string | null;
+  readonly hasClaudeInstall: boolean;
+}
+
+/** Inbound: request a fresh discovery of candidate projects. */
+export interface DiscoverMessage {
+  readonly type: 'discover';
+}
+
+/** Outbound: full snapshot of the current discovery candidates. */
+export interface CandidatesSnapshot {
+  readonly type: 'candidates';
+  readonly candidates: readonly Candidate[];
+}
+
 /** Every message the server accepts from a client. */
-export type InboundMessage = PinMessage | UnpinMessage;
+export type InboundMessage = PinMessage | UnpinMessage | DiscoverMessage;
 
 /** Every registry message the server emits to a client. */
-export type OutboundMessage = RegistrySnapshot | RegistryError;
+export type OutboundMessage = RegistrySnapshot | RegistryError | CandidatesSnapshot;
 
 /**
- * Validate a raw WS frame against the inbound contract. Accepts only a JSON string
- * describing a `pin` or `unpin` message with a non-empty ABSOLUTE `path`.
- * Returns a new frozen message, or null for anything malformed. Never throws.
+ * Validate a raw WS frame against the inbound contract. Branches on `type` first:
+ * a `discover` frame carries no `path`; `pin`/`unpin` require a non-empty ABSOLUTE
+ * `path`. Returns a new frozen message, or null for anything malformed. Never throws.
  */
-export function parseInboundMessage(data: unknown): PinMessage | UnpinMessage | null {
+export function parseInboundMessage(data: unknown): InboundMessage | null {
   if (typeof data !== 'string') return null;
   if (data.length > MAX_FRAME_CHARS) return null; // oversized frame — drop before parsing
 
@@ -82,22 +100,29 @@ export function parseInboundMessage(data: unknown): PinMessage | UnpinMessage | 
   if (typeof parsed !== 'object' || parsed === null) return null;
 
   const frame = parsed as Record<string, unknown>;
-  const { type, path } = frame;
+  const { type } = frame;
 
-  if (
-    typeof path !== 'string' ||
-    path.length === 0 ||
-    path.length > MAX_PATH_LENGTH ||
-    !isAbsolute(path)
-  ) {
-    return null;
+  // `discover` carries no payload — no path validation.
+  if (type === 'discover') {
+    return Object.freeze<DiscoverMessage>({ type: 'discover' });
   }
 
-  if (type === 'unpin') {
-    return Object.freeze<UnpinMessage>({ type: 'unpin', path });
-  }
+  // `pin`/`unpin` share the absolute-path requirement.
+  if (type === 'pin' || type === 'unpin') {
+    const { path } = frame;
+    if (
+      typeof path !== 'string' ||
+      path.length === 0 ||
+      path.length > MAX_PATH_LENGTH ||
+      !isAbsolute(path)
+    ) {
+      return null;
+    }
 
-  if (type === 'pin') {
+    if (type === 'unpin') {
+      return Object.freeze<UnpinMessage>({ type: 'unpin', path });
+    }
+
     const { displayName, uiPrefs } = frame;
     // An over-long displayName is rejected (not truncated) so the boundary stays strict.
     if (typeof displayName === 'string' && displayName.length > MAX_DISPLAY_NAME_LENGTH) {

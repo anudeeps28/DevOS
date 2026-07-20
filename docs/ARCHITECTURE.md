@@ -163,12 +163,15 @@ anchors + history. Everything real is read live every render and discarded — n
 
 **DB file location.** The SQLite file lives in the OS app-data directory — `~/Library/Application Support/DevOS/devos.db` (macOS), `$XDG_DATA_HOME/DevOS/devos.db` or `~/.local/share/DevOS/devos.db` (Linux), `%APPDATA%\DevOS\devos.db` (Windows) — created on first run. Override the full path with the `DEVOS_DB_PATH` env var (used by tests to point at a throwaway file, and for backup/relocation). The file is gitignored (`*.db`, `*.db-wal`, `*.db-shm`).
 
+**Project roots.** Where discovery scans for candidate folders is set by the `DEVOS_PROJECT_ROOTS` env var (colon-separated absolute paths); when unset it defaults to a single root, `~/Programming`.
+
 ### Never stored — derived fresh every read
 
 - Git state (branch / dirty / ahead-behind) — Git State Reader
 - Tracker tasks — Tracker Adapter Gateway (per-project adapter scripts)
 - Live session state (running / idle / blocked) — SDK stream + Hook Event Bus
 - Work-item pipeline phase — Story State Reader (`tasks/stories/*/` files)
+- Discovery candidates — folders under the project roots with `.claude/` installed but not yet pinned; a live filesystem scan (`server/src/discovery/scanner.ts`), never persisted
 - **Transcripts** — not persisted by DevOS (see below)
 
 ### Data flow
@@ -364,8 +367,9 @@ and the artifact landing, the badge still shows the current stage.
 
 ### 9.4 New idea / project birth flow
 
-The registry only discovers folders that already have `.claude/` installed (§4). A raw idea or an
-un-harnessed folder had no on-ramp — this closes that gap.
+The registry only discovers folders that already have `.claude/` installed (§4) — enforced in
+`server/src/discovery/scanner.ts`, a depth-1 scan of each project root for a child holding a `.claude/`
+directory. A raw idea or an un-harnessed folder had no on-ramp — this closes that gap.
 
 - **Two labelled entry points** on the home screen: **"New Idea"** (create a new folder) and **"Add
   Project"** (point at an existing folder). Both converge on the same install→pin flow. The exact widget

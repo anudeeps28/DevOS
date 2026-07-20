@@ -1,16 +1,18 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { RegistryProject } from '@/lib/ws-client';
+import type { RegistryCandidate, RegistryProject } from '@/lib/ws-client';
 
 // ProjectPin calls useProjects() with no injection seam, so we mock the hook
 // module and drive its return value per test.
 const pin = vi.fn();
 const unpin = vi.fn();
+const discover = vi.fn();
 let projects: readonly RegistryProject[] = [];
+let candidates: readonly RegistryCandidate[] = [];
 
 vi.mock('@/hooks/useProjects', () => ({
-  useProjects: () => ({ projects, pin, unpin }),
+  useProjects: () => ({ projects, pin, unpin, candidates, discover }),
 }));
 
 // Imported after the mock so the component picks up the mocked hook.
@@ -26,11 +28,20 @@ function sampleProject(path: string): RegistryProject {
   };
 }
 
+function sampleCandidate(
+  path: string,
+  displayName: string | null = null,
+): RegistryCandidate {
+  return { path, displayName, hasClaudeInstall: true };
+}
+
 describe('ProjectPin', () => {
   beforeEach(() => {
     projects = [];
+    candidates = [];
     pin.mockReset();
     unpin.mockReset();
+    discover.mockReset();
   });
 
   afterEach(() => {
@@ -73,5 +84,58 @@ describe('ProjectPin', () => {
     fireEvent.click(screen.getByTestId('unpin-/abs/one'));
 
     expect(unpin).toHaveBeenCalledWith('/abs/one');
+  });
+
+  it('renders a candidate row and pins it with its displayName on click', () => {
+    candidates = [sampleCandidate('/abs/cand', 'Cand')];
+    render(<ProjectPin />);
+
+    expect(screen.getByTestId('candidate-/abs/cand')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('candidate-pin-/abs/cand'));
+
+    expect(pin).toHaveBeenCalledWith('/abs/cand', { displayName: 'Cand' });
+  });
+
+  it('pins a candidate without a displayName option when it has none', () => {
+    candidates = [sampleCandidate('/abs/cand', null)];
+    render(<ProjectPin />);
+
+    fireEvent.click(screen.getByTestId('candidate-pin-/abs/cand'));
+
+    expect(pin).toHaveBeenCalledWith('/abs/cand', undefined);
+  });
+
+  it('hides a candidate whose path is already pinned', () => {
+    projects = [sampleProject('/abs/dup')];
+    candidates = [sampleCandidate('/abs/dup'), sampleCandidate('/abs/new')];
+    render(<ProjectPin />);
+
+    expect(screen.queryByTestId('candidate-/abs/dup')).not.toBeInTheDocument();
+    expect(screen.getByTestId('candidate-/abs/new')).toBeInTheDocument();
+  });
+
+  it('calls discover when the refresh button is clicked', () => {
+    render(<ProjectPin />);
+
+    fireEvent.click(screen.getByTestId('discover-refresh'));
+
+    expect(discover).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the empty state and no project-items when nothing is pinned', () => {
+    projects = [];
+    render(<ProjectPin />);
+
+    expect(screen.getByTestId('discovery-empty')).toBeInTheDocument();
+    expect(screen.queryAllByTestId('project-item')).toHaveLength(0);
+  });
+
+  it('hides the empty state and renders project-items when projects exist', () => {
+    projects = [sampleProject('/abs/one')];
+    render(<ProjectPin />);
+
+    expect(screen.queryByTestId('discovery-empty')).not.toBeInTheDocument();
+    expect(screen.getAllByTestId('project-item')).toHaveLength(1);
   });
 });

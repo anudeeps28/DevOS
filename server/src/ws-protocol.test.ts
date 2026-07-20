@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   parseInboundMessage,
+  type DiscoverMessage,
   type PinMessage,
   type UnpinMessage,
 } from './ws-protocol.js';
@@ -40,6 +41,29 @@ describe('parseInboundMessage', () => {
       );
 
       expect(result).toEqual<UnpinMessage>({ type: 'unpin', path: '/abs/path' });
+    });
+
+    it('parses a discover message into a frozen { type: "discover" } with no path', () => {
+      // Given: a bare discover frame (carries no payload)
+      const result = parseInboundMessage(JSON.stringify({ type: 'discover' }));
+
+      // Then: the exact discover message shape, frozen, with no path field
+      expect(result).toEqual<DiscoverMessage>({ type: 'discover' });
+      expect(result).not.toBeNull();
+      expect(Object.isFrozen(result)).toBe(true);
+      expect(result as unknown as Record<string, unknown>).not.toHaveProperty('path');
+    });
+
+    it('parses a discover frame with extra junk keys, stripping them', () => {
+      // Given: a discover frame polluted with unexpected keys
+      const result = parseInboundMessage(
+        JSON.stringify({ type: 'discover', path: '/ignored', junk: 1, nested: { a: 2 } }),
+      );
+
+      // Then: only { type: 'discover' } survives the boundary
+      expect(result).toEqual<DiscoverMessage>({ type: 'discover' });
+      expect(result as unknown as Record<string, unknown>).not.toHaveProperty('path');
+      expect(result as unknown as Record<string, unknown>).not.toHaveProperty('junk');
     });
   });
 

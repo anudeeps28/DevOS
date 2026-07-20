@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 
 import {
   createWsClient,
+  type RegistryCandidate,
   type RegistryProject,
   type WsClient,
   type WsClientOptions,
@@ -10,10 +11,14 @@ import {
 export interface UseProjectsResult {
   /** Latest validated registry snapshot; empty until the first one arrives. */
   readonly projects: readonly RegistryProject[];
+  /** Latest validated discovery-candidate snapshot; empty until the first one arrives. */
+  readonly candidates: readonly RegistryCandidate[];
   /** Pin a project by absolute path; delegates to the live client. */
   readonly pin: (path: string, opts?: { displayName?: string; uiPrefs?: unknown }) => void;
   /** Unpin a project by absolute path; delegates to the live client. */
   readonly unpin: (path: string) => void;
+  /** Request a fresh discovery scan; delegates to the live client. */
+  readonly discover: () => void;
 }
 
 export interface UseProjectsOptions {
@@ -28,6 +33,7 @@ export interface UseProjectsOptions {
  */
 export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult {
   const [projects, setProjects] = useState<readonly RegistryProject[]>([]);
+  const [candidates, setCandidates] = useState<readonly RegistryCandidate[]>([]);
 
   // Hold the latest factory in a ref so the setup effect can run once (on mount)
   // without re-subscribing when an inline options object changes identity.
@@ -42,9 +48,16 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     const client = factory();
     clientRef.current = client;
     const offRegistry = client.onRegistry(setProjects);
+    const offCandidates = client.onCandidates(setCandidates);
+    // Auto-discover on connect: a freshly-opened socket immediately requests a scan.
+    const offStatus = client.onStatus((status) => {
+      if (status === 'connected') client.discover();
+    });
 
     return () => {
       offRegistry();
+      offCandidates();
+      offStatus();
       client.close();
       clientRef.current = null;
     };
@@ -58,5 +71,9 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     clientRef.current?.unpin(path);
   }
 
-  return { projects, pin, unpin };
+  function discover(): void {
+    clientRef.current?.discover();
+  }
+
+  return { projects, candidates, pin, unpin, discover };
 }

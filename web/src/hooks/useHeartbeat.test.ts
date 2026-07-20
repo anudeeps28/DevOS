@@ -36,8 +36,10 @@ function makeFakeClient() {
       };
     },
     onRegistry: () => () => {},
+    onCandidates: () => () => {},
     pin: () => {},
     unpin: () => {},
+    discover: () => {},
     close,
   };
 

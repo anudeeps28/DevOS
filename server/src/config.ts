@@ -76,6 +76,33 @@ function resolveAppDataDir(): string {
 
 export const DB_PATH: string = resolveDbPath();
 
+/**
+ * Resolve the project-root directories to scan for projects. An explicit
+ * non-empty `DEVOS_PROJECT_ROOTS` env var always wins: it is split on ':',
+ * each segment is trimmed, and empty/whitespace-only segments are dropped.
+ * When the var is unset/empty (or every segment is blank), fall back to a
+ * single default root: `~/Programming`.
+ *
+ * The paths are NOT validated for on-disk existence here — that is the
+ * scanner's job. Returns a frozen (immutable) array.
+ */
+export function resolveProjectRoots(): readonly string[] {
+  const explicit = process.env.DEVOS_PROJECT_ROOTS;
+  if (explicit !== undefined && explicit.length > 0) {
+    const roots = explicit
+      .split(':')
+      .map((segment) => segment.trim())
+      .filter((segment) => segment.length > 0);
+    if (roots.length > 0) {
+      return Object.freeze(roots);
+    }
+  }
+
+  return Object.freeze([join(homedir(), 'Programming')]);
+}
+
+export const PROJECT_ROOTS: readonly string[] = resolveProjectRoots();
+
 // Heartbeat cadence (ms) — pinned WS contract shared with the web client.
 export const HEARTBEAT_INTERVAL_MS = 1000;
 
