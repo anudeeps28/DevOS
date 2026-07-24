@@ -75,11 +75,40 @@ export interface CandidatesSnapshot {
   readonly candidates: readonly Candidate[];
 }
 
+/** The git state of a project working tree as sent to the client. */
+export interface GitState {
+  readonly path: string;
+  readonly isRepo: boolean;
+  readonly branch: string | null;
+  readonly detached: boolean;
+  readonly dirty: boolean;
+  readonly ahead: number | null;
+  readonly behind: number | null;
+  readonly upstream: string | null;
+}
+
+/** Inbound: request the current git state for a project path. */
+export interface GitStateMessage {
+  readonly type: 'git-state';
+  readonly path: string;
+}
+
+/** Outbound: a git-state snapshot for a single project path. */
+export interface GitStateSnapshot {
+  readonly type: 'git-state';
+  readonly path: string;
+  readonly state: GitState;
+}
+
 /** Every message the server accepts from a client. */
-export type InboundMessage = PinMessage | UnpinMessage | DiscoverMessage;
+export type InboundMessage = PinMessage | UnpinMessage | DiscoverMessage | GitStateMessage;
 
 /** Every registry message the server emits to a client. */
-export type OutboundMessage = RegistrySnapshot | RegistryError | CandidatesSnapshot;
+export type OutboundMessage =
+  | RegistrySnapshot
+  | RegistryError
+  | CandidatesSnapshot
+  | GitStateSnapshot;
 
 /**
  * Validate a raw WS frame against the inbound contract. Branches on `type` first:
@@ -105,6 +134,20 @@ export function parseInboundMessage(data: unknown): InboundMessage | null {
   // `discover` carries no payload — no path validation.
   if (type === 'discover') {
     return Object.freeze<DiscoverMessage>({ type: 'discover' });
+  }
+
+  // `git-state` shares the same non-empty ABSOLUTE-path requirement as pin/unpin.
+  if (type === 'git-state') {
+    const { path } = frame;
+    if (
+      typeof path !== 'string' ||
+      path.length === 0 ||
+      path.length > MAX_PATH_LENGTH ||
+      !isAbsolute(path)
+    ) {
+      return null;
+    }
+    return Object.freeze<GitStateMessage>({ type: 'git-state', path });
   }
 
   // `pin`/`unpin` share the absolute-path requirement.

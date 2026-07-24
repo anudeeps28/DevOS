@@ -1,18 +1,32 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { RegistryCandidate, RegistryProject } from '@/lib/ws-client';
+import type {
+  GitState,
+  RegistryCandidate,
+  RegistryProject,
+} from '@/lib/ws-client';
 
 // ProjectPin calls useProjects() with no injection seam, so we mock the hook
 // module and drive its return value per test.
 const pin = vi.fn();
 const unpin = vi.fn();
 const discover = vi.fn();
+const requestGitState = vi.fn();
 let projects: readonly RegistryProject[] = [];
 let candidates: readonly RegistryCandidate[] = [];
+let gitStates: Record<string, GitState> = {};
 
 vi.mock('@/hooks/useProjects', () => ({
-  useProjects: () => ({ projects, pin, unpin, candidates, discover }),
+  useProjects: () => ({
+    projects,
+    pin,
+    unpin,
+    candidates,
+    discover,
+    gitStates,
+    requestGitState,
+  }),
 }));
 
 // Imported after the mock so the component picks up the mocked hook.
@@ -35,13 +49,29 @@ function sampleCandidate(
   return { path, displayName, hasClaudeInstall: true };
 }
 
+function sampleGitState(path: string, overrides: Partial<GitState> = {}): GitState {
+  return {
+    path,
+    isRepo: true,
+    branch: 'main',
+    detached: false,
+    dirty: false,
+    ahead: null,
+    behind: null,
+    upstream: null,
+    ...overrides,
+  };
+}
+
 describe('ProjectPin', () => {
   beforeEach(() => {
     projects = [];
     candidates = [];
+    gitStates = {};
     pin.mockReset();
     unpin.mockReset();
     discover.mockReset();
+    requestGitState.mockReset();
   });
 
   afterEach(() => {
@@ -137,5 +167,83 @@ describe('ProjectPin', () => {
 
     expect(screen.queryByTestId('discovery-empty')).not.toBeInTheDocument();
     expect(screen.getAllByTestId('project-item')).toHaveLength(1);
+  });
+
+  describe('git status line', () => {
+    it('shows the loading affordance when no snapshot has arrived yet', () => {
+      projects = [sampleProject('/abs/one')];
+      // gitStates intentionally empty → undefined snapshot for this path.
+      render(<ProjectPin />);
+
+      const line = screen.getByTestId('git-state-/abs/one');
+      expect(line).toHaveAttribute('data-isrepo', 'null');
+      expect(line).toHaveTextContent('…');
+    });
+
+    it('renders branch, no dirty marker, and no arrows for a clean no-upstream repo', () => {
+      projects = [sampleProject('/abs/one')];
+      gitStates = { '/abs/one': sampleGitState('/abs/one') };
+      render(<ProjectPin />);
+
+      const line = screen.getByTestId('git-state-/abs/one');
+      expect(line).toHaveAttribute('data-isrepo', 'true');
+      expect(line).toHaveAttribute('data-branch', 'main');
+      expect(line).toHaveAttribute('data-dirty', 'false');
+      // No upstream → null ahead/behind, and NO arrows rendered (never ↑0 ↓0).
+      expect(line).toHaveAttribute('data-ahead', 'null');
+      expect(line).toHaveAttribute('data-behind', 'null');
+      expect(line).toHaveTextContent('main');
+      expect(line).not.toHaveTextContent('↑');
+    });
+
+    it('renders the dirty marker and ahead/behind arrows when tracking an upstream', () => {
+      projects = [sampleProject('/abs/one')];
+      gitStates = {
+        '/abs/one': sampleGitState('/abs/one', {
+          branch: 'feat',
+          dirty: true,
+          ahead: 2,
+          behind: 3,
+          upstream: 'origin/feat',
+        }),
+      };
+      render(<ProjectPin />);
+
+      const line = screen.getByTestId('git-state-/abs/one');
+      expect(line).toHaveAttribute('data-dirty', 'true');
+      expect(line).toHaveAttribute('data-ahead', '2');
+      expect(line).toHaveAttribute('data-behind', '3');
+      expect(line).toHaveTextContent('feat');
+      expect(line).toHaveTextContent('↑2 ↓3');
+    });
+
+    it('renders "not a git repo" for a non-repo path', () => {
+      projects = [sampleProject('/abs/one')];
+      gitStates = { '/abs/one': sampleGitState('/abs/one', { isRepo: false, branch: null }) };
+      render(<ProjectPin />);
+
+      const line = screen.getByTestId('git-state-/abs/one');
+      expect(line).toHaveAttribute('data-isrepo', 'false');
+      expect(line).toHaveTextContent('not a git repo');
+    });
+
+    it('renders "detached" for a detached HEAD', () => {
+      projects = [sampleProject('/abs/one')];
+      gitStates = {
+        '/abs/one': sampleGitState('/abs/one', { detached: true, branch: null }),
+      };
+      render(<ProjectPin />);
+
+      const line = screen.getByTestId('git-state-/abs/one');
+      expect(line).toHaveTextContent('detached');
+    });
+
+    it('requests a fresh git-state for each pinned project on mount', () => {
+      projects = [sampleProject('/abs/one'), sampleProject('/abs/two')];
+      render(<ProjectPin />);
+
+      expect(requestGitState).toHaveBeenCalledWith('/abs/one');
+      expect(requestGitState).toHaveBeenCalledWith('/abs/two');
+    });
   });
 });

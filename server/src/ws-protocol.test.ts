@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   parseInboundMessage,
   type DiscoverMessage,
+  type GitStateMessage,
   type PinMessage,
   type UnpinMessage,
 } from './ws-protocol.js';
@@ -41,6 +42,15 @@ describe('parseInboundMessage', () => {
       );
 
       expect(result).toEqual<UnpinMessage>({ type: 'unpin', path: '/abs/path' });
+    });
+
+    it('parses a git-state message with an absolute path', () => {
+      const result = parseInboundMessage(
+        JSON.stringify({ type: 'git-state', path: '/abs/path' }),
+      );
+
+      expect(result).toEqual<GitStateMessage>({ type: 'git-state', path: '/abs/path' });
+      expect(Object.isFrozen(result)).toBe(true);
     });
 
     it('parses a discover message into a frozen { type: "discover" } with no path', () => {
@@ -102,6 +112,16 @@ describe('parseInboundMessage', () => {
       expect(
         parseInboundMessage(JSON.stringify({ type: 'unpin', path: 'relative/dir' })),
       ).toBeNull();
+    });
+
+    it('returns null for a git-state frame with a relative, empty, or missing path', () => {
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'git-state', path: 'relative/dir' })),
+      ).toBeNull();
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'git-state', path: '' })),
+      ).toBeNull();
+      expect(parseInboundMessage(JSON.stringify({ type: 'git-state' }))).toBeNull();
     });
 
     it('returns null for an unknown type', () => {
