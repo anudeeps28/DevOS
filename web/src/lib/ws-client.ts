@@ -62,6 +62,30 @@ export interface GitState {
   readonly upstream: string | null;
 }
 
+/**
+ * A validated next-task entry. Mirrors the server's TrackerTask
+ * (server/src/ws-protocol.ts) — duplicated typed contract, no shared package.
+ * Frozen — never mutated after construction.
+ */
+export interface TrackerTask {
+  readonly id: string;
+  readonly title: string;
+  readonly priority: number | null;
+  readonly url: string | null;
+}
+
+/**
+ * A validated tracker-state snapshot. Mirrors the server's TrackerState
+ * (server/src/ws-protocol.ts) — duplicated typed contract, no shared package.
+ * Frozen — never mutated after construction.
+ */
+export interface TrackerState {
+  readonly path: string;
+  readonly reachable: boolean;
+  readonly tracker: string | null;
+  readonly nextTask: TrackerTask | null;
+}
+
 /** The slice of the WebSocket API this client depends on (keeps fakes tiny). */
 export interface WebSocketLike {
   readonly readyState: number;
@@ -100,6 +124,7 @@ export type HeartbeatListener = (heartbeat: Heartbeat) => void;
 export type RegistryListener = (projects: readonly RegistryProject[]) => void;
 export type CandidateListener = (candidates: readonly RegistryCandidate[]) => void;
 export type GitStateListener = (path: string, state: GitState) => void;
+export type TrackerStateListener = (path: string, state: TrackerState) => void;
 
 /** Public, framework-agnostic client surface. */
 export interface WsClient {
@@ -114,6 +139,8 @@ export interface WsClient {
   readonly onCandidates: (listener: CandidateListener) => () => void;
   /** Subscribe to validated git-state snapshots. */
   readonly onGitState: (listener: GitStateListener) => () => void;
+  /** Subscribe to validated tracker-state snapshots. */
+  readonly onTrackerState: (listener: TrackerStateListener) => () => void;
   /** Pin a project by absolute path; no-op (warns) when the socket is not open. */
   readonly pin: (path: string, opts?: { displayName?: string; uiPrefs?: unknown }) => void;
   /** Unpin a project by absolute path; no-op (warns) when the socket is not open. */
@@ -122,6 +149,8 @@ export interface WsClient {
   readonly discover: () => void;
   /** Request the current git state for a project path; no-op (warns) when the socket is not open. */
   readonly requestGitState: (path: string) => void;
+  /** Request the current tracker state for a project path; no-op (warns) when the socket is not open. */
+  readonly requestTrackerState: (path: string) => void;
   /** Tear down: cancels reconnects, closes the socket, drops subscribers. */
   readonly close: () => void;
 }
@@ -332,6 +361,81 @@ function parseGitStateSnapshot(data: unknown): { path: string; state: GitState }
 }
 
 /**
+ * Validate a single raw entry against the TrackerTask contract:
+ * `{ id: string, title: string, priority: number|null, url: string|null }`.
+ * `priority` must be a finite number or null (NaN/Infinity/non-number rejected).
+ * Returns a frozen TrackerTask, or null for anything malformed.
+ */
+function parseTrackerTask(entry: unknown): TrackerTask | null {
+  if (typeof entry !== 'object' || entry === null) return null;
+
+  const record = entry as Record<string, unknown>;
+  const { id, title, priority, url } = record;
+
+  if (typeof id !== 'string' || id.length === 0) return null;
+  if (typeof title !== 'string') return null;
+  if (priority !== null && (typeof priority !== 'number' || !Number.isFinite(priority))) {
+    return null;
+  }
+  if (url !== null && typeof url !== 'string') return null;
+
+  return Object.freeze({ id, title, priority, url });
+}
+
+/**
+ * Validate a single raw entry against the TrackerState contract:
+ * `{ path: string, reachable: boolean, tracker: string|null, nextTask: TrackerTask|null }`.
+ * Returns a frozen TrackerState, or null for anything malformed.
+ */
+function parseTrackerState(entry: unknown): TrackerState | null {
+  if (typeof entry !== 'object' || entry === null) return null;
+
+  const record = entry as Record<string, unknown>;
+  const { path, reachable, tracker, nextTask } = record;
+
+  if (typeof path !== 'string' || path.length === 0) return null;
+  if (typeof reachable !== 'boolean') return null;
+  if (tracker !== null && typeof tracker !== 'string') return null;
+
+  let parsedNextTask: TrackerTask | null = null;
+  if (nextTask !== null) {
+    parsedNextTask = parseTrackerTask(nextTask);
+    if (parsedNextTask === null) return null;
+  }
+
+  return Object.freeze({ path, reachable, tracker, nextTask: parsedNextTask });
+}
+
+/**
+ * Validate a raw WS frame against the pinned tracker-state contract:
+ * `{ type: 'tracker-state', path: string, state: TrackerState }`.
+ * Returns a frozen `{ path, state }`, or null for anything malformed.
+ */
+function parseTrackerStateSnapshot(
+  data: unknown,
+): { path: string; state: TrackerState } | null {
+  if (typeof data !== 'string') return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return null;
+  }
+
+  if (typeof parsed !== 'object' || parsed === null) return null;
+
+  const frame = parsed as Record<string, unknown>;
+  if (frame.type !== 'tracker-state') return null;
+  if (typeof frame.path !== 'string' || frame.path.length === 0) return null;
+
+  const state = parseTrackerState(frame.state);
+  if (state === null) return null;
+
+  return Object.freeze({ path: frame.path, state });
+}
+
+/**
  * Peek the `type` discriminant of a raw frame without full validation, so
  * handleMessage can route to the right parser. Returns null for anything that
  * is not a JSON object with a string `type`. Never throws.
@@ -366,6 +470,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
   const registryListeners = new Set<RegistryListener>();
   const candidateListeners = new Set<CandidateListener>();
   const gitStateListeners = new Set<GitStateListener>();
+  const trackerStateListeners = new Set<TrackerStateListener>();
 
   let state: ClientState = {
     status: 'connecting',
@@ -398,6 +503,10 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
 
   function emitGitState(path: string, state: GitState): void {
     for (const listener of gitStateListeners) listener(path, state);
+  }
+
+  function emitTrackerState(path: string, state: TrackerState): void {
+    for (const listener of trackerStateListeners) listener(path, state);
   }
 
   // Write a frame only when the socket is OPEN; otherwise drop + warn (never throw).
@@ -460,6 +569,16 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
       return;
     }
 
+    if (type === 'tracker-state') {
+      const snapshot = parseTrackerStateSnapshot(data);
+      if (snapshot === null) {
+        console.warn('[ws-client] dropped malformed frame:', data);
+        return;
+      }
+      emitTrackerState(snapshot.path, snapshot.state);
+      return;
+    }
+
     // Never throw into the app — drop and warn.
     console.warn('[ws-client] dropped malformed frame:', data);
   }
@@ -516,6 +635,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     registryListeners.clear();
     candidateListeners.clear();
     gitStateListeners.clear();
+    trackerStateListeners.clear();
 
     if (state.reconnectHandle !== null) {
       timers.clearTimeout(state.reconnectHandle);
@@ -554,6 +674,10 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     sendFrame({ type: 'git-state', path });
   }
 
+  function requestTrackerState(path: string): void {
+    sendFrame({ type: 'tracker-state', path });
+  }
+
   connect();
 
   return {
@@ -589,10 +713,17 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
         gitStateListeners.delete(listener);
       };
     },
+    onTrackerState: (listener) => {
+      trackerStateListeners.add(listener);
+      return () => {
+        trackerStateListeners.delete(listener);
+      };
+    },
     pin,
     unpin,
     discover,
     requestGitState,
+    requestTrackerState,
     close,
   };
 }

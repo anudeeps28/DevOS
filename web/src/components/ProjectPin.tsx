@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 
 import { useProjects } from '@/hooks/useProjects';
-import type { GitState } from '@/lib/ws-client';
+import type { GitState, TrackerState } from '@/lib/ws-client';
 import { cn } from '@/lib/utils';
 
 /** Stringify a nullable numeric field for a `data-*` attribute. */
@@ -66,6 +66,85 @@ function GitStatusLine({ path, state }: { path: string; state: GitState | undefi
 }
 
 /**
+ * Compact next-task line for one pinned row. Render-only:
+ *  - undefined snapshot → a subtle loading affordance,
+ *  - unreachable tracker → muted italic "tracker unreachable",
+ *  - reachable but no tracker configured → muted italic "no tracker" (distinct from
+ *    a genuinely empty backlog — the backend is unknown, not empty),
+ *  - reachable with no open task → muted "no open tasks",
+ *  - reachable with a next task → the task title.
+ */
+function NextTaskLine({
+  path,
+  state,
+}: {
+  path: string;
+  state: TrackerState | undefined;
+}): JSX.Element {
+  if (state === undefined) {
+    return (
+      <span
+        data-testid={`tracker-state-${path}`}
+        data-reachable="null"
+        className="text-xs text-muted-foreground/60"
+      >
+        …
+      </span>
+    );
+  }
+
+  if (!state.reachable) {
+    return (
+      <span
+        data-testid={`tracker-state-${path}`}
+        data-reachable="false"
+        className="text-xs italic text-muted-foreground"
+      >
+        tracker unreachable
+      </span>
+    );
+  }
+
+  if (state.tracker === null) {
+    return (
+      <span
+        data-testid={`tracker-state-${path}`}
+        data-reachable="true"
+        data-tracker="null"
+        data-title="null"
+        className="text-xs italic text-muted-foreground"
+      >
+        no tracker
+      </span>
+    );
+  }
+
+  if (state.nextTask === null) {
+    return (
+      <span
+        data-testid={`tracker-state-${path}`}
+        data-reachable="true"
+        data-title="null"
+        className="text-xs text-muted-foreground"
+      >
+        no open tasks
+      </span>
+    );
+  }
+
+  return (
+    <span
+      data-testid={`tracker-state-${path}`}
+      data-reachable="true"
+      data-title={state.nextTask.title}
+      className="truncate text-xs text-foreground"
+    >
+      {state.nextTask.title}
+    </span>
+  );
+}
+
+/**
  * Project discovery + pin management. Renders three regions:
  *  - a "Discovered" section (refresh + candidate rows not yet pinned),
  *  - a "Pinned" grid of pinned projects (each with an Unpin button),
@@ -74,7 +153,17 @@ function GitStatusLine({ path, state }: { path: string; state: GitState | undefi
  * Render-only: all state lives in the useProjects hook; no local mutation.
  */
 export function ProjectPin() {
-  const { projects, candidates, pin, unpin, discover, gitStates, requestGitState } = useProjects();
+  const {
+    projects,
+    candidates,
+    pin,
+    unpin,
+    discover,
+    gitStates,
+    requestGitState,
+    trackerStates,
+    requestTrackerState,
+  } = useProjects();
   const [path, setPath] = useState('');
 
   // Fresh-per-(re)mount: request a git-state read for each pinned project when
@@ -82,7 +171,10 @@ export function ProjectPin() {
   // this covers a component remount over an already-open socket.
   const pinnedKey = projects.map((project) => project.path).join('\n');
   useEffect(() => {
-    for (const project of projects) requestGitState(project.path);
+    for (const project of projects) {
+      requestGitState(project.path);
+      requestTrackerState(project.path);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pinnedKey]);
 
@@ -189,6 +281,7 @@ export function ProjectPin() {
                 <div className="flex min-w-0 flex-col gap-0.5">
                   <span className="truncate font-mono text-sm">{project.path}</span>
                   <GitStatusLine path={project.path} state={gitStates[project.path]} />
+                  <NextTaskLine path={project.path} state={trackerStates[project.path]} />
                 </div>
                 <button
                   data-testid={`unpin-${project.path}`}

@@ -5,6 +5,7 @@ import {
   type GitState,
   type RegistryCandidate,
   type RegistryProject,
+  type TrackerState,
   type WsClient,
   type WsClientOptions,
 } from '@/lib/ws-client';
@@ -24,6 +25,10 @@ export interface UseProjectsResult {
   readonly gitStates: Record<string, GitState>;
   /** Request a fresh git-state read for a project path; delegates to the live client. */
   readonly requestGitState: (path: string) => void;
+  /** Latest tracker-state snapshots keyed by absolute project path; empty until the first arrives. */
+  readonly trackerStates: Record<string, TrackerState>;
+  /** Request a fresh tracker-state read for a project path; delegates to the live client. */
+  readonly requestTrackerState: (path: string) => void;
 }
 
 export interface UseProjectsOptions {
@@ -40,6 +45,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
   const [projects, setProjects] = useState<readonly RegistryProject[]>([]);
   const [candidates, setCandidates] = useState<readonly RegistryCandidate[]>([]);
   const [gitStates, setGitStates] = useState<Record<string, GitState>>({});
+  const [trackerStates, setTrackerStates] = useState<Record<string, TrackerState>>({});
 
   // Hold the latest factory in a ref so the setup effect can run once (on mount)
   // without re-subscribing when an inline options object changes identity.
@@ -64,12 +70,19 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     const offGitState = client.onGitState((path, state) =>
       setGitStates((prev) => ({ ...prev, [path]: state })),
     );
+    // Immutable fold: a tracker-state snapshot replaces the map with a new object.
+    const offTrackerState = client.onTrackerState((path, state) =>
+      setTrackerStates((prev) => ({ ...prev, [path]: state })),
+    );
     // Auto-refresh on connect: a freshly-opened socket requests a scan and a
-    // git-state read for every currently-known pinned project.
+    // git-state + tracker-state read for every currently-known pinned project.
     const offStatus = client.onStatus((status) => {
       if (status === 'connected') {
         client.discover();
-        for (const project of projectsRef.current) client.requestGitState(project.path);
+        for (const project of projectsRef.current) {
+          client.requestGitState(project.path);
+          client.requestTrackerState(project.path);
+        }
       }
     });
 
@@ -77,6 +90,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
       offRegistry();
       offCandidates();
       offGitState();
+      offTrackerState();
       offStatus();
       client.close();
       clientRef.current = null;
@@ -89,7 +103,10 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
   useEffect(() => {
     const client = clientRef.current;
     if (client === null) return;
-    for (const project of projects) client.requestGitState(project.path);
+    for (const project of projects) {
+      client.requestGitState(project.path);
+      client.requestTrackerState(project.path);
+    }
   }, [projects]);
 
   function pin(path: string, opts?: { displayName?: string; uiPrefs?: unknown }): void {
@@ -108,5 +125,19 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     clientRef.current?.requestGitState(path);
   }
 
-  return { projects, candidates, pin, unpin, discover, gitStates, requestGitState };
+  function requestTrackerState(path: string): void {
+    clientRef.current?.requestTrackerState(path);
+  }
+
+  return {
+    projects,
+    candidates,
+    pin,
+    unpin,
+    discover,
+    gitStates,
+    requestGitState,
+    trackerStates,
+    requestTrackerState,
+  };
 }
