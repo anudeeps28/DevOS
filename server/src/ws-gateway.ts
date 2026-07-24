@@ -13,6 +13,7 @@ import { HEARTBEAT_INTERVAL_MS, WS_PATH } from './config.js';
 import { scanCandidates } from './discovery/scanner.js';
 import { readGitState } from './git/git-state-reader.js';
 import { createHeartbeat, type HeartbeatMessage } from './heartbeat.js';
+import { readLifecycleSignals } from './lifecycle/lifecycle-reader.js';
 import type { Registry } from './registry/registry.js';
 import { readTrackerState } from './tracker/tracker-reader.js';
 import {
@@ -41,6 +42,12 @@ const GIT_STATE_MIN_INTERVAL_MS = 200;
 // `readTrackerState` read — tracker state is never memoized server-side. The window
 // only drops rapid-fire repeats on a single socket.
 const TRACKER_STATE_MIN_INTERVAL_MS = 200;
+
+// Minimum interval between two `lifecycle-signals` reads on the SAME socket. This is
+// a FLOOD-GUARD ONLY, never a cache: every accepted request always does a fresh
+// `readLifecycleSignals` read — never memoized server-side (ARCHITECTURE §9.2: derived
+// live per render). The window only drops rapid-fire repeats on a single socket.
+const LIFECYCLE_SIGNALS_MIN_INTERVAL_MS = 200;
 
 export interface WsGatewayOptions {
   readonly intervalMs?: number;
@@ -86,6 +93,22 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
     }
   };
 
+  // Access control (A01): the per-path read frames (git-state, tracker-state,
+  // lifecycle-signals) drive FS + git + adapter subprocesses at a client-supplied
+  // path. Restrict every read to a currently PINNED project so a client cannot probe
+  // arbitrary host directories (a file-existence oracle + subprocess spawning). A read
+  // failure while checking the registry fails CLOSED (deny). This is the per-request
+  // path-ownership control; the WS Origin/token CONNECTION gate is tracked separately
+  // (6h6hMMj3PX4Gjcr8).
+  const isPinnedPath = (path: string): boolean => {
+    try {
+      return registry.listProjects().some((project) => project.path === path);
+    } catch (err) {
+      console.error('[ws] registry read failed during path-allowlist check', err);
+      return false;
+    }
+  };
+
   wss.on('connection', (socket: WebSocket) => {
     console.log('[ws] client connected');
 
@@ -105,6 +128,12 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
     // scalar would drop every project after the first. This only drops rapid
     // repeats of the SAME path on the same socket.
     const lastTrackerStateAt = new Map<string, number>();
+
+    // Per-socket, per-PATH flood-guard for `lifecycle-signals` — see
+    // LIFECYCLE_SIGNALS_MIN_INTERVAL_MS. Keyed by path (not a single scalar) because a
+    // single socket fans out one read per pinned project; a per-socket scalar would
+    // drop the fan-out.
+    const lastLifecycleSignalsAt = new Map<string, number>();
 
     const heartbeat = createHeartbeat({
       intervalMs,
@@ -151,6 +180,8 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
       // Git-state read: reply to the requesting socket only (never broadcast).
       // The whole flow is guarded so a read failure never crashes the gateway.
       if (message.type === 'git-state') {
+        // Access control: only read pinned projects (see isPinnedPath).
+        if (!isPinnedPath(message.path)) return;
         // Flood-guard: drop repeats of the SAME path within the min-interval on
         // this socket. Distinct paths (the per-project fan-out) always pass.
         const now = Date.now();
@@ -170,6 +201,8 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
       // Tracker-state read: reply to the requesting socket only (never broadcast).
       // The whole flow is guarded so a read failure never crashes the gateway.
       if (message.type === 'tracker-state') {
+        // Access control: only read pinned projects (see isPinnedPath).
+        if (!isPinnedPath(message.path)) return;
         // Flood-guard: drop repeats of the SAME path within the min-interval on
         // this socket. Distinct paths (the per-project fan-out) always pass.
         const now = Date.now();
@@ -182,6 +215,29 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
           sendFrame(socket, { type: 'tracker-state', path: message.path, state });
         } catch (err) {
           console.error('[ws] tracker-state read failed', err);
+        }
+        return;
+      }
+
+      if (message.type === 'lifecycle-signals') {
+        // Access control: only read pinned projects (see isPinnedPath).
+        if (!isPinnedPath(message.path)) return;
+        // Flood-guard: drop repeats of the SAME path within the min-interval on
+        // this socket. Distinct paths (the per-project fan-out) always pass.
+        const now = Date.now();
+        const last = lastLifecycleSignalsAt.get(message.path) ?? 0;
+        if (now - last < LIFECYCLE_SIGNALS_MIN_INTERVAL_MS) return;
+        lastLifecycleSignalsAt.set(message.path, now);
+
+        try {
+          const signals = await readLifecycleSignals(message.path);
+          sendFrame(socket, {
+            type: 'lifecycle-signals',
+            path: message.path,
+            state: { path: message.path, signals },
+          });
+        } catch (err) {
+          console.error('[ws] lifecycle-signals read failed', err);
         }
         return;
       }

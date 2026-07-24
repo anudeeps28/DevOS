@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   createWsClient,
   type GitState,
+  type LifecycleSignals,
   type RegistryCandidate,
   type RegistryProject,
   type TrackerState,
@@ -29,6 +30,10 @@ export interface UseProjectsResult {
   readonly trackerStates: Record<string, TrackerState>;
   /** Request a fresh tracker-state read for a project path; delegates to the live client. */
   readonly requestTrackerState: (path: string) => void;
+  /** Latest lifecycle-signals snapshots keyed by absolute project path; empty until the first arrives. */
+  readonly lifecycleSignals: Record<string, LifecycleSignals>;
+  /** Request a fresh lifecycle-signals read for a project path; delegates to the live client. */
+  readonly requestLifecycleSignals: (path: string) => void;
 }
 
 export interface UseProjectsOptions {
@@ -46,6 +51,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
   const [candidates, setCandidates] = useState<readonly RegistryCandidate[]>([]);
   const [gitStates, setGitStates] = useState<Record<string, GitState>>({});
   const [trackerStates, setTrackerStates] = useState<Record<string, TrackerState>>({});
+  const [lifecycleSignals, setLifecycleSignals] = useState<Record<string, LifecycleSignals>>({});
 
   // Hold the latest factory in a ref so the setup effect can run once (on mount)
   // without re-subscribing when an inline options object changes identity.
@@ -74,14 +80,20 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     const offTrackerState = client.onTrackerState((path, state) =>
       setTrackerStates((prev) => ({ ...prev, [path]: state })),
     );
+    // Immutable fold: a lifecycle-signals snapshot replaces the map with a new object.
+    const offLifecycleSignals = client.onLifecycleSignals((path, signals) =>
+      setLifecycleSignals((prev) => ({ ...prev, [path]: signals })),
+    );
     // Auto-refresh on connect: a freshly-opened socket requests a scan and a
-    // git-state + tracker-state read for every currently-known pinned project.
+    // git-state + tracker-state + lifecycle-signals read for every currently-known
+    // pinned project.
     const offStatus = client.onStatus((status) => {
       if (status === 'connected') {
         client.discover();
         for (const project of projectsRef.current) {
           client.requestGitState(project.path);
           client.requestTrackerState(project.path);
+          client.requestLifecycleSignals(project.path);
         }
       }
     });
@@ -91,6 +103,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
       offCandidates();
       offGitState();
       offTrackerState();
+      offLifecycleSignals();
       offStatus();
       client.close();
       clientRef.current = null;
@@ -106,6 +119,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     for (const project of projects) {
       client.requestGitState(project.path);
       client.requestTrackerState(project.path);
+      client.requestLifecycleSignals(project.path);
     }
   }, [projects]);
 
@@ -129,6 +143,10 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     clientRef.current?.requestTrackerState(path);
   }
 
+  function requestLifecycleSignals(path: string): void {
+    clientRef.current?.requestLifecycleSignals(path);
+  }
+
   return {
     projects,
     candidates,
@@ -139,5 +157,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     requestGitState,
     trackerStates,
     requestTrackerState,
+    lifecycleSignals,
+    requestLifecycleSignals,
   };
 }

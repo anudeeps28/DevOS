@@ -129,13 +129,60 @@ export interface TrackerStateSnapshot {
   readonly state: TrackerState;
 }
 
+// The whole-project lifecycle STAGE (New→Decide→Define→Build→Ship) is derived on
+// the CLIENT (web/src/lib/lifecycle.ts) so it can REUSE the per-card git-state and
+// tracker-state reads the grid already performs (ARCHITECTURE §9.2/§9.6: "reuses the
+// per-card local + tracker reads") — the server does NOT re-shell the tracker or
+// re-run `git status` for the lifecycle. The server only supplies the extra signals
+// the client can't derive from git-state/tracker-state: local planning files, story
+// state, release tags, and feature-branch commits. The stage type itself lives on
+// the client.
+
+/**
+ * The server-derived lifecycle signals a client can't get from git-state/tracker-state.
+ * The client combines these with its already-fetched tracker-state (wayfinder:map →
+ * Decide, an open task → Define) and computes the final stage via max(precedence).
+ */
+export interface LifecycleSignals {
+  /** A decision artifact — grill-summary.md / decision-brief.md (→ Decide). */
+  readonly hasDecideDocs: boolean;
+  /** A planning artifact — docs/SPEC.md / docs/ARCHITECTURE.md / PRD.md (→ Define). */
+  readonly hasDefineDocs: boolean;
+  /** A genuinely started tasks/stories/<id>/ (executor-state w/ Progress) (→ Build). */
+  readonly hasStartedStory: boolean;
+  /** On a non-default branch that resolves to at least one commit (→ Build). */
+  readonly hasFeatureBranchCommits: boolean;
+  /** At least one release tag (→ Ship). codePlatform:none, so tags are the honest floor. */
+  readonly hasReleaseTags: boolean;
+}
+
+/** The lifecycle-signals snapshot of a project as sent to the client. */
+export interface LifecycleSignalsState {
+  readonly path: string;
+  readonly signals: LifecycleSignals;
+}
+
+/** Inbound: request the current lifecycle signals for a project path. */
+export interface LifecycleSignalsMessage {
+  readonly type: 'lifecycle-signals';
+  readonly path: string;
+}
+
+/** Outbound: a lifecycle-signals snapshot for a single project path. */
+export interface LifecycleSignalsSnapshot {
+  readonly type: 'lifecycle-signals';
+  readonly path: string;
+  readonly state: LifecycleSignalsState;
+}
+
 /** Every message the server accepts from a client. */
 export type InboundMessage =
   | PinMessage
   | UnpinMessage
   | DiscoverMessage
   | GitStateMessage
-  | TrackerStateMessage;
+  | TrackerStateMessage
+  | LifecycleSignalsMessage;
 
 /** Every registry message the server emits to a client. */
 export type OutboundMessage =
@@ -143,7 +190,8 @@ export type OutboundMessage =
   | RegistryError
   | CandidatesSnapshot
   | GitStateSnapshot
-  | TrackerStateSnapshot;
+  | TrackerStateSnapshot
+  | LifecycleSignalsSnapshot;
 
 /**
  * Validate a raw WS frame against the inbound contract. Branches on `type` first:
@@ -197,6 +245,20 @@ export function parseInboundMessage(data: unknown): InboundMessage | null {
       return null;
     }
     return Object.freeze<TrackerStateMessage>({ type: 'tracker-state', path });
+  }
+
+  // `lifecycle-signals` shares the same non-empty ABSOLUTE-path requirement as tracker-state.
+  if (type === 'lifecycle-signals') {
+    const { path } = frame;
+    if (
+      typeof path !== 'string' ||
+      path.length === 0 ||
+      path.length > MAX_PATH_LENGTH ||
+      !isAbsolute(path)
+    ) {
+      return null;
+    }
+    return Object.freeze<LifecycleSignalsMessage>({ type: 'lifecycle-signals', path });
   }
 
   // `pin`/`unpin` share the absolute-path requirement.

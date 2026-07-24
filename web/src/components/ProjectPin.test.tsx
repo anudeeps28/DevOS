@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type {
   GitState,
+  LifecycleSignals,
   RegistryCandidate,
   RegistryProject,
   TrackerState,
@@ -15,10 +16,12 @@ const unpin = vi.fn();
 const discover = vi.fn();
 const requestGitState = vi.fn();
 const requestTrackerState = vi.fn();
+const requestLifecycleSignals = vi.fn();
 let projects: readonly RegistryProject[] = [];
 let candidates: readonly RegistryCandidate[] = [];
 let gitStates: Record<string, GitState> = {};
 let trackerStates: Record<string, TrackerState> = {};
+let lifecycleSignals: Record<string, LifecycleSignals> = {};
 
 vi.mock('@/hooks/useProjects', () => ({
   useProjects: () => ({
@@ -31,8 +34,21 @@ vi.mock('@/hooks/useProjects', () => ({
     requestGitState,
     trackerStates,
     requestTrackerState,
+    lifecycleSignals,
+    requestLifecycleSignals,
   }),
 }));
+
+function makeSignals(overrides: Partial<LifecycleSignals> = {}): LifecycleSignals {
+  return {
+    hasDecideDocs: false,
+    hasDefineDocs: false,
+    hasStartedStory: false,
+    hasFeatureBranchCommits: false,
+    hasReleaseTags: false,
+    ...overrides,
+  };
+}
 
 // Imported after the mock so the component picks up the mocked hook.
 import { ProjectPin } from '@/components/ProjectPin';
@@ -87,11 +103,13 @@ describe('ProjectPin', () => {
     candidates = [];
     gitStates = {};
     trackerStates = {};
+    lifecycleSignals = {};
     pin.mockReset();
     unpin.mockReset();
     discover.mockReset();
     requestGitState.mockReset();
     requestTrackerState.mockReset();
+    requestLifecycleSignals.mockReset();
   });
 
   afterEach(() => {
@@ -337,6 +355,69 @@ describe('ProjectPin', () => {
 
       expect(requestTrackerState).toHaveBeenCalledWith('/abs/one');
       expect(requestTrackerState).toHaveBeenCalledWith('/abs/two');
+    });
+  });
+
+  describe('lifecycle stage badge', () => {
+    it('shows the loading affordance when no signals have arrived yet', () => {
+      projects = [sampleProject('/abs/one')];
+      // lifecycleSignals intentionally empty → undefined snapshot for this path.
+      render(<ProjectPin />);
+
+      const badge = screen.getByTestId('lifecycle-state-/abs/one');
+      expect(badge).toHaveAttribute('data-stage', 'null');
+      expect(badge).toHaveTextContent('…');
+    });
+
+    it('derives and renders the stage from signals (a started story → Build)', () => {
+      projects = [sampleProject('/abs/one')];
+      lifecycleSignals = { '/abs/one': makeSignals({ hasStartedStory: true }) };
+      render(<ProjectPin />);
+
+      const badge = screen.getByTestId('lifecycle-state-/abs/one');
+      expect(badge).toHaveAttribute('data-stage', 'Build');
+      expect(badge).toHaveTextContent('Build');
+    });
+
+    it('derives each of the five stages from the signal that produces it', () => {
+      const cases: Array<{ stage: string; signals: LifecycleSignals }> = [
+        { stage: 'New', signals: makeSignals() },
+        { stage: 'Decide', signals: makeSignals({ hasDecideDocs: true }) },
+        { stage: 'Define', signals: makeSignals({ hasDefineDocs: true }) },
+        { stage: 'Build', signals: makeSignals({ hasStartedStory: true }) },
+        { stage: 'Ship', signals: makeSignals({ hasReleaseTags: true }) },
+      ];
+      for (const { stage, signals } of cases) {
+        projects = [sampleProject('/abs/one')];
+        lifecycleSignals = { '/abs/one': signals };
+        const { unmount } = render(<ProjectPin />);
+        const badge = screen.getByTestId('lifecycle-state-/abs/one');
+        expect(badge).toHaveAttribute('data-stage', stage);
+        expect(badge).toHaveTextContent(stage);
+        unmount();
+      }
+    });
+
+    it('composes the stage with the card tracker-state (a wayfinder:map task → Decide)', () => {
+      projects = [sampleProject('/abs/one')];
+      lifecycleSignals = { '/abs/one': makeSignals() };
+      trackerStates = {
+        '/abs/one': sampleTrackerState('/abs/one', {
+          nextTask: { id: 'wayfinder:map:x', title: 'Map', priority: 4, url: null },
+        }),
+      };
+      render(<ProjectPin />);
+
+      const badge = screen.getByTestId('lifecycle-state-/abs/one');
+      expect(badge).toHaveAttribute('data-stage', 'Decide');
+    });
+
+    it('requests fresh lifecycle-signals for each pinned project on mount', () => {
+      projects = [sampleProject('/abs/one'), sampleProject('/abs/two')];
+      render(<ProjectPin />);
+
+      expect(requestLifecycleSignals).toHaveBeenCalledWith('/abs/one');
+      expect(requestLifecycleSignals).toHaveBeenCalledWith('/abs/two');
     });
   });
 });

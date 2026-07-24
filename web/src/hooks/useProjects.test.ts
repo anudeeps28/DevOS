@@ -7,6 +7,8 @@ import type {
   ConnectionStatus,
   GitState,
   GitStateListener,
+  LifecycleSignals,
+  LifecycleSignalsListener,
   RegistryCandidate,
   RegistryListener,
   RegistryProject,
@@ -27,11 +29,13 @@ function makeFakeClient() {
   let statusListener: StatusListener | null = null;
   let gitStateListener: GitStateListener | null = null;
   let trackerStateListener: TrackerStateListener | null = null;
+  let lifecycleSignalsListener: LifecycleSignalsListener | null = null;
   const pin = vi.fn();
   const unpin = vi.fn();
   const discover = vi.fn();
   const requestGitState = vi.fn();
   const requestTrackerState = vi.fn();
+  const requestLifecycleSignals = vi.fn();
   const close = vi.fn();
 
   const client: WsClient = {
@@ -68,11 +72,18 @@ function makeFakeClient() {
         trackerStateListener = null;
       };
     },
+    onLifecycleSignals: (listener) => {
+      lifecycleSignalsListener = listener;
+      return () => {
+        lifecycleSignalsListener = null;
+      };
+    },
     pin,
     unpin,
     discover,
     requestGitState,
     requestTrackerState,
+    requestLifecycleSignals,
     close,
   };
 
@@ -83,6 +94,7 @@ function makeFakeClient() {
     discover,
     requestGitState,
     requestTrackerState,
+    requestLifecycleSignals,
     close,
     emitRegistry: (projects: readonly RegistryProject[]) =>
       registryListener?.(projects),
@@ -93,6 +105,8 @@ function makeFakeClient() {
       gitStateListener?.(path, state),
     emitTrackerState: (path: string, state: TrackerState) =>
       trackerStateListener?.(path, state),
+    emitLifecycleSignals: (path: string, signals: LifecycleSignals) =>
+      lifecycleSignalsListener?.(path, signals),
   };
 }
 
@@ -348,6 +362,85 @@ describe('useProjects', () => {
     expect(fake.requestTrackerState).toHaveBeenCalledWith('/abs/one');
     expect(fake.requestTrackerState).toHaveBeenCalledWith('/abs/two');
     expect(fake.requestTrackerState).toHaveBeenCalledTimes(2);
+  });
+
+  it('starts with an empty lifecycleSignals map', () => {
+    const fake = makeFakeClient();
+    const { result } = renderHook(() =>
+      useProjects({ createClient: () => fake.client }),
+    );
+
+    expect(result.current.lifecycleSignals).toEqual({});
+  });
+
+  it('folds an emitted lifecycle-signals into lifecycleSignals keyed by path', () => {
+    const fake = makeFakeClient();
+    const { result } = renderHook(() =>
+      useProjects({ createClient: () => fake.client }),
+    );
+
+    const signalsOne: LifecycleSignals = {
+      hasDecideDocs: false,
+      hasDefineDocs: false,
+      hasStartedStory: true,
+      hasFeatureBranchCommits: false,
+      hasReleaseTags: false,
+    };
+    act(() => fake.emitLifecycleSignals('/abs/one', signalsOne));
+    expect(result.current.lifecycleSignals).toEqual({ '/abs/one': signalsOne });
+
+    const signalsTwo: LifecycleSignals = {
+      hasDecideDocs: false,
+      hasDefineDocs: true,
+      hasStartedStory: false,
+      hasFeatureBranchCommits: false,
+      hasReleaseTags: false,
+    };
+    act(() => fake.emitLifecycleSignals('/abs/two', signalsTwo));
+    expect(result.current.lifecycleSignals).toEqual({
+      '/abs/one': signalsOne,
+      '/abs/two': signalsTwo,
+    });
+  });
+
+  it('delegates requestLifecycleSignals to the underlying client', () => {
+    const fake = makeFakeClient();
+    const { result } = renderHook(() =>
+      useProjects({ createClient: () => fake.client }),
+    );
+
+    act(() => result.current.requestLifecycleSignals('/abs/path'));
+
+    expect(fake.requestLifecycleSignals).toHaveBeenCalledWith('/abs/path');
+  });
+
+  it('requests lifecycle-signals for each pinned project when the registry arrives', () => {
+    const fake = makeFakeClient();
+    renderHook(() => useProjects({ createClient: () => fake.client }));
+
+    act(() =>
+      fake.emitRegistry([sampleProject('/abs/one'), sampleProject('/abs/two')]),
+    );
+
+    expect(fake.requestLifecycleSignals).toHaveBeenCalledWith('/abs/one');
+    expect(fake.requestLifecycleSignals).toHaveBeenCalledWith('/abs/two');
+    expect(fake.requestLifecycleSignals).toHaveBeenCalledTimes(2);
+  });
+
+  it('requests lifecycle-signals for known projects on connect', () => {
+    const fake = makeFakeClient();
+    renderHook(() => useProjects({ createClient: () => fake.client }));
+
+    act(() =>
+      fake.emitRegistry([sampleProject('/abs/one'), sampleProject('/abs/two')]),
+    );
+    fake.requestLifecycleSignals.mockClear();
+
+    act(() => fake.emitStatus('connected'));
+
+    expect(fake.requestLifecycleSignals).toHaveBeenCalledWith('/abs/one');
+    expect(fake.requestLifecycleSignals).toHaveBeenCalledWith('/abs/two');
+    expect(fake.requestLifecycleSignals).toHaveBeenCalledTimes(2);
   });
 
   it('closes the client on unmount', () => {

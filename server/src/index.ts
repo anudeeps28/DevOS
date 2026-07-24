@@ -9,7 +9,7 @@ import { pathToFileURL } from 'node:url';
 import type { AddressInfo } from 'node:net';
 import { DB_PATH, HOST, PORT, PROJECT_ROOTS, WS_PATH, assertLoopbackHost } from './config.js';
 import { openDatabase } from './db/database.js';
-import { createRegistry } from './registry/registry.js';
+import { createRegistry, type Registry } from './registry/registry.js';
 import { createStaticHandler } from './static-server.js';
 import { attachWsGateway } from './ws-gateway.js';
 
@@ -24,6 +24,8 @@ export interface DevOsServer {
   readonly server: http.Server;
   readonly start: () => Promise<AddressInfo>;
   readonly stop: () => Promise<void>;
+  /** The project registry — exposed so in-process tests can pin fixtures directly. */
+  readonly registry: Registry;
 }
 
 export function createServer(options?: CreateServerOptions): DevOsServer {
@@ -69,7 +71,7 @@ export function createServer(options?: CreateServerOptions): DevOsServer {
     db.close();
   };
 
-  return { server, start, stop };
+  return { server, start, stop, registry };
 }
 
 function registerShutdown(instance: DevOsServer): void {

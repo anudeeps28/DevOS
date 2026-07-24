@@ -5,6 +5,7 @@ import {
   type ConnectionStatus,
   type GitState,
   type Heartbeat,
+  type LifecycleSignals,
   type RegistryCandidate,
   type RegistryProject,
   type TrackerState,
@@ -563,6 +564,118 @@ function sampleTrackerState(path: string): TrackerState {
 function trackerStateFrame(path: string, state: unknown): string {
   return JSON.stringify({ type: 'tracker-state', path, state });
 }
+
+function sampleLifecycleSignals(overrides: Partial<LifecycleSignals> = {}): LifecycleSignals {
+  return {
+    hasDecideDocs: false,
+    hasDefineDocs: true,
+    hasStartedStory: false,
+    hasFeatureBranchCommits: false,
+    hasReleaseTags: false,
+    ...overrides,
+  };
+}
+
+function lifecycleSignalsFrame(path: string, signals: unknown): string {
+  return JSON.stringify({ type: 'lifecycle-signals', path, state: { path, signals } });
+}
+
+describe('ws-client lifecycle-signals frames', () => {
+  beforeEach(() => {
+    FakeSocket.instances = [];
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function makeLifecycleSignalsClient() {
+    const received: { path: string; signals: LifecycleSignals }[] = [];
+    const client = createWsClient({
+      url: 'ws://localhost/ws',
+      createWebSocket: (url) => new FakeSocket(url),
+    });
+    const off = client.onLifecycleSignals((path, signals) => received.push({ path, signals }));
+    const socket = FakeSocket.instances[0]!;
+    socket.open();
+    return { client, received, off, socket };
+  }
+
+  it('delivers a valid lifecycle-signals frame with the correct path and frozen signals', () => {
+    const { received, socket } = makeLifecycleSignalsClient();
+    const signals = sampleLifecycleSignals({ hasStartedStory: true });
+
+    socket.message(lifecycleSignalsFrame('/abs/repo', signals));
+
+    expect(received).toHaveLength(1);
+    expect(received[0]!.path).toBe('/abs/repo');
+    expect(received[0]!.signals).toEqual(signals);
+    expect(Object.isFrozen(received[0]!.signals)).toBe(true);
+  });
+
+  it('drops malformed lifecycle-signals frames without emitting to listeners', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { received, socket } = makeLifecycleSignalsClient();
+
+    // A signal field is non-boolean.
+    expect(() =>
+      socket.message(
+        lifecycleSignalsFrame('/abs/repo', { ...sampleLifecycleSignals(), hasDefineDocs: 'yes' }),
+      ),
+    ).not.toThrow();
+    // A signal field is missing.
+    expect(() =>
+      socket.message(lifecycleSignalsFrame('/abs/repo', { hasDefineDocs: true })),
+    ).not.toThrow();
+    // Missing path on the frame.
+    expect(() =>
+      socket.message(
+        JSON.stringify({ type: 'lifecycle-signals', state: { signals: sampleLifecycleSignals() } }),
+      ),
+    ).not.toThrow();
+    // Missing state entirely.
+    expect(() =>
+      socket.message(JSON.stringify({ type: 'lifecycle-signals', path: '/abs/repo' })),
+    ).not.toThrow();
+
+    expect(received).toEqual([]);
+    expect(warn).toHaveBeenCalled();
+  });
+
+  it('requestLifecycleSignals() sends a lifecycle-signals frame once the socket is OPEN', () => {
+    const { client } = makeClient();
+    const socket = FakeSocket.instances[0]!;
+    socket.open();
+
+    client.requestLifecycleSignals('/abs/repo');
+
+    expect(socket.sent).toEqual([JSON.stringify({ type: 'lifecycle-signals', path: '/abs/repo' })]);
+  });
+
+  it('drops (and warns) when requestLifecycleSignals() is called before the socket is OPEN', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { client } = makeClient();
+    const socket = FakeSocket.instances[0]!;
+    // NOTE: socket still CONNECTING — never opened.
+
+    client.requestLifecycleSignals('/abs/repo');
+
+    expect(socket.sent).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('close() drops lifecycle-signals subscribers', () => {
+    const { client, received, socket } = makeLifecycleSignalsClient();
+
+    socket.message(lifecycleSignalsFrame('/abs/repo', sampleLifecycleSignals()));
+    expect(received).toHaveLength(1);
+
+    client.close();
+
+    socket.onmessage?.({ data: lifecycleSignalsFrame('/abs/repo', sampleLifecycleSignals()) });
+    expect(received).toHaveLength(1);
+  });
+});
 
 describe('ws-client tracker-state frames', () => {
   beforeEach(() => {
