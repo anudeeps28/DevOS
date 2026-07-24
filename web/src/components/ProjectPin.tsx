@@ -1,7 +1,69 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import { useProjects } from '@/hooks/useProjects';
+import type { GitState } from '@/lib/ws-client';
 import { cn } from '@/lib/utils';
+
+/** Stringify a nullable numeric field for a `data-*` attribute. */
+function attrNum(value: number | null): string {
+  return value === null ? 'null' : String(value);
+}
+
+/**
+ * Compact git-status line for one pinned row. Render-only:
+ *  - undefined snapshot → a subtle loading affordance,
+ *  - not a repo → muted "not a git repo",
+ *  - detached HEAD → "detached",
+ *  - else the branch name, a dirty marker when dirty, and `↑{ahead} ↓{behind}`
+ *    only when ahead/behind are non-null (a no-upstream branch shows no arrows).
+ */
+function GitStatusLine({ path, state }: { path: string; state: GitState | undefined }): JSX.Element {
+  if (state === undefined) {
+    return (
+      <span
+        data-testid={`git-state-${path}`}
+        data-isrepo="null"
+        className="font-mono text-xs text-muted-foreground/60"
+      >
+        …
+      </span>
+    );
+  }
+
+  const showArrows = state.ahead !== null && state.behind !== null;
+
+  return (
+    <span
+      data-testid={`git-state-${path}`}
+      data-isrepo={String(state.isRepo)}
+      data-branch={state.branch ?? 'null'}
+      data-dirty={String(state.dirty)}
+      data-ahead={attrNum(state.ahead)}
+      data-behind={attrNum(state.behind)}
+      className="flex items-center gap-1.5 font-mono text-xs text-muted-foreground"
+    >
+      {!state.isRepo ? (
+        <span className="italic">not a git repo</span>
+      ) : state.detached ? (
+        <span>detached</span>
+      ) : (
+        <>
+          <span className="text-foreground">{state.branch ?? 'null'}</span>
+          {state.dirty && (
+            <span title="uncommitted changes" className="text-amber-500">
+              ●
+            </span>
+          )}
+          {showArrows && (
+            <span className="tabular-nums">
+              ↑{state.ahead} ↓{state.behind}
+            </span>
+          )}
+        </>
+      )}
+    </span>
+  );
+}
 
 /**
  * Project discovery + pin management. Renders three regions:
@@ -12,8 +74,17 @@ import { cn } from '@/lib/utils';
  * Render-only: all state lives in the useProjects hook; no local mutation.
  */
 export function ProjectPin() {
-  const { projects, candidates, pin, unpin, discover } = useProjects();
+  const { projects, candidates, pin, unpin, discover, gitStates, requestGitState } = useProjects();
   const [path, setPath] = useState('');
+
+  // Fresh-per-(re)mount: request a git-state read for each pinned project when
+  // the pinned list changes. The hook already requests on connect/projects-change;
+  // this covers a component remount over an already-open socket.
+  const pinnedKey = projects.map((project) => project.path).join('\n');
+  useEffect(() => {
+    for (const project of projects) requestGitState(project.path);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pinnedKey]);
 
   const trimmed = path.trim();
   const canPin = trimmed.length > 0;
@@ -115,7 +186,10 @@ export function ProjectPin() {
                 data-path={project.path}
                 className="flex items-center justify-between gap-2 rounded-md border border-border px-3 py-1.5"
               >
-                <span className="truncate font-mono text-sm">{project.path}</span>
+                <div className="flex min-w-0 flex-col gap-0.5">
+                  <span className="truncate font-mono text-sm">{project.path}</span>
+                  <GitStatusLine path={project.path} state={gitStates[project.path]} />
+                </div>
                 <button
                   data-testid={`unpin-${project.path}`}
                   type="button"

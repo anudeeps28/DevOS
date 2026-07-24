@@ -5,6 +5,8 @@ import { useProjects } from '@/hooks/useProjects';
 import type {
   CandidateListener,
   ConnectionStatus,
+  GitState,
+  GitStateListener,
   RegistryCandidate,
   RegistryListener,
   RegistryProject,
@@ -21,9 +23,11 @@ function makeFakeClient() {
   let registryListener: RegistryListener | null = null;
   let candidateListener: CandidateListener | null = null;
   let statusListener: StatusListener | null = null;
+  let gitStateListener: GitStateListener | null = null;
   const pin = vi.fn();
   const unpin = vi.fn();
   const discover = vi.fn();
+  const requestGitState = vi.fn();
   const close = vi.fn();
 
   const client: WsClient = {
@@ -48,9 +52,16 @@ function makeFakeClient() {
         candidateListener = null;
       };
     },
+    onGitState: (listener) => {
+      gitStateListener = listener;
+      return () => {
+        gitStateListener = null;
+      };
+    },
     pin,
     unpin,
     discover,
+    requestGitState,
     close,
   };
 
@@ -59,12 +70,15 @@ function makeFakeClient() {
     pin,
     unpin,
     discover,
+    requestGitState,
     close,
     emitRegistry: (projects: readonly RegistryProject[]) =>
       registryListener?.(projects),
     emitCandidates: (candidates: readonly RegistryCandidate[]) =>
       candidateListener?.(candidates),
     emitStatus: (status: ConnectionStatus) => statusListener?.(status),
+    emitGitState: (path: string, state: GitState) =>
+      gitStateListener?.(path, state),
   };
 }
 
@@ -80,6 +94,19 @@ function sampleProject(path: string): RegistryProject {
 
 function sampleCandidate(path: string): RegistryCandidate {
   return { path, displayName: null, hasClaudeInstall: true };
+}
+
+function sampleGitState(path: string): GitState {
+  return {
+    path,
+    isRepo: true,
+    branch: 'main',
+    detached: false,
+    dirty: false,
+    ahead: 0,
+    behind: 0,
+    upstream: 'origin/main',
+  };
 }
 
 describe('useProjects', () => {
@@ -164,6 +191,73 @@ describe('useProjects', () => {
     act(() => fake.emitStatus('connected'));
 
     expect(fake.discover).toHaveBeenCalledTimes(1);
+  });
+
+  it('starts with an empty gitStates map', () => {
+    const fake = makeFakeClient();
+    const { result } = renderHook(() =>
+      useProjects({ createClient: () => fake.client }),
+    );
+
+    expect(result.current.gitStates).toEqual({});
+  });
+
+  it('folds an emitted git-state into gitStates keyed by path', () => {
+    const fake = makeFakeClient();
+    const { result } = renderHook(() =>
+      useProjects({ createClient: () => fake.client }),
+    );
+
+    const stateOne = sampleGitState('/abs/one');
+    act(() => fake.emitGitState('/abs/one', stateOne));
+    expect(result.current.gitStates).toEqual({ '/abs/one': stateOne });
+
+    const stateTwo = sampleGitState('/abs/two');
+    act(() => fake.emitGitState('/abs/two', stateTwo));
+    expect(result.current.gitStates).toEqual({
+      '/abs/one': stateOne,
+      '/abs/two': stateTwo,
+    });
+  });
+
+  it('delegates requestGitState to the underlying client', () => {
+    const fake = makeFakeClient();
+    const { result } = renderHook(() =>
+      useProjects({ createClient: () => fake.client }),
+    );
+
+    act(() => result.current.requestGitState('/abs/path'));
+
+    expect(fake.requestGitState).toHaveBeenCalledWith('/abs/path');
+  });
+
+  it('requests git-state for each pinned project when the registry arrives', () => {
+    const fake = makeFakeClient();
+    renderHook(() => useProjects({ createClient: () => fake.client }));
+
+    act(() =>
+      fake.emitRegistry([sampleProject('/abs/one'), sampleProject('/abs/two')]),
+    );
+
+    expect(fake.requestGitState).toHaveBeenCalledWith('/abs/one');
+    expect(fake.requestGitState).toHaveBeenCalledWith('/abs/two');
+    expect(fake.requestGitState).toHaveBeenCalledTimes(2);
+  });
+
+  it('requests git-state for known projects on connect', () => {
+    const fake = makeFakeClient();
+    renderHook(() => useProjects({ createClient: () => fake.client }));
+
+    act(() =>
+      fake.emitRegistry([sampleProject('/abs/one'), sampleProject('/abs/two')]),
+    );
+    fake.requestGitState.mockClear();
+
+    act(() => fake.emitStatus('connected'));
+
+    expect(fake.requestGitState).toHaveBeenCalledWith('/abs/one');
+    expect(fake.requestGitState).toHaveBeenCalledWith('/abs/two');
+    expect(fake.requestGitState).toHaveBeenCalledTimes(2);
   });
 
   it('closes the client on unmount', () => {

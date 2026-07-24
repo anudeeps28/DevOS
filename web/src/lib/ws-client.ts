@@ -46,6 +46,22 @@ export interface RegistryCandidate {
   readonly hasClaudeInstall: boolean;
 }
 
+/**
+ * A validated git-state snapshot. Mirrors the server's GitState
+ * (server/src/ws-protocol.ts) — duplicated typed contract, no shared package.
+ * Frozen — never mutated after construction.
+ */
+export interface GitState {
+  readonly path: string;
+  readonly isRepo: boolean;
+  readonly branch: string | null;
+  readonly detached: boolean;
+  readonly dirty: boolean;
+  readonly ahead: number | null;
+  readonly behind: number | null;
+  readonly upstream: string | null;
+}
+
 /** The slice of the WebSocket API this client depends on (keeps fakes tiny). */
 export interface WebSocketLike {
   readonly readyState: number;
@@ -83,6 +99,7 @@ export type StatusListener = (status: ConnectionStatus) => void;
 export type HeartbeatListener = (heartbeat: Heartbeat) => void;
 export type RegistryListener = (projects: readonly RegistryProject[]) => void;
 export type CandidateListener = (candidates: readonly RegistryCandidate[]) => void;
+export type GitStateListener = (path: string, state: GitState) => void;
 
 /** Public, framework-agnostic client surface. */
 export interface WsClient {
@@ -95,12 +112,16 @@ export interface WsClient {
   readonly onRegistry: (listener: RegistryListener) => () => void;
   /** Subscribe to validated discovery-candidate snapshots. */
   readonly onCandidates: (listener: CandidateListener) => () => void;
+  /** Subscribe to validated git-state snapshots. */
+  readonly onGitState: (listener: GitStateListener) => () => void;
   /** Pin a project by absolute path; no-op (warns) when the socket is not open. */
   readonly pin: (path: string, opts?: { displayName?: string; uiPrefs?: unknown }) => void;
   /** Unpin a project by absolute path; no-op (warns) when the socket is not open. */
   readonly unpin: (path: string) => void;
   /** Request a fresh discovery of candidate projects; no-op (warns) when the socket is not open. */
   readonly discover: () => void;
+  /** Request the current git state for a project path; no-op (warns) when the socket is not open. */
+  readonly requestGitState: (path: string) => void;
   /** Tear down: cancels reconnects, closes the socket, drops subscribers. */
   readonly close: () => void;
 }
@@ -259,6 +280,58 @@ function parseCandidates(data: unknown): readonly RegistryCandidate[] | null {
 }
 
 /**
+ * Validate a single raw entry against the GitState contract:
+ * `{ path: string, isRepo: boolean, branch: string|null, detached: boolean,
+ *    dirty: boolean, ahead: number|null, behind: number|null, upstream: string|null }`.
+ * `ahead`/`behind` must be a finite number or null (NaN/Infinity/non-number rejected).
+ * Returns a frozen GitState, or null for anything malformed.
+ */
+function parseGitState(entry: unknown): GitState | null {
+  if (typeof entry !== 'object' || entry === null) return null;
+
+  const record = entry as Record<string, unknown>;
+  const { path, isRepo, branch, detached, dirty, ahead, behind, upstream } = record;
+
+  if (typeof path !== 'string' || path.length === 0) return null;
+  if (typeof isRepo !== 'boolean') return null;
+  if (branch !== null && typeof branch !== 'string') return null;
+  if (typeof detached !== 'boolean') return null;
+  if (typeof dirty !== 'boolean') return null;
+  if (ahead !== null && (typeof ahead !== 'number' || !Number.isFinite(ahead))) return null;
+  if (behind !== null && (typeof behind !== 'number' || !Number.isFinite(behind))) return null;
+  if (upstream !== null && typeof upstream !== 'string') return null;
+
+  return Object.freeze({ path, isRepo, branch, detached, dirty, ahead, behind, upstream });
+}
+
+/**
+ * Validate a raw WS frame against the pinned git-state contract:
+ * `{ type: 'git-state', path: string, state: GitState }`.
+ * Returns a frozen `{ path, state }`, or null for anything malformed.
+ */
+function parseGitStateSnapshot(data: unknown): { path: string; state: GitState } | null {
+  if (typeof data !== 'string') return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return null;
+  }
+
+  if (typeof parsed !== 'object' || parsed === null) return null;
+
+  const frame = parsed as Record<string, unknown>;
+  if (frame.type !== 'git-state') return null;
+  if (typeof frame.path !== 'string' || frame.path.length === 0) return null;
+
+  const state = parseGitState(frame.state);
+  if (state === null) return null;
+
+  return Object.freeze({ path: frame.path, state });
+}
+
+/**
  * Peek the `type` discriminant of a raw frame without full validation, so
  * handleMessage can route to the right parser. Returns null for anything that
  * is not a JSON object with a string `type`. Never throws.
@@ -292,6 +365,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
   const heartbeatListeners = new Set<HeartbeatListener>();
   const registryListeners = new Set<RegistryListener>();
   const candidateListeners = new Set<CandidateListener>();
+  const gitStateListeners = new Set<GitStateListener>();
 
   let state: ClientState = {
     status: 'connecting',
@@ -320,6 +394,10 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
 
   function emitCandidates(candidates: readonly RegistryCandidate[]): void {
     for (const listener of candidateListeners) listener(candidates);
+  }
+
+  function emitGitState(path: string, state: GitState): void {
+    for (const listener of gitStateListeners) listener(path, state);
   }
 
   // Write a frame only when the socket is OPEN; otherwise drop + warn (never throw).
@@ -369,6 +447,16 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
         return;
       }
       emitCandidates(candidates);
+      return;
+    }
+
+    if (type === 'git-state') {
+      const snapshot = parseGitStateSnapshot(data);
+      if (snapshot === null) {
+        console.warn('[ws-client] dropped malformed frame:', data);
+        return;
+      }
+      emitGitState(snapshot.path, snapshot.state);
       return;
     }
 
@@ -427,6 +515,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     heartbeatListeners.clear();
     registryListeners.clear();
     candidateListeners.clear();
+    gitStateListeners.clear();
 
     if (state.reconnectHandle !== null) {
       timers.clearTimeout(state.reconnectHandle);
@@ -461,6 +550,10 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     sendFrame({ type: 'discover' });
   }
 
+  function requestGitState(path: string): void {
+    sendFrame({ type: 'git-state', path });
+  }
+
   connect();
 
   return {
@@ -490,9 +583,16 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
         candidateListeners.delete(listener);
       };
     },
+    onGitState: (listener) => {
+      gitStateListeners.add(listener);
+      return () => {
+        gitStateListeners.delete(listener);
+      };
+    },
     pin,
     unpin,
     discover,
+    requestGitState,
     close,
   };
 }

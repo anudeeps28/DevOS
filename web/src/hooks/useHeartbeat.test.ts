@@ -37,9 +37,11 @@ function makeFakeClient() {
     },
     onRegistry: () => () => {},
     onCandidates: () => () => {},
+    onGitState: () => () => {},
     pin: () => {},
     unpin: () => {},
     discover: () => {},
+    requestGitState: () => {},
     close,
   };
 

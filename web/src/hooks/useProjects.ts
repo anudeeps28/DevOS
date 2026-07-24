@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 
 import {
   createWsClient,
+  type GitState,
   type RegistryCandidate,
   type RegistryProject,
   type WsClient,
@@ -19,6 +20,10 @@ export interface UseProjectsResult {
   readonly unpin: (path: string) => void;
   /** Request a fresh discovery scan; delegates to the live client. */
   readonly discover: () => void;
+  /** Latest git-state snapshots keyed by absolute project path; empty until the first arrives. */
+  readonly gitStates: Record<string, GitState>;
+  /** Request a fresh git-state read for a project path; delegates to the live client. */
+  readonly requestGitState: (path: string) => void;
 }
 
 export interface UseProjectsOptions {
@@ -34,6 +39,7 @@ export interface UseProjectsOptions {
 export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult {
   const [projects, setProjects] = useState<readonly RegistryProject[]>([]);
   const [candidates, setCandidates] = useState<readonly RegistryCandidate[]>([]);
+  const [gitStates, setGitStates] = useState<Record<string, GitState>>({});
 
   // Hold the latest factory in a ref so the setup effect can run once (on mount)
   // without re-subscribing when an inline options object changes identity.
@@ -43,25 +49,48 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
   // Hold the live client so pin/unpin can delegate to it after mount.
   const clientRef = useRef<WsClient | null>(null);
 
+  // Hold the latest projects so the mount-time onStatus handler (which closes
+  // over mount state) can request git-state for whatever is known at connect.
+  const projectsRef = useRef(projects);
+  projectsRef.current = projects;
+
   useEffect(() => {
     const factory = createClientRef.current ?? createWsClient;
     const client = factory();
     clientRef.current = client;
     const offRegistry = client.onRegistry(setProjects);
     const offCandidates = client.onCandidates(setCandidates);
-    // Auto-discover on connect: a freshly-opened socket immediately requests a scan.
+    // Immutable fold: a git-state snapshot replaces the map with a new object.
+    const offGitState = client.onGitState((path, state) =>
+      setGitStates((prev) => ({ ...prev, [path]: state })),
+    );
+    // Auto-refresh on connect: a freshly-opened socket requests a scan and a
+    // git-state read for every currently-known pinned project.
     const offStatus = client.onStatus((status) => {
-      if (status === 'connected') client.discover();
+      if (status === 'connected') {
+        client.discover();
+        for (const project of projectsRef.current) client.requestGitState(project.path);
+      }
     });
 
     return () => {
       offRegistry();
       offCandidates();
+      offGitState();
       offStatus();
       client.close();
       clientRef.current = null;
     };
   }, []);
+
+  // Whenever the pinned project set changes, request a fresh git-state read for
+  // each project. The registry snapshot may arrive after connect, so this covers
+  // projects that appear once the socket is already open.
+  useEffect(() => {
+    const client = clientRef.current;
+    if (client === null) return;
+    for (const project of projects) client.requestGitState(project.path);
+  }, [projects]);
 
   function pin(path: string, opts?: { displayName?: string; uiPrefs?: unknown }): void {
     clientRef.current?.pin(path, opts);
@@ -75,5 +104,9 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     clientRef.current?.discover();
   }
 
-  return { projects, candidates, pin, unpin, discover };
+  function requestGitState(path: string): void {
+    clientRef.current?.requestGitState(path);
+  }
+
+  return { projects, candidates, pin, unpin, discover, gitStates, requestGitState };
 }

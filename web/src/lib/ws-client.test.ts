@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createWsClient,
   type ConnectionStatus,
+  type GitState,
   type Heartbeat,
   type RegistryCandidate,
   type RegistryProject,
@@ -401,5 +402,144 @@ describe('ws-client discover', () => {
 
     expect(socket.sent).toEqual([]);
     expect(warn).toHaveBeenCalledTimes(1);
+  });
+});
+
+/** A well-formed git-state snapshot matching the GitState contract. */
+function sampleGitState(path: string): GitState {
+  return {
+    path,
+    isRepo: true,
+    branch: 'main',
+    detached: false,
+    dirty: true,
+    ahead: 2,
+    behind: 1,
+    upstream: 'origin/main',
+  };
+}
+
+function gitStateFrame(path: string, state: unknown): string {
+  return JSON.stringify({ type: 'git-state', path, state });
+}
+
+describe('ws-client git-state frames', () => {
+  beforeEach(() => {
+    FakeSocket.instances = [];
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function makeGitStateClient() {
+    const received: { path: string; state: GitState }[] = [];
+    const client = createWsClient({
+      url: 'ws://localhost/ws',
+      createWebSocket: (url) => new FakeSocket(url),
+    });
+    const off = client.onGitState((path, state) => received.push({ path, state }));
+    const socket = FakeSocket.instances[0]!;
+    socket.open();
+    return { client, received, off, socket };
+  }
+
+  it('delivers a valid git-state frame with the correct path and a frozen state', () => {
+    const { received, socket } = makeGitStateClient();
+    const state = sampleGitState('/abs/repo');
+
+    socket.message(gitStateFrame('/abs/repo', state));
+
+    expect(received).toHaveLength(1);
+    expect(received[0]!.path).toBe('/abs/repo');
+    expect(received[0]!.state).toEqual(state);
+    expect(Object.isFrozen(received[0]!.state)).toBe(true);
+  });
+
+  it('round-trips the no-upstream shape (null ahead/behind/upstream) unchanged', () => {
+    const { received, socket } = makeGitStateClient();
+    const noUpstream: GitState = {
+      path: '/abs/repo',
+      isRepo: true,
+      branch: 'feature',
+      detached: false,
+      dirty: false,
+      ahead: null,
+      behind: null,
+      upstream: null,
+    };
+
+    socket.message(gitStateFrame('/abs/repo', noUpstream));
+
+    expect(received).toHaveLength(1);
+    // Nulls must survive the validator, NOT be coerced to 0.
+    expect(received[0]!.state.ahead).toBeNull();
+    expect(received[0]!.state.behind).toBeNull();
+    expect(received[0]!.state.upstream).toBeNull();
+    expect(received[0]!.state).toEqual(noUpstream);
+  });
+
+  it('drops malformed git-state frames without emitting to listeners', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { received, socket } = makeGitStateClient();
+    const base = sampleGitState('/abs/repo');
+
+    // Missing state entirely.
+    expect(() =>
+      socket.message(JSON.stringify({ type: 'git-state', path: '/abs/repo' })),
+    ).not.toThrow();
+    // state.ahead a string.
+    expect(() =>
+      socket.message(gitStateFrame('/abs/repo', { ...base, ahead: '2' })),
+    ).not.toThrow();
+    // state.isRepo non-boolean.
+    expect(() =>
+      socket.message(gitStateFrame('/abs/repo', { ...base, isRepo: 'yes' })),
+    ).not.toThrow();
+    // state.branch a number.
+    expect(() =>
+      socket.message(gitStateFrame('/abs/repo', { ...base, branch: 42 })),
+    ).not.toThrow();
+
+    expect(received).toEqual([]);
+    expect(warn).toHaveBeenCalled();
+  });
+
+  it('requestGitState() sends a git-state frame once the socket is OPEN', () => {
+    const { client } = makeClient();
+    const socket = FakeSocket.instances[0]!;
+    socket.open();
+
+    client.requestGitState('/abs/repo');
+
+    expect(socket.sent).toEqual([
+      JSON.stringify({ type: 'git-state', path: '/abs/repo' }),
+    ]);
+  });
+
+  it('drops (and warns) when requestGitState() is called before the socket is OPEN', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { client } = makeClient();
+    const socket = FakeSocket.instances[0]!;
+    // NOTE: socket is still CONNECTING (readyState 0) — never opened.
+
+    client.requestGitState('/abs/repo');
+
+    expect(socket.sent).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('close() drops git-state subscribers', () => {
+    const { client, received, socket } = makeGitStateClient();
+
+    socket.message(gitStateFrame('/abs/repo', sampleGitState('/abs/repo')));
+    expect(received).toHaveLength(1);
+
+    client.close();
+
+    // After close, the socket is detached and subscribers are cleared; emitting
+    // again must not reach the listener.
+    socket.onmessage?.({ data: gitStateFrame('/abs/repo', sampleGitState('/abs/repo')) });
+    expect(received).toHaveLength(1);
   });
 });

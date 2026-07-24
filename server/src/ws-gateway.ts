@@ -11,6 +11,7 @@ import type { Server } from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
 import { HEARTBEAT_INTERVAL_MS, WS_PATH } from './config.js';
 import { scanCandidates } from './discovery/scanner.js';
+import { readGitState } from './git/git-state-reader.js';
 import { createHeartbeat, type HeartbeatMessage } from './heartbeat.js';
 import type { Registry } from './registry/registry.js';
 import {
@@ -27,6 +28,12 @@ type ServerFrame = HeartbeatMessage | OutboundMessage;
 // connection or a spammed frame would otherwise re-scan repeatedly. Repeats inside
 // this window are dropped (the client already has, or is about to get, a snapshot).
 const DISCOVER_MIN_INTERVAL_MS = 500;
+
+// Minimum interval between two `git-state` reads on the SAME socket. This is a
+// FLOOD-GUARD ONLY, never a cache: every accepted request always does a fresh
+// `readGitState` read — git state is never memoized server-side. The window only
+// drops rapid-fire repeats on a single socket.
+const GIT_STATE_MIN_INTERVAL_MS = 200;
 
 export interface WsGatewayOptions {
   readonly intervalMs?: number;
@@ -78,6 +85,13 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
     // Per-socket throttle for `discover` — see DISCOVER_MIN_INTERVAL_MS.
     let lastDiscoverAt = 0;
 
+    // Per-socket, per-PATH flood-guard for `git-state` — see
+    // GIT_STATE_MIN_INTERVAL_MS. Keyed by path (not a single scalar) because a
+    // client fans out one request per pinned project in a burst: a per-socket
+    // scalar would drop every project after the first. This only drops rapid
+    // repeats of the SAME path on the same socket.
+    const lastGitStateAt = new Map<string, number>();
+
     const heartbeat = createHeartbeat({
       intervalMs,
       emit: (message) => sendFrame(socket, message),
@@ -116,6 +130,25 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
           console.error('[ws] discovery scan failed', err);
           // Send an empty snapshot so the client isn't left hanging.
           sendFrame(socket, { type: 'candidates', candidates: [] });
+        }
+        return;
+      }
+
+      // Git-state read: reply to the requesting socket only (never broadcast).
+      // The whole flow is guarded so a read failure never crashes the gateway.
+      if (message.type === 'git-state') {
+        // Flood-guard: drop repeats of the SAME path within the min-interval on
+        // this socket. Distinct paths (the per-project fan-out) always pass.
+        const now = Date.now();
+        const last = lastGitStateAt.get(message.path) ?? 0;
+        if (now - last < GIT_STATE_MIN_INTERVAL_MS) return;
+        lastGitStateAt.set(message.path, now);
+
+        try {
+          const state = await readGitState(message.path);
+          sendFrame(socket, { type: 'git-state', path: message.path, state });
+        } catch (err) {
+          console.error('[ws] git-state read failed', err);
         }
         return;
       }
