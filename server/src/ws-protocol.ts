@@ -100,15 +100,50 @@ export interface GitStateSnapshot {
   readonly state: GitState;
 }
 
+/** The top open tracker item for a project, as sent to the client. */
+export interface TrackerTask {
+  readonly id: string;
+  readonly title: string;
+  readonly priority: number | null;
+  readonly url: string | null;
+}
+
+/** The tracker state of a project as sent to the client. */
+export interface TrackerState {
+  readonly path: string;
+  readonly reachable: boolean;
+  readonly tracker: string | null;
+  readonly nextTask: TrackerTask | null;
+}
+
+/** Inbound: request the current tracker state for a project path. */
+export interface TrackerStateMessage {
+  readonly type: 'tracker-state';
+  readonly path: string;
+}
+
+/** Outbound: a tracker-state snapshot for a single project path. */
+export interface TrackerStateSnapshot {
+  readonly type: 'tracker-state';
+  readonly path: string;
+  readonly state: TrackerState;
+}
+
 /** Every message the server accepts from a client. */
-export type InboundMessage = PinMessage | UnpinMessage | DiscoverMessage | GitStateMessage;
+export type InboundMessage =
+  | PinMessage
+  | UnpinMessage
+  | DiscoverMessage
+  | GitStateMessage
+  | TrackerStateMessage;
 
 /** Every registry message the server emits to a client. */
 export type OutboundMessage =
   | RegistrySnapshot
   | RegistryError
   | CandidatesSnapshot
-  | GitStateSnapshot;
+  | GitStateSnapshot
+  | TrackerStateSnapshot;
 
 /**
  * Validate a raw WS frame against the inbound contract. Branches on `type` first:
@@ -148,6 +183,20 @@ export function parseInboundMessage(data: unknown): InboundMessage | null {
       return null;
     }
     return Object.freeze<GitStateMessage>({ type: 'git-state', path });
+  }
+
+  // `tracker-state` shares the same non-empty ABSOLUTE-path requirement as git-state.
+  if (type === 'tracker-state') {
+    const { path } = frame;
+    if (
+      typeof path !== 'string' ||
+      path.length === 0 ||
+      path.length > MAX_PATH_LENGTH ||
+      !isAbsolute(path)
+    ) {
+      return null;
+    }
+    return Object.freeze<TrackerStateMessage>({ type: 'tracker-state', path });
   }
 
   // `pin`/`unpin` share the absolute-path requirement.

@@ -14,6 +14,7 @@ import { scanCandidates } from './discovery/scanner.js';
 import { readGitState } from './git/git-state-reader.js';
 import { createHeartbeat, type HeartbeatMessage } from './heartbeat.js';
 import type { Registry } from './registry/registry.js';
+import { readTrackerState } from './tracker/tracker-reader.js';
 import {
   MAX_WS_PAYLOAD_BYTES,
   parseInboundMessage,
@@ -34,6 +35,12 @@ const DISCOVER_MIN_INTERVAL_MS = 500;
 // `readGitState` read — git state is never memoized server-side. The window only
 // drops rapid-fire repeats on a single socket.
 const GIT_STATE_MIN_INTERVAL_MS = 200;
+
+// Minimum interval between two `tracker-state` reads on the SAME socket. This is a
+// FLOOD-GUARD ONLY, never a cache: every accepted request always does a fresh
+// `readTrackerState` read — tracker state is never memoized server-side. The window
+// only drops rapid-fire repeats on a single socket.
+const TRACKER_STATE_MIN_INTERVAL_MS = 200;
 
 export interface WsGatewayOptions {
   readonly intervalMs?: number;
@@ -92,6 +99,13 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
     // repeats of the SAME path on the same socket.
     const lastGitStateAt = new Map<string, number>();
 
+    // Per-socket, per-PATH flood-guard for `tracker-state` — see
+    // TRACKER_STATE_MIN_INTERVAL_MS. Keyed by path (not a single scalar) because a
+    // client fans out one request per pinned project in a burst: a per-socket
+    // scalar would drop every project after the first. This only drops rapid
+    // repeats of the SAME path on the same socket.
+    const lastTrackerStateAt = new Map<string, number>();
+
     const heartbeat = createHeartbeat({
       intervalMs,
       emit: (message) => sendFrame(socket, message),
@@ -149,6 +163,25 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
           sendFrame(socket, { type: 'git-state', path: message.path, state });
         } catch (err) {
           console.error('[ws] git-state read failed', err);
+        }
+        return;
+      }
+
+      // Tracker-state read: reply to the requesting socket only (never broadcast).
+      // The whole flow is guarded so a read failure never crashes the gateway.
+      if (message.type === 'tracker-state') {
+        // Flood-guard: drop repeats of the SAME path within the min-interval on
+        // this socket. Distinct paths (the per-project fan-out) always pass.
+        const now = Date.now();
+        const last = lastTrackerStateAt.get(message.path) ?? 0;
+        if (now - last < TRACKER_STATE_MIN_INTERVAL_MS) return;
+        lastTrackerStateAt.set(message.path, now);
+
+        try {
+          const state = await readTrackerState(message.path);
+          sendFrame(socket, { type: 'tracker-state', path: message.path, state });
+        } catch (err) {
+          console.error('[ws] tracker-state read failed', err);
         }
         return;
       }

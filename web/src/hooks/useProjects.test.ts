@@ -11,6 +11,8 @@ import type {
   RegistryListener,
   RegistryProject,
   StatusListener,
+  TrackerState,
+  TrackerStateListener,
   WsClient,
 } from '@/lib/ws-client';
 
@@ -24,10 +26,12 @@ function makeFakeClient() {
   let candidateListener: CandidateListener | null = null;
   let statusListener: StatusListener | null = null;
   let gitStateListener: GitStateListener | null = null;
+  let trackerStateListener: TrackerStateListener | null = null;
   const pin = vi.fn();
   const unpin = vi.fn();
   const discover = vi.fn();
   const requestGitState = vi.fn();
+  const requestTrackerState = vi.fn();
   const close = vi.fn();
 
   const client: WsClient = {
@@ -58,10 +62,17 @@ function makeFakeClient() {
         gitStateListener = null;
       };
     },
+    onTrackerState: (listener) => {
+      trackerStateListener = listener;
+      return () => {
+        trackerStateListener = null;
+      };
+    },
     pin,
     unpin,
     discover,
     requestGitState,
+    requestTrackerState,
     close,
   };
 
@@ -71,6 +82,7 @@ function makeFakeClient() {
     unpin,
     discover,
     requestGitState,
+    requestTrackerState,
     close,
     emitRegistry: (projects: readonly RegistryProject[]) =>
       registryListener?.(projects),
@@ -79,6 +91,8 @@ function makeFakeClient() {
     emitStatus: (status: ConnectionStatus) => statusListener?.(status),
     emitGitState: (path: string, state: GitState) =>
       gitStateListener?.(path, state),
+    emitTrackerState: (path: string, state: TrackerState) =>
+      trackerStateListener?.(path, state),
   };
 }
 
@@ -106,6 +120,15 @@ function sampleGitState(path: string): GitState {
     ahead: 0,
     behind: 0,
     upstream: 'origin/main',
+  };
+}
+
+function sampleTrackerState(path: string): TrackerState {
+  return {
+    path,
+    reachable: true,
+    tracker: 'todoist',
+    nextTask: { id: '1', title: 'Do the thing', priority: 4, url: null },
   };
 }
 
@@ -258,6 +281,73 @@ describe('useProjects', () => {
     expect(fake.requestGitState).toHaveBeenCalledWith('/abs/one');
     expect(fake.requestGitState).toHaveBeenCalledWith('/abs/two');
     expect(fake.requestGitState).toHaveBeenCalledTimes(2);
+  });
+
+  it('starts with an empty trackerStates map', () => {
+    const fake = makeFakeClient();
+    const { result } = renderHook(() =>
+      useProjects({ createClient: () => fake.client }),
+    );
+
+    expect(result.current.trackerStates).toEqual({});
+  });
+
+  it('folds an emitted tracker-state into trackerStates keyed by path', () => {
+    const fake = makeFakeClient();
+    const { result } = renderHook(() =>
+      useProjects({ createClient: () => fake.client }),
+    );
+
+    const stateOne = sampleTrackerState('/abs/one');
+    act(() => fake.emitTrackerState('/abs/one', stateOne));
+    expect(result.current.trackerStates).toEqual({ '/abs/one': stateOne });
+
+    const stateTwo = sampleTrackerState('/abs/two');
+    act(() => fake.emitTrackerState('/abs/two', stateTwo));
+    expect(result.current.trackerStates).toEqual({
+      '/abs/one': stateOne,
+      '/abs/two': stateTwo,
+    });
+  });
+
+  it('delegates requestTrackerState to the underlying client', () => {
+    const fake = makeFakeClient();
+    const { result } = renderHook(() =>
+      useProjects({ createClient: () => fake.client }),
+    );
+
+    act(() => result.current.requestTrackerState('/abs/path'));
+
+    expect(fake.requestTrackerState).toHaveBeenCalledWith('/abs/path');
+  });
+
+  it('requests tracker-state for each pinned project when the registry arrives', () => {
+    const fake = makeFakeClient();
+    renderHook(() => useProjects({ createClient: () => fake.client }));
+
+    act(() =>
+      fake.emitRegistry([sampleProject('/abs/one'), sampleProject('/abs/two')]),
+    );
+
+    expect(fake.requestTrackerState).toHaveBeenCalledWith('/abs/one');
+    expect(fake.requestTrackerState).toHaveBeenCalledWith('/abs/two');
+    expect(fake.requestTrackerState).toHaveBeenCalledTimes(2);
+  });
+
+  it('requests tracker-state for known projects on connect', () => {
+    const fake = makeFakeClient();
+    renderHook(() => useProjects({ createClient: () => fake.client }));
+
+    act(() =>
+      fake.emitRegistry([sampleProject('/abs/one'), sampleProject('/abs/two')]),
+    );
+    fake.requestTrackerState.mockClear();
+
+    act(() => fake.emitStatus('connected'));
+
+    expect(fake.requestTrackerState).toHaveBeenCalledWith('/abs/one');
+    expect(fake.requestTrackerState).toHaveBeenCalledWith('/abs/two');
+    expect(fake.requestTrackerState).toHaveBeenCalledTimes(2);
   });
 
   it('closes the client on unmount', () => {

@@ -38,10 +38,12 @@ function makeFakeClient() {
     onRegistry: () => () => {},
     onCandidates: () => () => {},
     onGitState: () => () => {},
+    onTrackerState: () => () => {},
     pin: () => {},
     unpin: () => {},
     discover: () => {},
     requestGitState: () => {},
+    requestTrackerState: () => {},
     close,
   };
 

@@ -5,6 +5,7 @@ import type {
   GitState,
   RegistryCandidate,
   RegistryProject,
+  TrackerState,
 } from '@/lib/ws-client';
 
 // ProjectPin calls useProjects() with no injection seam, so we mock the hook
@@ -13,9 +14,11 @@ const pin = vi.fn();
 const unpin = vi.fn();
 const discover = vi.fn();
 const requestGitState = vi.fn();
+const requestTrackerState = vi.fn();
 let projects: readonly RegistryProject[] = [];
 let candidates: readonly RegistryCandidate[] = [];
 let gitStates: Record<string, GitState> = {};
+let trackerStates: Record<string, TrackerState> = {};
 
 vi.mock('@/hooks/useProjects', () => ({
   useProjects: () => ({
@@ -26,6 +29,8 @@ vi.mock('@/hooks/useProjects', () => ({
     discover,
     gitStates,
     requestGitState,
+    trackerStates,
+    requestTrackerState,
   }),
 }));
 
@@ -63,15 +68,30 @@ function sampleGitState(path: string, overrides: Partial<GitState> = {}): GitSta
   };
 }
 
+function sampleTrackerState(
+  path: string,
+  overrides: Partial<TrackerState> = {},
+): TrackerState {
+  return {
+    path,
+    reachable: true,
+    tracker: 'todoist',
+    nextTask: { id: '1', title: 'Wire the gateway', priority: 4, url: null },
+    ...overrides,
+  };
+}
+
 describe('ProjectPin', () => {
   beforeEach(() => {
     projects = [];
     candidates = [];
     gitStates = {};
+    trackerStates = {};
     pin.mockReset();
     unpin.mockReset();
     discover.mockReset();
     requestGitState.mockReset();
+    requestTrackerState.mockReset();
   });
 
   afterEach(() => {
@@ -244,6 +264,79 @@ describe('ProjectPin', () => {
 
       expect(requestGitState).toHaveBeenCalledWith('/abs/one');
       expect(requestGitState).toHaveBeenCalledWith('/abs/two');
+    });
+  });
+
+  describe('next task line', () => {
+    it('shows the loading affordance when no snapshot has arrived yet', () => {
+      projects = [sampleProject('/abs/one')];
+      // trackerStates intentionally empty → undefined snapshot for this path.
+      render(<ProjectPin />);
+
+      const line = screen.getByTestId('tracker-state-/abs/one');
+      expect(line).toHaveAttribute('data-reachable', 'null');
+      expect(line).toHaveTextContent('…');
+    });
+
+    it('renders the next task title for a reachable snapshot with a task', () => {
+      projects = [sampleProject('/abs/one')];
+      trackerStates = { '/abs/one': sampleTrackerState('/abs/one') };
+      render(<ProjectPin />);
+
+      const line = screen.getByTestId('tracker-state-/abs/one');
+      expect(line).toHaveAttribute('data-reachable', 'true');
+      expect(line).toHaveAttribute('data-title', 'Wire the gateway');
+      expect(line).toHaveTextContent('Wire the gateway');
+    });
+
+    it('renders "no open tasks" for a reachable snapshot with no next task', () => {
+      projects = [sampleProject('/abs/one')];
+      trackerStates = {
+        '/abs/one': sampleTrackerState('/abs/one', { nextTask: null }),
+      };
+      render(<ProjectPin />);
+
+      const line = screen.getByTestId('tracker-state-/abs/one');
+      expect(line).toHaveAttribute('data-reachable', 'true');
+      expect(line).toHaveAttribute('data-title', 'null');
+      expect(line).toHaveTextContent('no open tasks');
+    });
+
+    it('renders "no tracker" (distinct from empty) when reachable but no tracker configured', () => {
+      projects = [sampleProject('/abs/one')];
+      trackerStates = {
+        '/abs/one': sampleTrackerState('/abs/one', { tracker: null, nextTask: null }),
+      };
+      render(<ProjectPin />);
+
+      const line = screen.getByTestId('tracker-state-/abs/one');
+      expect(line).toHaveAttribute('data-reachable', 'true');
+      expect(line).toHaveAttribute('data-tracker', 'null');
+      expect(line).toHaveTextContent('no tracker');
+    });
+
+    it('renders "tracker unreachable" for an unreachable snapshot', () => {
+      projects = [sampleProject('/abs/one')];
+      trackerStates = {
+        '/abs/one': sampleTrackerState('/abs/one', {
+          reachable: false,
+          tracker: null,
+          nextTask: null,
+        }),
+      };
+      render(<ProjectPin />);
+
+      const line = screen.getByTestId('tracker-state-/abs/one');
+      expect(line).toHaveAttribute('data-reachable', 'false');
+      expect(line).toHaveTextContent('tracker unreachable');
+    });
+
+    it('requests a fresh tracker-state for each pinned project on mount', () => {
+      projects = [sampleProject('/abs/one'), sampleProject('/abs/two')];
+      render(<ProjectPin />);
+
+      expect(requestTrackerState).toHaveBeenCalledWith('/abs/one');
+      expect(requestTrackerState).toHaveBeenCalledWith('/abs/two');
     });
   });
 });

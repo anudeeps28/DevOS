@@ -7,6 +7,7 @@ import {
   type Heartbeat,
   type RegistryCandidate,
   type RegistryProject,
+  type TrackerState,
   type WebSocketLike,
 } from '@/lib/ws-client';
 
@@ -540,6 +541,159 @@ describe('ws-client git-state frames', () => {
     // After close, the socket is detached and subscribers are cleared; emitting
     // again must not reach the listener.
     socket.onmessage?.({ data: gitStateFrame('/abs/repo', sampleGitState('/abs/repo')) });
+    expect(received).toHaveLength(1);
+  });
+});
+
+/** A well-formed tracker-state snapshot matching the TrackerState contract. */
+function sampleTrackerState(path: string): TrackerState {
+  return {
+    path,
+    reachable: true,
+    tracker: 'todoist',
+    nextTask: {
+      id: '42',
+      title: 'Ship the tracker gateway',
+      priority: 4,
+      url: 'https://todoist.com/task/42',
+    },
+  };
+}
+
+function trackerStateFrame(path: string, state: unknown): string {
+  return JSON.stringify({ type: 'tracker-state', path, state });
+}
+
+describe('ws-client tracker-state frames', () => {
+  beforeEach(() => {
+    FakeSocket.instances = [];
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function makeTrackerStateClient() {
+    const received: { path: string; state: TrackerState }[] = [];
+    const client = createWsClient({
+      url: 'ws://localhost/ws',
+      createWebSocket: (url) => new FakeSocket(url),
+    });
+    const off = client.onTrackerState((path, state) => received.push({ path, state }));
+    const socket = FakeSocket.instances[0]!;
+    socket.open();
+    return { client, received, off, socket };
+  }
+
+  it('delivers a valid tracker-state frame with the correct path and a frozen state', () => {
+    const { received, socket } = makeTrackerStateClient();
+    const state = sampleTrackerState('/abs/repo');
+
+    socket.message(trackerStateFrame('/abs/repo', state));
+
+    expect(received).toHaveLength(1);
+    expect(received[0]!.path).toBe('/abs/repo');
+    expect(received[0]!.state).toEqual(state);
+    expect(Object.isFrozen(received[0]!.state)).toBe(true);
+    // The nested nextTask must also survive frozen.
+    expect(Object.isFrozen(received[0]!.state.nextTask)).toBe(true);
+  });
+
+  it('round-trips an unreachable snapshot (null tracker/nextTask) unchanged', () => {
+    const { received, socket } = makeTrackerStateClient();
+    const unreachable: TrackerState = {
+      path: '/abs/repo',
+      reachable: false,
+      tracker: null,
+      nextTask: null,
+    };
+
+    socket.message(trackerStateFrame('/abs/repo', unreachable));
+
+    expect(received).toHaveLength(1);
+    // Nulls must survive the validator, NOT be coerced.
+    expect(received[0]!.state.reachable).toBe(false);
+    expect(received[0]!.state.tracker).toBeNull();
+    expect(received[0]!.state.nextTask).toBeNull();
+    expect(received[0]!.state).toEqual(unreachable);
+  });
+
+  it('drops malformed tracker-state frames without emitting to listeners', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { received, socket } = makeTrackerStateClient();
+    const base = sampleTrackerState('/abs/repo');
+
+    // Missing path on the frame.
+    expect(() =>
+      socket.message(JSON.stringify({ type: 'tracker-state', state: base })),
+    ).not.toThrow();
+    // Missing state entirely.
+    expect(() =>
+      socket.message(JSON.stringify({ type: 'tracker-state', path: '/abs/repo' })),
+    ).not.toThrow();
+    // state.reachable non-boolean.
+    expect(() =>
+      socket.message(trackerStateFrame('/abs/repo', { ...base, reachable: 'yes' })),
+    ).not.toThrow();
+    // state.tracker a number.
+    expect(() =>
+      socket.message(trackerStateFrame('/abs/repo', { ...base, tracker: 42 })),
+    ).not.toThrow();
+    // state.nextTask malformed (missing id).
+    expect(() =>
+      socket.message(
+        trackerStateFrame('/abs/repo', {
+          ...base,
+          nextTask: { title: 'no id', priority: 4, url: null },
+        }),
+      ),
+    ).not.toThrow();
+    // state not an object.
+    expect(() =>
+      socket.message(JSON.stringify({ type: 'tracker-state', path: '/abs/repo', state: 'nope' })),
+    ).not.toThrow();
+
+    expect(received).toEqual([]);
+    expect(warn).toHaveBeenCalled();
+  });
+
+  it('requestTrackerState() sends a tracker-state frame once the socket is OPEN', () => {
+    const { client } = makeClient();
+    const socket = FakeSocket.instances[0]!;
+    socket.open();
+
+    client.requestTrackerState('/abs/repo');
+
+    expect(socket.sent).toEqual([
+      JSON.stringify({ type: 'tracker-state', path: '/abs/repo' }),
+    ]);
+  });
+
+  it('drops (and warns) when requestTrackerState() is called before the socket is OPEN', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { client } = makeClient();
+    const socket = FakeSocket.instances[0]!;
+    // NOTE: socket is still CONNECTING (readyState 0) — never opened.
+
+    client.requestTrackerState('/abs/repo');
+
+    expect(socket.sent).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('close() drops tracker-state subscribers', () => {
+    const { client, received, socket } = makeTrackerStateClient();
+
+    socket.message(trackerStateFrame('/abs/repo', sampleTrackerState('/abs/repo')));
+    expect(received).toHaveLength(1);
+
+    client.close();
+
+    // After close, the socket is detached and subscribers are cleared; emitting
+    // again must not reach the listener.
+    socket.onmessage?.({
+      data: trackerStateFrame('/abs/repo', sampleTrackerState('/abs/repo')),
+    });
     expect(received).toHaveLength(1);
   });
 });
