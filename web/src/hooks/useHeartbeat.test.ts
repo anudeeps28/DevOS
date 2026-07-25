@@ -39,11 +39,13 @@ function makeFakeClient() {
     onCandidates: () => () => {},
     onGitState: () => () => {},
     onTrackerState: () => () => {},
+    onLifecycleSignals: () => () => {},
     pin: () => {},
     unpin: () => {},
     discover: () => {},
     requestGitState: () => {},
     requestTrackerState: () => {},
+    requestLifecycleSignals: () => {},
     close,
   };
 

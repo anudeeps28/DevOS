@@ -86,6 +86,20 @@ export interface TrackerState {
   readonly nextTask: TrackerTask | null;
 }
 
+/**
+ * Validated server-derived lifecycle signals. Mirrors the server's LifecycleSignals
+ * (server/src/ws-protocol.ts) — duplicated typed contract, no shared package. The
+ * whole-project STAGE is composed on the client (web/src/lib/lifecycle.ts) from these
+ * signals plus the card's already-fetched TrackerState. Frozen — never mutated.
+ */
+export interface LifecycleSignals {
+  readonly hasDecideDocs: boolean;
+  readonly hasDefineDocs: boolean;
+  readonly hasStartedStory: boolean;
+  readonly hasFeatureBranchCommits: boolean;
+  readonly hasReleaseTags: boolean;
+}
+
 /** The slice of the WebSocket API this client depends on (keeps fakes tiny). */
 export interface WebSocketLike {
   readonly readyState: number;
@@ -125,6 +139,7 @@ export type RegistryListener = (projects: readonly RegistryProject[]) => void;
 export type CandidateListener = (candidates: readonly RegistryCandidate[]) => void;
 export type GitStateListener = (path: string, state: GitState) => void;
 export type TrackerStateListener = (path: string, state: TrackerState) => void;
+export type LifecycleSignalsListener = (path: string, signals: LifecycleSignals) => void;
 
 /** Public, framework-agnostic client surface. */
 export interface WsClient {
@@ -141,6 +156,8 @@ export interface WsClient {
   readonly onGitState: (listener: GitStateListener) => () => void;
   /** Subscribe to validated tracker-state snapshots. */
   readonly onTrackerState: (listener: TrackerStateListener) => () => void;
+  /** Subscribe to validated lifecycle-signals snapshots. */
+  readonly onLifecycleSignals: (listener: LifecycleSignalsListener) => () => void;
   /** Pin a project by absolute path; no-op (warns) when the socket is not open. */
   readonly pin: (path: string, opts?: { displayName?: string; uiPrefs?: unknown }) => void;
   /** Unpin a project by absolute path; no-op (warns) when the socket is not open. */
@@ -151,6 +168,8 @@ export interface WsClient {
   readonly requestGitState: (path: string) => void;
   /** Request the current tracker state for a project path; no-op (warns) when the socket is not open. */
   readonly requestTrackerState: (path: string) => void;
+  /** Request the current lifecycle signals for a project path; no-op (warns) when the socket is not open. */
+  readonly requestLifecycleSignals: (path: string) => void;
   /** Tear down: cancels reconnects, closes the socket, drops subscribers. */
   readonly close: () => void;
 }
@@ -436,6 +455,64 @@ function parseTrackerStateSnapshot(
 }
 
 /**
+ * Validate a single raw entry against the LifecycleSignals contract: five booleans.
+ * Returns a frozen LifecycleSignals, or null for anything malformed.
+ */
+function parseLifecycleSignals(entry: unknown): LifecycleSignals | null {
+  if (typeof entry !== 'object' || entry === null) return null;
+
+  const record = entry as Record<string, unknown>;
+  const keys: readonly (keyof LifecycleSignals)[] = [
+    'hasDecideDocs',
+    'hasDefineDocs',
+    'hasStartedStory',
+    'hasFeatureBranchCommits',
+    'hasReleaseTags',
+  ];
+  for (const key of keys) {
+    if (typeof record[key] !== 'boolean') return null;
+  }
+
+  return Object.freeze({
+    hasDecideDocs: record.hasDecideDocs as boolean,
+    hasDefineDocs: record.hasDefineDocs as boolean,
+    hasStartedStory: record.hasStartedStory as boolean,
+    hasFeatureBranchCommits: record.hasFeatureBranchCommits as boolean,
+    hasReleaseTags: record.hasReleaseTags as boolean,
+  });
+}
+
+/**
+ * Validate a raw WS frame against the pinned lifecycle-signals contract:
+ * `{ type: 'lifecycle-signals', path: string, state: { path, signals } }`.
+ * Returns a frozen `{ path, signals }`, or null for anything malformed.
+ */
+function parseLifecycleSignalsSnapshot(
+  data: unknown,
+): { path: string; signals: LifecycleSignals } | null {
+  if (typeof data !== 'string') return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return null;
+  }
+
+  if (typeof parsed !== 'object' || parsed === null) return null;
+
+  const frame = parsed as Record<string, unknown>;
+  if (frame.type !== 'lifecycle-signals') return null;
+  if (typeof frame.path !== 'string' || frame.path.length === 0) return null;
+
+  if (typeof frame.state !== 'object' || frame.state === null) return null;
+  const signals = parseLifecycleSignals((frame.state as Record<string, unknown>).signals);
+  if (signals === null) return null;
+
+  return Object.freeze({ path: frame.path, signals });
+}
+
+/**
  * Peek the `type` discriminant of a raw frame without full validation, so
  * handleMessage can route to the right parser. Returns null for anything that
  * is not a JSON object with a string `type`. Never throws.
@@ -471,6 +548,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
   const candidateListeners = new Set<CandidateListener>();
   const gitStateListeners = new Set<GitStateListener>();
   const trackerStateListeners = new Set<TrackerStateListener>();
+  const lifecycleSignalsListeners = new Set<LifecycleSignalsListener>();
 
   let state: ClientState = {
     status: 'connecting',
@@ -507,6 +585,10 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
 
   function emitTrackerState(path: string, state: TrackerState): void {
     for (const listener of trackerStateListeners) listener(path, state);
+  }
+
+  function emitLifecycleSignals(path: string, signals: LifecycleSignals): void {
+    for (const listener of lifecycleSignalsListeners) listener(path, signals);
   }
 
   // Write a frame only when the socket is OPEN; otherwise drop + warn (never throw).
@@ -579,6 +661,16 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
       return;
     }
 
+    if (type === 'lifecycle-signals') {
+      const snapshot = parseLifecycleSignalsSnapshot(data);
+      if (snapshot === null) {
+        console.warn('[ws-client] dropped malformed frame:', data);
+        return;
+      }
+      emitLifecycleSignals(snapshot.path, snapshot.signals);
+      return;
+    }
+
     // Never throw into the app — drop and warn.
     console.warn('[ws-client] dropped malformed frame:', data);
   }
@@ -636,6 +728,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     candidateListeners.clear();
     gitStateListeners.clear();
     trackerStateListeners.clear();
+    lifecycleSignalsListeners.clear();
 
     if (state.reconnectHandle !== null) {
       timers.clearTimeout(state.reconnectHandle);
@@ -676,6 +769,10 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
 
   function requestTrackerState(path: string): void {
     sendFrame({ type: 'tracker-state', path });
+  }
+
+  function requestLifecycleSignals(path: string): void {
+    sendFrame({ type: 'lifecycle-signals', path });
   }
 
   connect();
@@ -719,11 +816,18 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
         trackerStateListeners.delete(listener);
       };
     },
+    onLifecycleSignals: (listener) => {
+      lifecycleSignalsListeners.add(listener);
+      return () => {
+        lifecycleSignalsListeners.delete(listener);
+      };
+    },
     pin,
     unpin,
     discover,
     requestGitState,
     requestTrackerState,
+    requestLifecycleSignals,
     close,
   };
 }

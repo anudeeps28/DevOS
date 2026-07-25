@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 
 import { useProjects } from '@/hooks/useProjects';
-import type { GitState, TrackerState } from '@/lib/ws-client';
+import { resolveStage } from '@/lib/lifecycle';
+import type { GitState, LifecycleSignals, TrackerState } from '@/lib/ws-client';
 import { cn } from '@/lib/utils';
 
 /** Stringify a nullable numeric field for a `data-*` attribute. */
@@ -145,6 +146,49 @@ function NextTaskLine({
 }
 
 /**
+ * Compact lifecycle stage badge for one pinned row. Render-only:
+ *  - no server signals yet → a subtle loading affordance,
+ *  - else the one-word stage (New / Decide / Define / Build / Ship).
+ * The stage is composed on the CLIENT via resolveStage from the server signals PLUS
+ * this card's already-fetched tracker state (ARCHITECTURE §9.2/§9.6: reuses the
+ * per-card reads). Its sticky high-water behavior is structural — max(precedence) over
+ * durable signals, not a stored value.
+ */
+function StageBadge({
+  path,
+  signals,
+  trackerState,
+}: {
+  path: string;
+  signals: LifecycleSignals | undefined;
+  trackerState: TrackerState | undefined;
+}): JSX.Element {
+  if (signals === undefined) {
+    return (
+      <span
+        data-testid={`lifecycle-state-${path}`}
+        data-stage="null"
+        className="text-xs text-muted-foreground/60"
+      >
+        …
+      </span>
+    );
+  }
+
+  const stage = resolveStage(signals, trackerState);
+
+  return (
+    <span
+      data-testid={`lifecycle-state-${path}`}
+      data-stage={stage}
+      className="w-fit rounded-full border border-border px-2 py-0.5 text-xs font-medium uppercase tracking-wide text-muted-foreground"
+    >
+      {stage}
+    </span>
+  );
+}
+
+/**
  * Project discovery + pin management. Renders three regions:
  *  - a "Discovered" section (refresh + candidate rows not yet pinned),
  *  - a "Pinned" grid of pinned projects (each with an Unpin button),
@@ -163,6 +207,8 @@ export function ProjectPin() {
     requestGitState,
     trackerStates,
     requestTrackerState,
+    lifecycleSignals,
+    requestLifecycleSignals,
   } = useProjects();
   const [path, setPath] = useState('');
 
@@ -174,6 +220,7 @@ export function ProjectPin() {
     for (const project of projects) {
       requestGitState(project.path);
       requestTrackerState(project.path);
+      requestLifecycleSignals(project.path);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pinnedKey]);
@@ -282,6 +329,11 @@ export function ProjectPin() {
                   <span className="truncate font-mono text-sm">{project.path}</span>
                   <GitStatusLine path={project.path} state={gitStates[project.path]} />
                   <NextTaskLine path={project.path} state={trackerStates[project.path]} />
+                  <StageBadge
+                    path={project.path}
+                    signals={lifecycleSignals[project.path]}
+                    trackerState={trackerStates[project.path]}
+                  />
                 </div>
                 <button
                   data-testid={`unpin-${project.path}`}

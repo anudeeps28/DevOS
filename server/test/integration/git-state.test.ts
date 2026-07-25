@@ -201,6 +201,9 @@ const activeClients: TestClient[] = [];
 const activeStops: Array<() => Promise<void>> = [];
 const tmpDbPaths: string[] = [];
 const tmpRoots: string[] = [];
+// The current server's registry, set in startServer — readState pins each path
+// through it so the read passes the gateway's pinned-path allowlist.
+let activeRegistry: import('../../src/registry/registry.js').Registry | null = null;
 
 function makeTmpDbPath(): string {
   const path = join(tmpdir(), `devos-gitstate-${randomUUID()}.db`);
@@ -217,6 +220,7 @@ async function makeTmpRoot(prefix: string): Promise<string> {
 }
 
 interface RunningServer {
+  readonly instance: import('../../src/index.js').DevOsServer;
   readonly address: AddressInfo;
   readonly url: string;
   readonly stop: () => Promise<void>;
@@ -226,6 +230,8 @@ async function startServer(dbPath: string): Promise<RunningServer> {
   // No project roots: git-state reads target explicit absolute paths, so discovery
   // never runs and never interferes with the frames under test.
   const instance = createServer({ port: 0, dbPath, projectRoots: [] });
+  // The read handlers allowlist to PINNED projects; readState() pins each path first.
+  activeRegistry = instance.registry;
   const address = await instance.start();
   let stopped = false;
   const stop = async (): Promise<void> => {
@@ -234,7 +240,7 @@ async function startServer(dbPath: string): Promise<RunningServer> {
     await instance.stop();
   };
   activeStops.push(stop);
-  return { address, url: `ws://127.0.0.1:${address.port}${WS_PATH}`, stop };
+  return { instance, address, url: `ws://127.0.0.1:${address.port}${WS_PATH}`, stop };
 }
 
 afterEach(async () => {
@@ -266,6 +272,7 @@ async function connect(url: string): Promise<TestClient> {
 // accepted immediately and independently — no debounce interference, and it proves
 // the server never memoizes (each read hits `readGitState` afresh).
 async function readState(url: string, path: string): Promise<GitState> {
+  activeRegistry?.pin(path); // pass the pinned-path allowlist
   const client = await connect(url);
   const framePromise = client.waitForGitState((f) => f.path === path, 3000);
   client.send({ type: 'git-state', path });
@@ -389,6 +396,7 @@ describe('git-state read round-trip over the live WS transport', () => {
       await initRepoWithCommit(dir);
       const branch = `feat-${i}`;
       await git(dir, ['checkout', '-b', branch]);
+      server.instance.registry.pin(dir); // pass the pinned-path allowlist
       repos.push({ path: dir, branch });
     }
 
