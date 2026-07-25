@@ -22,8 +22,10 @@ interface StubRes {
   end: ServerResponse['end'];
 }
 
-function makeReq(method: string, url: string): IncomingMessage {
-  return { method, url } as IncomingMessage;
+// A loopback Host by default so the prod Host-header gate passes; override `host`
+// to exercise the gate itself.
+function makeReq(method: string, url: string, host = '127.0.0.1'): IncomingMessage {
+  return { method, url, headers: { host } } as IncomingMessage;
 }
 
 function makeRes(): StubRes {
@@ -91,6 +93,14 @@ describe('static handler — prod mode', () => {
 
   beforeEach(async () => {
     createStaticHandler = await importHandler(true);
+  });
+
+  it('rejects a non-loopback Host with 403 (DNS-rebinding gate)', async () => {
+    const handler = createStaticHandler();
+    const res = makeRes();
+    await runUntilEnded(handler, makeReq('GET', '/', 'evil.example'), res);
+    expect(res.status).toBe(403);
+    expect(res.body).not.toContain('devos-ws-token');
   });
 
   it('rejects non-GET/HEAD methods with 405 + Allow header', async () => {

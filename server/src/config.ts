@@ -112,3 +112,10 @@ export const WS_PATH = '/ws';
 // In prod the Node process also serves the built web/dist over HTTP; in dev,
 // Vite serves the app and this server handles /ws only.
 export const PROD: boolean = process.env.NODE_ENV === 'production';
+
+// Vite dev-page origins the proxied WS upgrade carries. Allowlisted so the dev
+// app's own page connects while foreign browser origins are still rejected.
+export const WS_DEV_ORIGINS: readonly string[] = Object.freeze([
+  'http://127.0.0.1:5173',
+  'http://localhost:5173',
+]);
