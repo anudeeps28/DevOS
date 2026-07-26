@@ -18,14 +18,28 @@
 process.env.NODE_ENV = 'production';
 
 import http from 'node:http';
-import { rmSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 const TOKEN_META_MARKER = 'devos-ws-token';
+
+// The prod static handler serves repo/web/dist/index.html (resolved relative to
+// the static-server module). CI's `npm test` does NOT build the web bundle, so
+// this file provisions a minimal fixture index.html when the real build output
+// is absent, and removes only what it created (a real build's index.html is used
+// as-is when present). Without this the loopback case would 404 in CI while
+// passing locally wherever a prior `npm run build` left web/dist behind.
+const WEB_DIST = fileURLToPath(new URL('../../../web/dist', import.meta.url));
+const INDEX_HTML = join(WEB_DIST, 'index.html');
+const FIXTURE_HTML =
+  '<!doctype html><html><head><title>DevOS</title></head><body></body></html>';
+let createdIndex = false;
+let createdDist = false;
 
 interface HttpResult {
   readonly status: number;
@@ -63,6 +77,17 @@ describe('HTTP Host-header loopback gate (prod static server)', () => {
   let dbPath: string;
 
   beforeAll(async () => {
+    // Ensure the prod handler has an index.html to serve — provision a fixture
+    // when the web bundle has not been built (e.g. CI), tracking what we create.
+    if (!existsSync(WEB_DIST)) {
+      mkdirSync(WEB_DIST, { recursive: true });
+      createdDist = true;
+    }
+    if (!existsSync(INDEX_HTML)) {
+      writeFileSync(INDEX_HTML, FIXTURE_HTML);
+      createdIndex = true;
+    }
+
     const { createServer } = await import('../../src/index.js');
     dbPath = join(tmpdir(), `devos-httphost-${randomUUID()}.db`);
     // requireToken:true forces the prod gate semantics; the minted token is hex.
@@ -75,6 +100,13 @@ describe('HTTP Host-header loopback gate (prod static server)', () => {
     await instance.stop();
     for (const suffix of ['', '-wal', '-shm']) {
       rmSync(`${dbPath}${suffix}`, { force: true });
+    }
+    // Remove only the fixture we created — never a real build artifact.
+    if (createdIndex) {
+      rmSync(INDEX_HTML, { force: true });
+    }
+    if (createdDist) {
+      rmSync(WEB_DIST, { recursive: true, force: true });
     }
   });
 
