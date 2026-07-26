@@ -210,7 +210,7 @@ Single user → "scale" is the number of projects and concurrent agents, not tra
 
 | Dimension | Typical | Stress | Bottleneck & mitigation |
 |---|---|---|---|
-| Pinned projects | 5–15 | 50+ | Live-derive reads (git + tracker) per render. **Fix:** parallelize the fan-out; briefly cache the *derived* view (SPEC §5); light retried health-check on trackers, not a full auth probe per call. |
+| Pinned projects | 5–15 | 50+ | Live-derive reads (git + tracker) per render. **Fix:** parallelize the fan-out; briefly cache the *derived* view (SPEC §5); light retried health-check on trackers, not a full auth probe per call. **Realized (PR #10):** the per-project tracker read shells `bash`, so a **global spawn semaphore** caps concurrent subprocesses at `MAX_CONCURRENT_TRACKER_SPAWNS = 4` (FIFO queue, waiter queue itself capped at `MAX_SPAWN_QUEUE = 64` — excess acquisitions reject and degrade to "tracker unreachable", never pile up); each socket's per-path read throttles are held in flood-guard Maps **bounded at `FLOOD_GUARD_MAX_KEYS = 256`** (expired-first eviction, then oldest-inserted) so a socket requesting many distinct paths can't grow memory without bound. |
 | Concurrent live agents | 1–5 | 10+ | **Plan rate limits** (not CPU, not money). **Fix:** throttle spawns into a queue; surface "waiting — plan limit" as a first-class fleet state; never silently pile up. |
 | Machine resources | fine | many subprocesses | Each owned session = one SDK subprocess. **Fix:** cap concurrent sessions; idle work items hold no process (state is in files). |
 | SQLite size | tiny | years of `cost_ledger` | Negligible. **Fix (if ever):** prune old ledger rows. |
@@ -232,8 +232,30 @@ surface — the only real risk is another actor reaching it.
 |---|---|---|
 | Network exposure | **Bind to `127.0.0.1` only** | Never exposed to the LAN; no remote can reach the server. |
 | User auth | **None (by design)** | Single user on localhost — passwords would be theater. |
-| Browser → server trust | **Origin check + local token** | Only the app's own page may open the WebSocket — defends against a malicious webpage / DNS-rebinding on localhost. |
+| Browser → server trust | **Origin check + local token** | Only the app's own page may open the WebSocket — defends against a malicious webpage / DNS-rebinding on localhost. Realized mechanism below. |
 | Agent action approval | **`canUseTool` permission cards** | The human approves risky actions. Default is **not** "auto-approve everything" — this is the runaway-agent brake. |
+
+### WebSocket connection gate (realized — PR #10)
+
+The "Origin check + local token" above is enforced at the **WS upgrade handshake** (`verifyClient`), before any
+socket is established — it gates the *connection*, not individual messages (per-message path-ownership via
+`isPinnedPath` is a separate, complementary defense-in-depth layer). Realized shape (candidate ADR — see
+`docs/adr/0001-ws-connection-gate.md`):
+
+- **Origin allowlist — enforced in BOTH dev and prod.** A *present* foreign `Origin` is always rejected; an
+  *absent* Origin (non-browser clients like curl) is rejected in prod and allowed in dev/test. A browser always
+  sends `Origin` honestly, so this alone closes the CSWSH / localhost-DNS-rebinding threat §6 names, in both modes.
+- **Local token — prod-only, second factor.** A per-process token (`crypto.randomBytes(32)` hex, held in memory,
+  **never persisted** — consistent with "stores no secrets" below) is required only in prod. Rationale: in dev the
+  Vite dev-server (`:5173`) serves the page, not the Node server, so Node cannot deliver a token to it; Origin
+  alone covers the browser threat in dev. Prod page and WS share one origin, so Node *can* deliver it.
+- **Delivery.** Node injects `<meta name="devos-ws-token" content="…">` into the served prod `index.html`; the
+  client reads it and presents it on dial via the **`Sec-WebSocket-Protocol` subprotocol** (`['devos', 'token.<hex>']`)
+  — never a query string (avoids logging the token). Compared with `crypto.timingSafeEqual` (constant-time);
+  a malformed (non-hex) explicit/env token fails fast at startup.
+- **HTTP-side twin.** The prod static handler also **rejects non-loopback `Host` headers (403)** before serving
+  the token-bearing `index.html`, closing the DNS-rebinding path where a rebound page could `fetch('/')` and read
+  the token. This is the HTTP analogue of the WS Origin gate; both fail closed.
 
 ### Data classification
 
@@ -422,3 +444,4 @@ in `docs/adr/`.
 | "Kick off next stage" is a launcher only (emergent advance), light gating, watched in a project-bound Team room (§9.3) | wayfinder T2 — no stored stage / no set-stage button; gates live inside skills, avoiding double-gating; one Team room, two bindings | Yes — core model |
 | New project birth = shell out to the harness installer, light entry ("New Idea"/"Add Project"), land at "New", auto-launch `/wayfinder` (§9.4) | wayfinder T3 — zero install logic in DevOS (mirrors tracker-adapter pattern); planning session is the inception | Yes — core model |
 | Pipeline = OS-orchestrated **role sessions** per stage (the Bridge + Navigator/Shipwright/Lookout/Warden/Harbormaster), not one long lead-agent session; gated by default, per-project auto-advance toggle, interrupts always break through; role roster defined in the harness (SPEC §3.1) | Resolved with architect 2026-07-20 — automates the proven manual session-per-stage + handoff-artifact workflow; clean context per stage; orchestration in deterministic server code; keeps zero pipeline logic in DevOS | Yes — core model |
+| WS connection gate = Origin allowlist (both modes) + subprotocol-carried local token (prod-only), token delivered via `<meta>` in prod `index.html`; HTTP static handler rejects non-loopback `Host` (§6) | Realized in PR #10 (2026-07-26) — closes the accumulated CSWSH / localhost-DNS-rebinding surface the readers deferred; dev/prod split is forced by Vite owning the dev page; Origin held in both modes so the browser threat is covered even without the token | **Yes → `docs/adr/0001-ws-connection-gate.md`** |
