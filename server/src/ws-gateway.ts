@@ -2,12 +2,10 @@
 //
 // Attaches a `ws` WebSocketServer to the shared http.Server on WS_PATH. Each
 // connected client gets its own heartbeat pump; sends are guarded against
-// non-OPEN sockets.
-//
-// NOTE: origin check / local token is intentionally OUT of scope here — it is
-// deferred to the M1 "Projects Grid + localhost security" task. Do NOT add it.
+// non-OPEN sockets. The upgrade is gated by an Origin allowlist (both modes) and,
+// in prod, a local token carried on the Sec-WebSocket-Protocol subprotocol.
 
-import type { Server } from 'node:http';
+import type { IncomingMessage, Server } from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
 import { HEARTBEAT_INTERVAL_MS, WS_PATH } from './config.js';
 import { scanCandidates } from './discovery/scanner.js';
@@ -16,6 +14,13 @@ import { createHeartbeat, type HeartbeatMessage } from './heartbeat.js';
 import { readLifecycleSignals } from './lifecycle/lifecycle-reader.js';
 import type { Registry } from './registry/registry.js';
 import { readTrackerState } from './tracker/tracker-reader.js';
+import {
+  buildAllowedOrigins,
+  extractSubprotocolToken,
+  isOriginAllowed,
+  SUBPROTOCOL,
+  tokensMatch,
+} from './ws-auth.js';
 import {
   MAX_WS_PAYLOAD_BYTES,
   parseInboundMessage,
@@ -49,10 +54,42 @@ const TRACKER_STATE_MIN_INTERVAL_MS = 200;
 // live per render). The window only drops rapid-fire repeats on a single socket.
 const LIFECYCLE_SIGNALS_MIN_INTERVAL_MS = 200;
 
+// Upper bound on the number of distinct paths a single socket's per-PATH
+// flood-guard Map may retain. Without this a malicious client could request an
+// unbounded number of distinct (pinned) paths and grow the Map without limit.
+export const FLOOD_GUARD_MAX_KEYS = 256;
+
+/**
+ * Bound a per-socket, per-PATH flood-guard Map before inserting a new key. When
+ * the Map is at/over the cap, first drop every entry already older than the
+ * flood-guard window (expired — they can never suppress a future request), then,
+ * if still at/over the cap, evict oldest-inserted entries (Map iterates in
+ * insertion order) until under it. Pure (mutates only the passed Map) and
+ * exported for unit testing.
+ */
+export function pruneFloodGuard(map: Map<string, number>, now: number, windowMs: number): void {
+  if (map.size < FLOOD_GUARD_MAX_KEYS) return;
+
+  for (const [path, at] of map) {
+    if (now - at >= windowMs) {
+      map.delete(path);
+    }
+  }
+
+  while (map.size >= FLOOD_GUARD_MAX_KEYS) {
+    const oldest = map.keys().next();
+    if (oldest.done === true) break;
+    map.delete(oldest.value);
+  }
+}
+
 export interface WsGatewayOptions {
   readonly intervalMs?: number;
   readonly registry: Registry;
   readonly projectRoots: readonly string[];
+  readonly authToken: string;
+  readonly requireToken: boolean;
+  readonly allowedOrigins?: readonly string[];
 }
 
 export interface WsGateway {
@@ -75,7 +112,30 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
 
   // `ws` handles the HTTP upgrade itself, filtered to WS_PATH. maxPayload caps the
   // per-frame size (ws defaults to 100 MiB) so a client can't push huge blobs.
-  const wss = new WebSocketServer({ server, path: WS_PATH, maxPayload: MAX_WS_PAYLOAD_BYTES });
+  // The connection gate rejects foreign origins (both modes) and, in prod, any
+  // handshake missing/mismatching the local token carried on the subprotocol.
+  const wss = new WebSocketServer({
+    server,
+    path: WS_PATH,
+    maxPayload: MAX_WS_PAYLOAD_BYTES,
+    handleProtocols: (protocols: Set<string>) =>
+      protocols.has(SUBPROTOCOL) ? SUBPROTOCOL : false,
+    verifyClient: (info: { origin: string; secure: boolean; req: IncomingMessage }) => {
+      const allowed = buildAllowedOrigins(server, !options.requireToken, options.allowedOrigins);
+      if (!isOriginAllowed(info.origin, allowed, options.requireToken)) {
+        console.warn('[ws] rejected upgrade — origin', info.origin);
+        return false;
+      }
+      if (options.requireToken) {
+        const token = extractSubprotocolToken(info.req.headers['sec-websocket-protocol']);
+        if (!tokensMatch(token, options.authToken)) {
+          console.warn('[ws] rejected upgrade — token');
+          return false;
+        }
+      }
+      return true;
+    },
+  });
 
   // Build a fresh registry snapshot and push it to every OPEN client so multiple
   // browser tabs stay in sync after any mutation. Reading the registry is guarded
@@ -187,6 +247,7 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
         const now = Date.now();
         const last = lastGitStateAt.get(message.path) ?? 0;
         if (now - last < GIT_STATE_MIN_INTERVAL_MS) return;
+        pruneFloodGuard(lastGitStateAt, now, GIT_STATE_MIN_INTERVAL_MS);
         lastGitStateAt.set(message.path, now);
 
         try {
@@ -208,6 +269,7 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
         const now = Date.now();
         const last = lastTrackerStateAt.get(message.path) ?? 0;
         if (now - last < TRACKER_STATE_MIN_INTERVAL_MS) return;
+        pruneFloodGuard(lastTrackerStateAt, now, TRACKER_STATE_MIN_INTERVAL_MS);
         lastTrackerStateAt.set(message.path, now);
 
         try {
@@ -227,6 +289,7 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
         const now = Date.now();
         const last = lastLifecycleSignalsAt.get(message.path) ?? 0;
         if (now - last < LIFECYCLE_SIGNALS_MIN_INTERVAL_MS) return;
+        pruneFloodGuard(lastLifecycleSignalsAt, now, LIFECYCLE_SIGNALS_MIN_INTERVAL_MS);
         lastLifecycleSignalsAt.set(message.path, now);
 
         try {

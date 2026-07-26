@@ -29,6 +29,7 @@ import { promisify } from 'node:util';
 
 import type { TrackerState, TrackerTask } from '../ws-protocol.js';
 import { normalizeNextTask } from './normalize.js';
+import { withSpawnSlot } from './spawn-limit.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -162,12 +163,14 @@ export async function readTrackerState(projectPath: string): Promise<TrackerStat
 
   let stdout: string;
   try {
-    ({ stdout } = await execFileAsync('bash', [scriptPath], {
-      cwd: projectPath,
-      timeout: TRACKER_TIMEOUT_MS,
-      maxBuffer: TRACKER_MAX_BUFFER_BYTES,
-      env: buildAdapterEnv(),
-    }));
+    ({ stdout } = await withSpawnSlot(() =>
+      execFileAsync('bash', [scriptPath], {
+        cwd: projectPath,
+        timeout: TRACKER_TIMEOUT_MS,
+        maxBuffer: TRACKER_MAX_BUFFER_BYTES,
+        env: buildAdapterEnv(),
+      }),
+    ));
   } catch (error) {
     // Only a genuine missing-bash spawn ENOENT warrants a warning (like git-state
     // warns for a missing git binary). Every other failure — non-zero exit, timeout,

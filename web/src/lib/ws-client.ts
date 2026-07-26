@@ -112,7 +112,10 @@ export interface WebSocketLike {
 }
 
 /** Injectable factory for the underlying socket (default: global `WebSocket`). */
-export type WebSocketFactory = (url: string) => WebSocketLike;
+export type WebSocketFactory = (
+  url: string,
+  protocols?: string | string[],
+) => WebSocketLike;
 
 /** Injectable timer seam so tests can use fake timers without touching globals. */
 export interface Timers {
@@ -131,6 +134,11 @@ export interface WsClientOptions {
   readonly initialBackoffMs?: number;
   /** Backoff ceiling in ms (default 5000). */
   readonly maxBackoffMs?: number;
+  /**
+   * Override how the local WS auth token is read (default: `readToken`, which
+   * reads the injected `<meta name="devos-ws-token">`). Returns null when absent.
+   */
+  readonly getAuthToken?: () => string | null;
 }
 
 export type StatusListener = (status: ConnectionStatus) => void;
@@ -194,11 +202,40 @@ const defaultTimers: Timers = {
   clearTimeout: (handle) => globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
 
-const defaultCreateWebSocket: WebSocketFactory = (url) =>
-  new WebSocket(url) as unknown as WebSocketLike;
+const defaultCreateWebSocket: WebSocketFactory = (url, protocols) =>
+  new WebSocket(url, protocols) as unknown as WebSocketLike;
 
 function defaultUrl(): string {
   return `ws://${location.host}${WS_PATH}`;
+}
+
+/** The fixed subprotocol every dial offers so the server handshake completes. */
+const SUBPROTOCOL = 'devos';
+/** Prefix for the local-token subprotocol entry (`token.<hex>`). */
+const TOKEN_PROTO_PREFIX = 'token.';
+
+/**
+ * Read the local WS auth token injected into the served page as
+ * `<meta name="devos-ws-token" content="…">`. Returns null when the DOM is
+ * unavailable (SSR/tests) or the meta tag is absent.
+ */
+function readToken(): string | null {
+  if (typeof document === 'undefined') return null;
+  return document
+    .querySelector('meta[name="devos-ws-token"]')
+    ?.getAttribute('content') ?? null;
+}
+
+/**
+ * Build the subprotocol list offered on dial: always `['devos']`, plus a
+ * `token.<hex>` entry when a non-empty token is present.
+ */
+function buildProtocols(token: string | null): string[] {
+  const protocols = [SUBPROTOCOL];
+  if (token !== null && token.length > 0) {
+    protocols.push(TOKEN_PROTO_PREFIX + token);
+  }
+  return protocols;
 }
 
 /**
@@ -541,6 +578,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
   const timers = options.timers ?? defaultTimers;
   const initialBackoffMs = options.initialBackoffMs ?? DEFAULT_INITIAL_BACKOFF_MS;
   const maxBackoffMs = options.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS;
+  const getAuthToken = options.getAuthToken ?? readToken;
 
   const statusListeners = new Set<StatusListener>();
   const heartbeatListeners = new Set<HeartbeatListener>();
@@ -702,7 +740,8 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     if (state.closed) return;
     transition({ status: 'connecting' });
 
-    const socket = createWebSocket(url);
+    const protocols = buildProtocols(getAuthToken());
+    const socket = createWebSocket(url, protocols);
     transition({ socket });
 
     socket.onopen = () => {

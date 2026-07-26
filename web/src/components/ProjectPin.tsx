@@ -189,6 +189,30 @@ function StageBadge({
 }
 
 /**
+ * Static mini-fleet placeholder for one pinned card. Render-only stub — NO fleet
+ * plumbing, no hook, no WS frame (scope guard). Shows a muted "fleet" label and a
+ * couple of skeleton dots so the card reserves a slot for the future live fleet view.
+ */
+function MiniFleetPlaceholder({ path }: { path: string }): JSX.Element {
+  return (
+    <div
+      data-testid={`fleet-placeholder-${path}`}
+      data-fleet="placeholder"
+      className="flex items-center gap-1.5"
+    >
+      <span className="text-[10px] font-medium uppercase tracking-widest text-muted-foreground/60">
+        fleet
+      </span>
+      <span className="flex items-center gap-1">
+        <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/25" />
+        <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/25" />
+        <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/25" />
+      </span>
+    </div>
+  );
+}
+
+/**
  * Project discovery + pin management. Renders three regions:
  *  - a "Discovered" section (refresh + candidate rows not yet pinned),
  *  - a "Pinned" grid of pinned projects (each with an Unpin button),
@@ -317,16 +341,27 @@ export function ProjectPin() {
             No projects pinned yet — refresh discovery to find projects.
           </p>
         ) : (
-          <ul className="grid grid-cols-1 gap-1">
+          <ul className="grid grid-cols-1 gap-2 sm:grid-cols-2">
             {projects.map((project) => (
               <li
                 key={project.path}
                 data-testid="project-item"
                 data-path={project.path}
-                className="flex items-center justify-between gap-2 rounded-md border border-border px-3 py-1.5"
+                className="flex flex-col gap-2 rounded-lg border border-border bg-card p-3"
               >
-                <div className="flex min-w-0 flex-col gap-0.5">
+                <div className="flex items-start justify-between gap-2">
                   <span className="truncate font-mono text-sm">{project.path}</span>
+                  <button
+                    data-testid={`unpin-${project.path}`}
+                    type="button"
+                    onClick={() => unpin(project.path)}
+                    className="shrink-0 text-xs font-medium text-muted-foreground hover:text-foreground"
+                  >
+                    Unpin
+                  </button>
+                </div>
+                <MiniFleetPlaceholder path={project.path} />
+                <div className="flex min-w-0 flex-col gap-0.5">
                   <GitStatusLine path={project.path} state={gitStates[project.path]} />
                   <NextTaskLine path={project.path} state={trackerStates[project.path]} />
                   <StageBadge
@@ -335,14 +370,6 @@ export function ProjectPin() {
                     trackerState={trackerStates[project.path]}
                   />
                 </div>
-                <button
-                  data-testid={`unpin-${project.path}`}
-                  type="button"
-                  onClick={() => unpin(project.path)}
-                  className="text-xs font-medium text-muted-foreground hover:text-foreground"
-                >
-                  Unpin
-                </button>
               </li>
             ))}
           </ul>

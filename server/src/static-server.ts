@@ -11,6 +11,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { PROD } from './config.js';
+import { isLoopbackHost } from './ws-auth.js';
 
 // From server/dist/static-server.js -> repo/web/dist
 const WEB_DIST = fileURLToPath(new URL('../../web/dist', import.meta.url));
@@ -64,7 +65,60 @@ async function pickFile(candidate: string): Promise<string> {
   return INDEX_HTML;
 }
 
-async function sendFile(res: ServerResponse, filePath: string, headOnly: boolean): Promise<void> {
+// Serve index.html with the local WS auth token injected as a meta tag so the
+// app's own page can read it and present it on the WS handshake. Reads the file
+// to a string (small HTML entry), inserts the meta immediately before </head>,
+// and recomputes content-length from the injected buffer's byte length. Token is
+// hex (URL/HTML-safe) so no escaping is needed. Preserves HEAD (headers only).
+async function sendIndexWithToken(
+  res: ServerResponse,
+  token: string,
+  headOnly: boolean,
+): Promise<void> {
+  const html = await fs.readFile(INDEX_HTML, 'utf8');
+  const meta = `<meta name="devos-ws-token" content="${token}">`;
+  let injected: string;
+  if (html.includes('</head>')) {
+    injected = html.replace('</head>', `${meta}</head>`);
+  } else {
+    // The built entry is malformed — serve it, but make the failure diagnosable:
+    // with no token the prod client dials the gate tokenless and is rejected.
+    console.warn('[http] index.html has no </head> — WS token not injected; client will fail auth');
+    injected = html;
+  }
+  const body = Buffer.from(injected, 'utf8');
+
+  res.writeHead(200, {
+    'content-type': contentTypeFor(INDEX_HTML),
+    'content-length': body.byteLength,
+    'cache-control': 'no-cache',
+  });
+
+  if (headOnly) {
+    res.end();
+    return;
+  }
+  res.end(body);
+}
+
+async function sendFile(
+  res: ServerResponse,
+  filePath: string,
+  headOnly: boolean,
+  authToken?: string,
+): Promise<void> {
+  // Index branch: when a token is provided, inject it into the served HTML
+  // instead of streaming the file verbatim.
+  if (filePath === INDEX_HTML && authToken !== undefined && authToken.length > 0) {
+    try {
+      await sendIndexWithToken(res, authToken, headOnly);
+    } catch {
+      res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+      res.end('Not found — web/dist may not be built (run `npm run build`).');
+    }
+    return;
+  }
+
   let stat;
   try {
     stat = await fs.stat(filePath);
@@ -97,11 +151,26 @@ async function sendFile(res: ServerResponse, filePath: string, headOnly: boolean
   stream.pipe(res);
 }
 
-async function handleProd(req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function handleProd(
+  req: IncomingMessage,
+  res: ServerResponse,
+  authToken?: string,
+): Promise<void> {
   try {
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       res.writeHead(405, { 'content-type': 'text/plain; charset=utf-8', allow: 'GET, HEAD' });
       res.end('Method Not Allowed');
+      return;
+    }
+
+    // Host-header loopback gate (DNS-rebinding defense): the prod entry serves
+    // index.html carrying the injected WS token, so a non-loopback Host must never
+    // be served — the HTTP-side twin of the WS Origin gate. Fails closed on a
+    // missing/foreign Host (a missing Host header is rejected in prod).
+    if (!isLoopbackHost(req.headers.host)) {
+      console.warn('[http] rejected request — host', req.headers.host);
+      res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
+      res.end('Forbidden');
       return;
     }
 
@@ -115,7 +184,7 @@ async function handleProd(req: IncomingMessage, res: ServerResponse): Promise<vo
     }
 
     const filePath = await pickFile(resolved);
-    await sendFile(res, filePath, req.method === 'HEAD');
+    await sendFile(res, filePath, req.method === 'HEAD', authToken);
   } catch (err) {
     console.error('[static] unexpected error', err);
     if (!res.headersSent) {
@@ -135,11 +204,12 @@ function handleDev(_req: IncomingMessage, res: ServerResponse): void {
 
 export type RequestHandler = (req: IncomingMessage, res: ServerResponse) => void;
 
-export function createStaticHandler(): RequestHandler {
+export function createStaticHandler(options?: { authToken?: string }): RequestHandler {
   if (!PROD) {
     return handleDev;
   }
+  const authToken = options?.authToken;
   return (req, res) => {
-    void handleProd(req, res);
+    void handleProd(req, res, authToken);
   };
 }

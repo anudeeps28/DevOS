@@ -14,6 +14,7 @@
 //    idempotent and safe to call from a finally / afterEach even after failures.
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import net from 'node:net';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -77,6 +78,12 @@ export interface ServerHarness {
   readonly stop: () => Promise<void>;
   /** Recent stdout+stderr lines from the current/last child (for optional log assertions). */
   readonly getLogs: () => readonly string[];
+  /**
+   * The WS auth token pinned into the child's DEVOS_WS_TOKEN across every
+   * respawn. Stable for the harness instance so the already-loaded page's client
+   * keeps reconnecting through the token-gated prod server.
+   */
+  readonly authToken: string;
 }
 
 /** Optional configuration for a server harness. All fields are optional. */
@@ -94,6 +101,11 @@ export interface ServerHarnessOptions {
 export function createServerHarness(options?: ServerHarnessOptions): ServerHarness {
   const fixedPort = options?.fixedPort;
   const extraEnv = options?.extraEnv;
+  // Minted ONCE per harness instance and pinned into every child's env, so the
+  // token stays identical across the kill/respawn cycle. A fresh mint per respawn
+  // would invalidate the token the already-loaded page's client still holds,
+  // breaking its reconnect against the token-gated prod server.
+  const authToken = randomBytes(32).toString('hex');
   let child: ChildProcess | null = null;
   let logs: string[] = [];
   // Chosen once on first start() and reused across restarts: the reconnect test
@@ -113,6 +125,9 @@ export function createServerHarness(options?: ServerHarnessOptions): ServerHarne
         NODE_ENV: 'production',
         HOST: HARNESS_HOST,
         PORT: String(port),
+        // Stable per-harness token, pinned across respawns. Placed BEFORE the
+        // extraEnv spread so a spec can still override it if it needs to.
+        DEVOS_WS_TOKEN: authToken,
         // Spec-supplied overrides win last (e.g. DEVOS_DB_PATH → tmp DB).
         ...extraEnv,
       },
@@ -227,5 +242,6 @@ export function createServerHarness(options?: ServerHarnessOptions): ServerHarne
     start,
     stop,
     getLogs: () => logs,
+    authToken,
   };
 }

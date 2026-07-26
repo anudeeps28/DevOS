@@ -177,6 +177,50 @@ describe('ws-client', () => {
   });
 });
 
+describe('ws-client dial protocols', () => {
+  beforeEach(() => {
+    FakeSocket.instances = [];
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function makeDialClient(getAuthToken: () => string | null) {
+    const dials: (string | string[] | undefined)[] = [];
+    createWsClient({
+      url: 'ws://localhost/ws',
+      getAuthToken,
+      createWebSocket: (url, protocols) => {
+        dials.push(protocols);
+        return new FakeSocket(url);
+      },
+    });
+    return dials;
+  }
+
+  it('offers both devos and token.<token> when a token is injected', () => {
+    const dials = makeDialClient(() => 'secret-hex');
+
+    expect(dials).toHaveLength(1);
+    expect(dials[0]).toEqual(['devos', 'token.secret-hex']);
+  });
+
+  it('offers only devos when the token is null', () => {
+    const dials = makeDialClient(() => null);
+
+    expect(dials).toHaveLength(1);
+    expect(dials[0]).toEqual(['devos']);
+  });
+
+  it('offers only devos when the token is an empty string', () => {
+    const dials = makeDialClient(() => '');
+
+    expect(dials).toHaveLength(1);
+    expect(dials[0]).toEqual(['devos']);
+  });
+});
+
 /** A well-formed registry entry matching the ProjectAnchor contract. */
 function sampleProject(path: string): RegistryProject {
   return {
