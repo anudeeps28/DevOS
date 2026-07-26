@@ -41,6 +41,7 @@ function makeFakeClient() {
     onTrackerState: () => () => {},
     onLifecycleSignals: () => () => {},
     onSessionState: () => () => {},
+    onSessionTranscript: () => () => {},
     pin: () => {},
     unpin: () => {},
     discover: () => {},
@@ -48,6 +49,7 @@ function makeFakeClient() {
     requestTrackerState: () => {},
     requestLifecycleSignals: () => {},
     spawnSession: () => {},
+    requestTranscript: () => {},
     close,
   };
 

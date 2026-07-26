@@ -21,6 +21,15 @@ export interface EngineMessage {
   readonly type: string;
   readonly subtype?: string;
   readonly session_id?: string;
+  // Loose pass-through fields for the transcript normalizer (transcript-events.ts):
+  // assistant/user content rides on `message`, result metrics on the rest. All
+  // shape-checking happens in the normalizer — the seam stays structural.
+  readonly message?: unknown;
+  readonly duration_ms?: number;
+  readonly num_turns?: number;
+  readonly total_cost_usd?: number;
+  readonly usage?: unknown;
+  readonly is_error?: boolean;
 }
 
 /**

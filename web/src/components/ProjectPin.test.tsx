@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { ProjectPin } from '@/components/ProjectPin';
 import type {
   GitState,
   LifecycleSignals,
@@ -10,8 +11,9 @@ import type {
   TrackerState,
 } from '@/lib/ws-client';
 
-// ProjectPin calls useProjects() with no injection seam, so we mock the hook
-// module and drive its return value per test.
+// ProjectPin is presentational: the parent owns the single useProjects()
+// instance and feeds state + callbacks as props. Tests drive those props
+// directly via the mutable fixtures below and renderPin().
 const pin = vi.fn();
 const unpin = vi.fn();
 const discover = vi.fn();
@@ -26,23 +28,26 @@ let trackerStates: Record<string, TrackerState> = {};
 let lifecycleSignals: Record<string, LifecycleSignals> = {};
 let sessions: Record<string, readonly SessionState[]> = {};
 
-vi.mock('@/hooks/useProjects', () => ({
-  useProjects: () => ({
-    projects,
-    pin,
-    unpin,
-    candidates,
-    discover,
-    gitStates,
-    requestGitState,
-    trackerStates,
-    requestTrackerState,
-    lifecycleSignals,
-    requestLifecycleSignals,
-    sessions,
-    spawnSession,
-  }),
-}));
+/** Render ProjectPin with the current fixture state as props. */
+function renderPin() {
+  return render(
+    <ProjectPin
+      projects={projects}
+      candidates={candidates}
+      pin={pin}
+      unpin={unpin}
+      discover={discover}
+      gitStates={gitStates}
+      requestGitState={requestGitState}
+      trackerStates={trackerStates}
+      requestTrackerState={requestTrackerState}
+      lifecycleSignals={lifecycleSignals}
+      requestLifecycleSignals={requestLifecycleSignals}
+      sessions={sessions}
+      spawnSession={spawnSession}
+    />,
+  );
+}
 
 function makeSignals(overrides: Partial<LifecycleSignals> = {}): LifecycleSignals {
   return {
@@ -54,9 +59,6 @@ function makeSignals(overrides: Partial<LifecycleSignals> = {}): LifecycleSignal
     ...overrides,
   };
 }
-
-// Imported after the mock so the component picks up the mocked hook.
-import { ProjectPin } from '@/components/ProjectPin';
 
 function sampleProject(path: string): RegistryProject {
   return {
@@ -124,7 +126,7 @@ describe('ProjectPin', () => {
   });
 
   it('calls pin with the typed absolute path when Pin is clicked', () => {
-    render(<ProjectPin />);
+    renderPin();
 
     const input = screen.getByTestId('pin-path-input');
     fireEvent.change(input, { target: { value: '/abs/path/to/project' } });
@@ -134,7 +136,7 @@ describe('ProjectPin', () => {
   });
 
   it('does not call pin for an empty path', () => {
-    render(<ProjectPin />);
+    renderPin();
 
     fireEvent.click(screen.getByTestId('pin-submit'));
 
@@ -143,7 +145,7 @@ describe('ProjectPin', () => {
 
   it('renders one project-item per provided project', () => {
     projects = [sampleProject('/abs/one'), sampleProject('/abs/two')];
-    render(<ProjectPin />);
+    renderPin();
 
     const items = screen.getAllByTestId('project-item');
     expect(items).toHaveLength(2);
@@ -154,7 +156,7 @@ describe('ProjectPin', () => {
 
   it('calls unpin with the project path when its Unpin button is clicked', () => {
     projects = [sampleProject('/abs/one')];
-    render(<ProjectPin />);
+    renderPin();
 
     fireEvent.click(screen.getByTestId('unpin-/abs/one'));
 
@@ -163,7 +165,7 @@ describe('ProjectPin', () => {
 
   it('renders a candidate row and pins it with its displayName on click', () => {
     candidates = [sampleCandidate('/abs/cand', 'Cand')];
-    render(<ProjectPin />);
+    renderPin();
 
     expect(screen.getByTestId('candidate-/abs/cand')).toBeInTheDocument();
 
@@ -174,7 +176,7 @@ describe('ProjectPin', () => {
 
   it('pins a candidate without a displayName option when it has none', () => {
     candidates = [sampleCandidate('/abs/cand', null)];
-    render(<ProjectPin />);
+    renderPin();
 
     fireEvent.click(screen.getByTestId('candidate-pin-/abs/cand'));
 
@@ -184,14 +186,14 @@ describe('ProjectPin', () => {
   it('hides a candidate whose path is already pinned', () => {
     projects = [sampleProject('/abs/dup')];
     candidates = [sampleCandidate('/abs/dup'), sampleCandidate('/abs/new')];
-    render(<ProjectPin />);
+    renderPin();
 
     expect(screen.queryByTestId('candidate-/abs/dup')).not.toBeInTheDocument();
     expect(screen.getByTestId('candidate-/abs/new')).toBeInTheDocument();
   });
 
   it('calls discover when the refresh button is clicked', () => {
-    render(<ProjectPin />);
+    renderPin();
 
     fireEvent.click(screen.getByTestId('discover-refresh'));
 
@@ -200,7 +202,7 @@ describe('ProjectPin', () => {
 
   it('shows the empty state and no project-items when nothing is pinned', () => {
     projects = [];
-    render(<ProjectPin />);
+    renderPin();
 
     expect(screen.getByTestId('discovery-empty')).toBeInTheDocument();
     expect(screen.queryAllByTestId('project-item')).toHaveLength(0);
@@ -208,7 +210,7 @@ describe('ProjectPin', () => {
 
   it('hides the empty state and renders project-items when projects exist', () => {
     projects = [sampleProject('/abs/one')];
-    render(<ProjectPin />);
+    renderPin();
 
     expect(screen.queryByTestId('discovery-empty')).not.toBeInTheDocument();
     expect(screen.getAllByTestId('project-item')).toHaveLength(1);
@@ -218,7 +220,7 @@ describe('ProjectPin', () => {
     it('shows the loading affordance when no snapshot has arrived yet', () => {
       projects = [sampleProject('/abs/one')];
       // gitStates intentionally empty → undefined snapshot for this path.
-      render(<ProjectPin />);
+      renderPin();
 
       const line = screen.getByTestId('git-state-/abs/one');
       expect(line).toHaveAttribute('data-isrepo', 'null');
@@ -228,7 +230,7 @@ describe('ProjectPin', () => {
     it('renders branch, no dirty marker, and no arrows for a clean no-upstream repo', () => {
       projects = [sampleProject('/abs/one')];
       gitStates = { '/abs/one': sampleGitState('/abs/one') };
-      render(<ProjectPin />);
+      renderPin();
 
       const line = screen.getByTestId('git-state-/abs/one');
       expect(line).toHaveAttribute('data-isrepo', 'true');
@@ -252,7 +254,7 @@ describe('ProjectPin', () => {
           upstream: 'origin/feat',
         }),
       };
-      render(<ProjectPin />);
+      renderPin();
 
       const line = screen.getByTestId('git-state-/abs/one');
       expect(line).toHaveAttribute('data-dirty', 'true');
@@ -265,7 +267,7 @@ describe('ProjectPin', () => {
     it('renders "not a git repo" for a non-repo path', () => {
       projects = [sampleProject('/abs/one')];
       gitStates = { '/abs/one': sampleGitState('/abs/one', { isRepo: false, branch: null }) };
-      render(<ProjectPin />);
+      renderPin();
 
       const line = screen.getByTestId('git-state-/abs/one');
       expect(line).toHaveAttribute('data-isrepo', 'false');
@@ -277,7 +279,7 @@ describe('ProjectPin', () => {
       gitStates = {
         '/abs/one': sampleGitState('/abs/one', { detached: true, branch: null }),
       };
-      render(<ProjectPin />);
+      renderPin();
 
       const line = screen.getByTestId('git-state-/abs/one');
       expect(line).toHaveTextContent('detached');
@@ -285,7 +287,7 @@ describe('ProjectPin', () => {
 
     it('requests a fresh git-state for each pinned project on mount', () => {
       projects = [sampleProject('/abs/one'), sampleProject('/abs/two')];
-      render(<ProjectPin />);
+      renderPin();
 
       expect(requestGitState).toHaveBeenCalledWith('/abs/one');
       expect(requestGitState).toHaveBeenCalledWith('/abs/two');
@@ -296,7 +298,7 @@ describe('ProjectPin', () => {
     it('shows the loading affordance when no snapshot has arrived yet', () => {
       projects = [sampleProject('/abs/one')];
       // trackerStates intentionally empty → undefined snapshot for this path.
-      render(<ProjectPin />);
+      renderPin();
 
       const line = screen.getByTestId('tracker-state-/abs/one');
       expect(line).toHaveAttribute('data-reachable', 'null');
@@ -306,7 +308,7 @@ describe('ProjectPin', () => {
     it('renders the next task title for a reachable snapshot with a task', () => {
       projects = [sampleProject('/abs/one')];
       trackerStates = { '/abs/one': sampleTrackerState('/abs/one') };
-      render(<ProjectPin />);
+      renderPin();
 
       const line = screen.getByTestId('tracker-state-/abs/one');
       expect(line).toHaveAttribute('data-reachable', 'true');
@@ -319,7 +321,7 @@ describe('ProjectPin', () => {
       trackerStates = {
         '/abs/one': sampleTrackerState('/abs/one', { nextTask: null }),
       };
-      render(<ProjectPin />);
+      renderPin();
 
       const line = screen.getByTestId('tracker-state-/abs/one');
       expect(line).toHaveAttribute('data-reachable', 'true');
@@ -332,7 +334,7 @@ describe('ProjectPin', () => {
       trackerStates = {
         '/abs/one': sampleTrackerState('/abs/one', { tracker: null, nextTask: null }),
       };
-      render(<ProjectPin />);
+      renderPin();
 
       const line = screen.getByTestId('tracker-state-/abs/one');
       expect(line).toHaveAttribute('data-reachable', 'true');
@@ -349,7 +351,7 @@ describe('ProjectPin', () => {
           nextTask: null,
         }),
       };
-      render(<ProjectPin />);
+      renderPin();
 
       const line = screen.getByTestId('tracker-state-/abs/one');
       expect(line).toHaveAttribute('data-reachable', 'false');
@@ -358,7 +360,7 @@ describe('ProjectPin', () => {
 
     it('requests a fresh tracker-state for each pinned project on mount', () => {
       projects = [sampleProject('/abs/one'), sampleProject('/abs/two')];
-      render(<ProjectPin />);
+      renderPin();
 
       expect(requestTrackerState).toHaveBeenCalledWith('/abs/one');
       expect(requestTrackerState).toHaveBeenCalledWith('/abs/two');
@@ -369,7 +371,7 @@ describe('ProjectPin', () => {
     it('shows the loading affordance when no signals have arrived yet', () => {
       projects = [sampleProject('/abs/one')];
       // lifecycleSignals intentionally empty → undefined snapshot for this path.
-      render(<ProjectPin />);
+      renderPin();
 
       const badge = screen.getByTestId('lifecycle-state-/abs/one');
       expect(badge).toHaveAttribute('data-stage', 'null');
@@ -379,7 +381,7 @@ describe('ProjectPin', () => {
     it('derives and renders the stage from signals (a started story → Build)', () => {
       projects = [sampleProject('/abs/one')];
       lifecycleSignals = { '/abs/one': makeSignals({ hasStartedStory: true }) };
-      render(<ProjectPin />);
+      renderPin();
 
       const badge = screen.getByTestId('lifecycle-state-/abs/one');
       expect(badge).toHaveAttribute('data-stage', 'Build');
@@ -397,7 +399,7 @@ describe('ProjectPin', () => {
       for (const { stage, signals } of cases) {
         projects = [sampleProject('/abs/one')];
         lifecycleSignals = { '/abs/one': signals };
-        const { unmount } = render(<ProjectPin />);
+        const { unmount } = renderPin();
         const badge = screen.getByTestId('lifecycle-state-/abs/one');
         expect(badge).toHaveAttribute('data-stage', stage);
         expect(badge).toHaveTextContent(stage);
@@ -413,7 +415,7 @@ describe('ProjectPin', () => {
           nextTask: { id: 'wayfinder:map:x', title: 'Map', priority: 4, url: null },
         }),
       };
-      render(<ProjectPin />);
+      renderPin();
 
       const badge = screen.getByTestId('lifecycle-state-/abs/one');
       expect(badge).toHaveAttribute('data-stage', 'Decide');
@@ -421,7 +423,7 @@ describe('ProjectPin', () => {
 
     it('requests fresh lifecycle-signals for each pinned project on mount', () => {
       projects = [sampleProject('/abs/one'), sampleProject('/abs/two')];
-      render(<ProjectPin />);
+      renderPin();
 
       expect(requestLifecycleSignals).toHaveBeenCalledWith('/abs/one');
       expect(requestLifecycleSignals).toHaveBeenCalledWith('/abs/two');
@@ -435,7 +437,7 @@ describe('ProjectPin', () => {
 
     it('shows "no sessions" when none are running for the project', () => {
       projects = [sampleProject('/abs/one')];
-      render(<ProjectPin />);
+      renderPin();
 
       const control = screen.getByTestId('session-control-/abs/one');
       expect(control).toHaveAttribute('data-running', '0');
@@ -451,7 +453,7 @@ describe('ProjectPin', () => {
           sampleSession('c', '/abs/one', 'running'),
         ],
       };
-      render(<ProjectPin />);
+      renderPin();
 
       const control = screen.getByTestId('session-control-/abs/one');
       expect(control).toHaveAttribute('data-running', '2');
@@ -460,7 +462,7 @@ describe('ProjectPin', () => {
 
     it('fires spawnSession with the default role on click', () => {
       projects = [sampleProject('/abs/one')];
-      render(<ProjectPin />);
+      renderPin();
 
       fireEvent.click(screen.getByTestId('session-spawn-/abs/one'));
 

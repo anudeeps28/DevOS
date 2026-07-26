@@ -5,6 +5,7 @@ import {
   type DiscoverMessage,
   type GitStateMessage,
   type PinMessage,
+  type SessionTranscriptRequestMessage,
   type UnpinMessage,
 } from './ws-protocol.js';
 
@@ -207,6 +208,74 @@ describe('parseInboundMessage', () => {
       ).toBeNull();
       expect(
         parseInboundMessage(JSON.stringify({ type: 'session-spawn', path: '', role: 'lookout' })),
+      ).toBeNull();
+    });
+  });
+
+  describe('session-transcript-request frames', () => {
+    it('accepts a request with a non-empty bounded sessionId, frozen', () => {
+      const result = parseInboundMessage(
+        JSON.stringify({ type: 'session-transcript-request', sessionId: 'sess-1' }),
+      );
+
+      expect(result).toEqual<SessionTranscriptRequestMessage>({
+        type: 'session-transcript-request',
+        sessionId: 'sess-1',
+      });
+      expect(Object.isFrozen(result)).toBe(true);
+    });
+
+    it('strips extra junk keys from the request', () => {
+      const result = parseInboundMessage(
+        JSON.stringify({
+          type: 'session-transcript-request',
+          sessionId: 'sess-1',
+          junk: 1,
+          path: '/ignored',
+        }),
+      );
+
+      expect(result).toEqual({ type: 'session-transcript-request', sessionId: 'sess-1' });
+      expect(result as unknown as Record<string, unknown>).not.toHaveProperty('junk');
+      expect(result as unknown as Record<string, unknown>).not.toHaveProperty('path');
+    });
+
+    it('accepts a sessionId exactly at the length limit', () => {
+      const sessionId = 's'.repeat(128); // exactly MAX_SESSION_ID_LENGTH
+      const result = parseInboundMessage(
+        JSON.stringify({ type: 'session-transcript-request', sessionId }),
+      );
+      expect(result).not.toBeNull();
+    });
+
+    it('rejects an empty sessionId', () => {
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'session-transcript-request', sessionId: '' }),
+        ),
+      ).toBeNull();
+    });
+
+    it('rejects an over-long sessionId', () => {
+      const sessionId = 's'.repeat(129); // exceeds MAX_SESSION_ID_LENGTH (128)
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'session-transcript-request', sessionId })),
+      ).toBeNull();
+    });
+
+    it('rejects a wrong-type or missing sessionId', () => {
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'session-transcript-request', sessionId: 42 }),
+        ),
+      ).toBeNull();
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'session-transcript-request', sessionId: null }),
+        ),
+      ).toBeNull();
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'session-transcript-request' })),
       ).toBeNull();
     });
   });

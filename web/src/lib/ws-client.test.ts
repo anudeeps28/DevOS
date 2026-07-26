@@ -10,6 +10,7 @@ import {
   type RegistryProject,
   type SessionState,
   type TrackerState,
+  type TranscriptEvent,
   type WebSocketLike,
 } from '@/lib/ws-client';
 
@@ -943,5 +944,199 @@ describe('ws-client session-state frames', () => {
     expect(socket.sent).toEqual([
       JSON.stringify({ type: 'session-spawn', path: '/abs/repo', role: 'lookout', workItemId: 'WI-9' }),
     ]);
+  });
+});
+
+/** Stamp a transcript event body with sessionId/seq/ts for fixture frames. */
+function stamped(body: Record<string, unknown>, seq: number): Record<string, unknown> {
+  return { ...body, sessionId: 'sess-1', seq, ts: 1700000000000 + seq };
+}
+
+/** One well-formed event of every kind, in stream order. */
+function sampleTranscriptEvents(): Record<string, unknown>[] {
+  return [
+    stamped({ kind: 'init' }, 0),
+    stamped({ kind: 'assistant-text', text: 'Reading the plan' }, 1),
+    stamped({ kind: 'tool-use', toolName: 'Bash', toolInput: '{"command":"ls"}', toolUseId: 'tu-1' }, 2),
+    stamped({ kind: 'tool-result', toolUseId: 'tu-1', content: 'src\ntest', isError: false }, 3),
+    stamped(
+      {
+        kind: 'result',
+        durationMs: 1234,
+        numTurns: 3,
+        totalCostUsd: 0.05,
+        inputTokens: 100,
+        outputTokens: 40,
+        isError: false,
+      },
+      4,
+    ),
+  ];
+}
+
+function transcriptFrame(events: readonly unknown[]): string {
+  return JSON.stringify({
+    type: 'session-transcript',
+    path: '/abs/repo',
+    sessionId: 'sess-1',
+    events,
+  });
+}
+
+describe('ws-client session-transcript frames', () => {
+  beforeEach(() => {
+    FakeSocket.instances = [];
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function makeTranscriptClient() {
+    const received: {
+      path: string;
+      sessionId: string;
+      events: readonly TranscriptEvent[];
+    }[] = [];
+    const client = createWsClient({
+      url: 'ws://localhost/ws',
+      createWebSocket: (url) => new FakeSocket(url),
+    });
+    const off = client.onSessionTranscript((path, sessionId, events) =>
+      received.push({ path, sessionId, events }),
+    );
+    const socket = FakeSocket.instances[0]!;
+    socket.open();
+    return { client, received, off, socket };
+  }
+
+  it('delivers a valid session-transcript frame with every kind parsed and frozen', () => {
+    const { received, socket } = makeTranscriptClient();
+    const events = sampleTranscriptEvents();
+
+    socket.message(transcriptFrame(events));
+
+    expect(received).toHaveLength(1);
+    expect(received[0]!.path).toBe('/abs/repo');
+    expect(received[0]!.sessionId).toBe('sess-1');
+    expect(received[0]!.events).toEqual(events);
+    expect(received[0]!.events.map((e) => e.kind)).toEqual([
+      'init',
+      'assistant-text',
+      'tool-use',
+      'tool-result',
+      'result',
+    ]);
+    expect(Object.isFrozen(received[0]!.events)).toBe(true);
+    for (const event of received[0]!.events) {
+      expect(Object.isFrozen(event)).toBe(true);
+    }
+  });
+
+  it('accepts null toolUseId on tool-use and tool-result events', () => {
+    const { received, socket } = makeTranscriptClient();
+
+    socket.message(
+      transcriptFrame([
+        stamped({ kind: 'tool-use', toolName: 'Read', toolInput: '{}', toolUseId: null }, 0),
+        stamped({ kind: 'tool-result', toolUseId: null, content: 'ok', isError: true }, 1),
+      ]),
+    );
+
+    expect(received).toHaveLength(1);
+    const [use, result] = received[0]!.events;
+    expect(use).toMatchObject({ kind: 'tool-use', toolUseId: null });
+    expect(result).toMatchObject({ kind: 'tool-result', toolUseId: null, isError: true });
+  });
+
+  it('drops malformed session-transcript frames without emitting to listeners', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { received, socket } = makeTranscriptClient();
+
+    // Unknown kind.
+    socket.message(transcriptFrame([stamped({ kind: 'mystery' }, 0)]));
+    // assistant-text missing text.
+    socket.message(transcriptFrame([stamped({ kind: 'assistant-text' }, 0)]));
+    // tool-use with non-string toolName.
+    socket.message(
+      transcriptFrame([stamped({ kind: 'tool-use', toolName: 7, toolInput: '{}', toolUseId: null }, 0)]),
+    );
+    // tool-result with non-boolean isError.
+    socket.message(
+      transcriptFrame([stamped({ kind: 'tool-result', toolUseId: null, content: 'x', isError: 'no' }, 0)]),
+    );
+    // result with a non-finite metric.
+    socket.message(
+      transcriptFrame([
+        stamped(
+          {
+            kind: 'result',
+            durationMs: Number.NaN,
+            numTurns: 1,
+            totalCostUsd: 0,
+            inputTokens: 0,
+            outputTokens: 0,
+            isError: false,
+          },
+          0,
+        ),
+      ]),
+    );
+    // Missing seq stamp.
+    socket.message(
+      transcriptFrame([{ kind: 'init', sessionId: 'sess-1', ts: 1700000000000 }]),
+    );
+    // Missing sessionId on the frame.
+    socket.message(
+      JSON.stringify({ type: 'session-transcript', path: '/abs/repo', events: [] }),
+    );
+    // events not an array.
+    socket.message(
+      JSON.stringify({
+        type: 'session-transcript',
+        path: '/abs/repo',
+        sessionId: 'sess-1',
+        events: 'nope',
+      }),
+    );
+
+    expect(received).toEqual([]);
+    expect(warn).toHaveBeenCalled();
+  });
+
+  it('stops delivery after the returned unsubscribe is called', () => {
+    const { received, off, socket } = makeTranscriptClient();
+
+    socket.message(transcriptFrame([stamped({ kind: 'init' }, 0)]));
+    expect(received).toHaveLength(1);
+
+    off();
+    socket.message(transcriptFrame([stamped({ kind: 'init' }, 1)]));
+    expect(received).toHaveLength(1); // no further delivery
+  });
+
+  it('requestTranscript() sends a session-transcript-request frame once the socket is OPEN', () => {
+    const { client, socket } = makeTranscriptClient();
+
+    client.requestTranscript('sess-1');
+
+    expect(socket.sent).toEqual([
+      JSON.stringify({ type: 'session-transcript-request', sessionId: 'sess-1' }),
+    ]);
+  });
+
+  it('drops (and warns) when requestTranscript() is called before the socket is OPEN', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const client = createWsClient({
+      url: 'ws://localhost/ws',
+      createWebSocket: (url) => new FakeSocket(url),
+    });
+    const socket = FakeSocket.instances[0]!;
+    // NOTE: socket is still CONNECTING (readyState 0) — never opened.
+
+    client.requestTranscript('sess-1');
+
+    expect(socket.sent).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
   });
 });

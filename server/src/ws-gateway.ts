@@ -58,6 +58,12 @@ const TRACKER_STATE_MIN_INTERVAL_MS = 200;
 // live per render). The window only drops rapid-fire repeats on a single socket.
 const LIFECYCLE_SIGNALS_MIN_INTERVAL_MS = 200;
 
+// Minimum interval between two `session-transcript-request` backfills for the SAME
+// session on the SAME socket. This is a FLOOD-GUARD ONLY, never a cache: every
+// accepted request reads the live buffer fresh via `getTranscript`. The window only
+// drops rapid-fire repeats of one sessionId on a single socket.
+const SESSION_TRANSCRIPT_REQUEST_MIN_INTERVAL_MS = 200;
+
 // Upper bound on the number of distinct paths a single socket's per-PATH
 // flood-guard Map may retain. Without this a malicious client could request an
 // unbounded number of distinct (pinned) paths and grow the Map without limit.
@@ -191,16 +197,6 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
     }
   };
 
-  // Push every owned-session state change to all OPEN clients so the Fleet/card
-  // views stay in sync across tabs (mirrors broadcastRegistry). The manager emits
-  // from detached stream-consume loops, AFTER the spawn call has returned.
-  options.sessionManager.onState((session) => {
-    const frame: OutboundMessage = { type: 'session-state', path: session.projectPath, session };
-    for (const client of wss.clients) {
-      sendFrame(client, frame);
-    }
-  });
-
   // Access control (A01): the per-path read frames (git-state, tracker-state,
   // lifecycle-signals) drive FS + git + adapter subprocesses at a client-supplied
   // path. Restrict every read to a currently PINNED project so a client cannot probe
@@ -216,6 +212,30 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
       return false;
     }
   };
+
+  // Push every owned-session state change to all OPEN clients so the Fleet/card
+  // views stay in sync across tabs (mirrors broadcastRegistry). The manager emits
+  // from detached stream-consume loops, AFTER the spawn call has returned.
+  options.sessionManager.onState((session) => {
+    const frame: OutboundMessage = { type: 'session-state', path: session.projectPath, session };
+    for (const client of wss.clients) {
+      sendFrame(client, frame);
+    }
+  });
+
+  // Push every transcript event batch to all OPEN clients so every tab's Team room
+  // stays live (mirrors the onState broadcast above). The manager emits from
+  // detached stream-consume loops, AFTER the spawn call has returned.
+  // Access control: broadcast ONLY sessions owned by a currently-pinned project —
+  // the same isPinnedPath gate the socket-targeted backfill path applies (an
+  // unpinned project's transcript must never fan out to clients; fails closed).
+  options.sessionManager.onTranscript((path, sessionId, events) => {
+    if (!isPinnedPath(path)) return;
+    const frame: OutboundMessage = { type: 'session-transcript', path, sessionId, events };
+    for (const client of wss.clients) {
+      sendFrame(client, frame);
+    }
+  });
 
   wss.on('connection', (socket: WebSocket) => {
     console.log('[ws] client connected');
@@ -242,6 +262,12 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
     // single socket fans out one read per pinned project; a per-socket scalar would
     // drop the fan-out.
     const lastLifecycleSignalsAt = new Map<string, number>();
+
+    // Per-socket, per-SESSION flood-guard for `session-transcript-request` — see
+    // SESSION_TRANSCRIPT_REQUEST_MIN_INTERVAL_MS. Keyed by sessionId (not a single
+    // scalar) because a client backfills once per live session in a burst on
+    // (re)connect; a per-socket scalar would drop every session after the first.
+    const lastTranscriptRequestAt = new Map<string, number>();
 
     const heartbeat = createHeartbeat({
       intervalMs,
@@ -381,6 +407,37 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
         } catch (err) {
           // A spawn failure (e.g. queue full) must never crash the gateway.
           console.error('[ws] session-spawn failed', err);
+        }
+        return;
+      }
+
+      // Transcript backfill: reply to the requesting socket only (never broadcast).
+      // The whole flow is guarded so a read failure never crashes the gateway.
+      if (message.type === 'session-transcript-request') {
+        // Resolve the owning session; an unknown/ended session is a silent no-op
+        // (the buffer is live-only — discarded at session end).
+        const snap = options.sessionManager.get(message.sessionId);
+        if (snap === null) return;
+        // Access control: only serve sessions owned by a pinned project (fails closed).
+        if (!isPinnedPath(snap.projectPath)) return;
+        // Flood-guard: drop repeats of the SAME sessionId within the min-interval on
+        // this socket. Distinct sessions (the per-session fan-out) always pass.
+        const now = Date.now();
+        const last = lastTranscriptRequestAt.get(message.sessionId) ?? 0;
+        if (now - last < SESSION_TRANSCRIPT_REQUEST_MIN_INTERVAL_MS) return;
+        pruneFloodGuard(lastTranscriptRequestAt, now, SESSION_TRANSCRIPT_REQUEST_MIN_INTERVAL_MS);
+        lastTranscriptRequestAt.set(message.sessionId, now);
+
+        try {
+          const events = options.sessionManager.getTranscript(message.sessionId);
+          sendFrame(socket, {
+            type: 'session-transcript',
+            path: snap.projectPath,
+            sessionId: message.sessionId,
+            events,
+          });
+        } catch (err) {
+          console.error('[ws] session-transcript backfill failed', err);
         }
         return;
       }

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 
-import { useProjects } from '@/hooks/useProjects';
+import type { UseProjectsResult } from '@/hooks/useProjects';
 import { resolveStage } from '@/lib/lifecycle';
 import type { GitState, LifecycleSignals, SessionState, TrackerState } from '@/lib/ws-client';
 import { cn } from '@/lib/utils';
@@ -254,29 +254,50 @@ function MiniFleetPlaceholder({ path }: { path: string }): JSX.Element {
 }
 
 /**
+ * The slice of the single app-level useProjects() result this component needs.
+ * ProjectPin is presentational: the parent (App) owns the one hook instance —
+ * and therefore the one WS client — and feeds state + action callbacks down.
+ */
+export type ProjectPinProps = Pick<
+  UseProjectsResult,
+  | 'projects'
+  | 'candidates'
+  | 'pin'
+  | 'unpin'
+  | 'discover'
+  | 'gitStates'
+  | 'requestGitState'
+  | 'trackerStates'
+  | 'requestTrackerState'
+  | 'lifecycleSignals'
+  | 'requestLifecycleSignals'
+  | 'sessions'
+  | 'spawnSession'
+>;
+
+/**
  * Project discovery + pin management. Renders three regions:
  *  - a "Discovered" section (refresh + candidate rows not yet pinned),
  *  - a "Pinned" grid of pinned projects (each with an Unpin button),
  *  - an empty state when nothing is pinned.
  * Also keeps the manual pin-by-typed-path affordance as a secondary path.
- * Render-only: all state lives in the useProjects hook; no local mutation.
+ * Render-only: all state lives in the parent's useProjects hook; no local mutation.
  */
-export function ProjectPin() {
-  const {
-    projects,
-    candidates,
-    pin,
-    unpin,
-    discover,
-    gitStates,
-    requestGitState,
-    trackerStates,
-    requestTrackerState,
-    lifecycleSignals,
-    requestLifecycleSignals,
-    sessions,
-    spawnSession,
-  } = useProjects();
+export function ProjectPin({
+  projects,
+  candidates,
+  pin,
+  unpin,
+  discover,
+  gitStates,
+  requestGitState,
+  trackerStates,
+  requestTrackerState,
+  lifecycleSignals,
+  requestLifecycleSignals,
+  sessions,
+  spawnSession,
+}: ProjectPinProps) {
   const [path, setPath] = useState('');
 
   // Fresh-per-(re)mount: request a git-state read for each pinned project when

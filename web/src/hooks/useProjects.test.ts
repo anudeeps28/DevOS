@@ -14,9 +14,11 @@ import type {
   RegistryProject,
   SessionState,
   SessionStateListener,
+  SessionTranscriptListener,
   StatusListener,
   TrackerState,
   TrackerStateListener,
+  TranscriptEvent,
   WsClient,
 } from '@/lib/ws-client';
 
@@ -33,6 +35,7 @@ function makeFakeClient() {
   let trackerStateListener: TrackerStateListener | null = null;
   let lifecycleSignalsListener: LifecycleSignalsListener | null = null;
   let sessionStateListener: SessionStateListener | null = null;
+  let sessionTranscriptListener: SessionTranscriptListener | null = null;
   const pin = vi.fn();
   const unpin = vi.fn();
   const discover = vi.fn();
@@ -40,6 +43,7 @@ function makeFakeClient() {
   const requestTrackerState = vi.fn();
   const requestLifecycleSignals = vi.fn();
   const spawnSession = vi.fn();
+  const requestTranscript = vi.fn();
   const close = vi.fn();
 
   const client: WsClient = {
@@ -88,6 +92,12 @@ function makeFakeClient() {
         sessionStateListener = null;
       };
     },
+    onSessionTranscript: (listener) => {
+      sessionTranscriptListener = listener;
+      return () => {
+        sessionTranscriptListener = null;
+      };
+    },
     pin,
     unpin,
     discover,
@@ -95,6 +105,7 @@ function makeFakeClient() {
     requestTrackerState,
     requestLifecycleSignals,
     spawnSession,
+    requestTranscript,
     close,
   };
 
@@ -107,6 +118,7 @@ function makeFakeClient() {
     requestTrackerState,
     requestLifecycleSignals,
     spawnSession,
+    requestTranscript,
     close,
     emitRegistry: (projects: readonly RegistryProject[]) =>
       registryListener?.(projects),
@@ -121,6 +133,32 @@ function makeFakeClient() {
       lifecycleSignalsListener?.(path, signals),
     emitSessionState: (path: string, session: SessionState) =>
       sessionStateListener?.(path, session),
+    emitSessionTranscript: (
+      path: string,
+      sessionId: string,
+      events: readonly TranscriptEvent[],
+    ) => sessionTranscriptListener?.(path, sessionId, events),
+  };
+}
+
+/** Build a stamped assistant-text transcript event for fold fixtures. */
+function transcriptEvent(seq: number, text = `event-${seq}`): TranscriptEvent {
+  return {
+    kind: 'assistant-text',
+    text,
+    sessionId: 'sess-1',
+    seq,
+    ts: 1700000000000 + seq,
+  };
+}
+
+function runningSession(id: string, path = '/abs/one'): SessionState {
+  return {
+    id,
+    projectPath: path,
+    role: 'shipwright',
+    status: 'running',
+    sdkSessionId: null,
   };
 }
 
@@ -493,6 +531,135 @@ describe('useProjects', () => {
     expect(fake.requestLifecycleSignals).toHaveBeenCalledWith('/abs/one');
     expect(fake.requestLifecycleSignals).toHaveBeenCalledWith('/abs/two');
     expect(fake.requestLifecycleSignals).toHaveBeenCalledTimes(2);
+  });
+
+  it('starts with an empty transcripts map', () => {
+    const fake = makeFakeClient();
+    const { result } = renderHook(() =>
+      useProjects({ createClient: () => fake.client }),
+    );
+
+    expect(result.current.transcripts).toEqual({});
+  });
+
+  it('folds transcript batches by seq — dedupes, replaces, and sorts ascending', () => {
+    const fake = makeFakeClient();
+    const { result } = renderHook(() =>
+      useProjects({ createClient: () => fake.client }),
+    );
+
+    // Out-of-order first batch is sorted ascending.
+    act(() =>
+      fake.emitSessionTranscript('/abs/one', 'sess-1', [
+        transcriptEvent(2),
+        transcriptEvent(0),
+        transcriptEvent(1),
+      ]),
+    );
+    expect(result.current.transcripts['sess-1']!.map((e) => e.seq)).toEqual([0, 1, 2]);
+
+    // A repeated seq replaces (upserts) the prior event, not appended.
+    const replacement = transcriptEvent(1, 'replaced');
+    act(() => fake.emitSessionTranscript('/abs/one', 'sess-1', [replacement, transcriptEvent(3)]));
+    const folded = result.current.transcripts['sess-1']!;
+    expect(folded.map((e) => e.seq)).toEqual([0, 1, 2, 3]);
+    expect(folded[1]).toEqual(replacement);
+  });
+
+  it('keeps transcripts isolated per session id', () => {
+    const fake = makeFakeClient();
+    const { result } = renderHook(() =>
+      useProjects({ createClient: () => fake.client }),
+    );
+
+    act(() => fake.emitSessionTranscript('/abs/one', 'sess-1', [transcriptEvent(0)]));
+    act(() =>
+      fake.emitSessionTranscript('/abs/two', 'sess-2', [
+        { ...transcriptEvent(0), sessionId: 'sess-2' },
+      ]),
+    );
+
+    expect(result.current.transcripts['sess-1']).toHaveLength(1);
+    expect(result.current.transcripts['sess-2']).toHaveLength(1);
+  });
+
+  it('bounds the folded transcript to the last 500 events', () => {
+    const fake = makeFakeClient();
+    const { result } = renderHook(() =>
+      useProjects({ createClient: () => fake.client }),
+    );
+
+    const events = Array.from({ length: 510 }, (_, seq) => transcriptEvent(seq));
+    act(() => fake.emitSessionTranscript('/abs/one', 'sess-1', events));
+
+    const folded = result.current.transcripts['sess-1']!;
+    expect(folded).toHaveLength(500);
+    // Oldest dropped: the window starts at seq 10 and ends at 509.
+    expect(folded[0]!.seq).toBe(10);
+    expect(folded[folded.length - 1]!.seq).toBe(509);
+  });
+
+  it('requests a transcript backfill once per new running session id', () => {
+    const fake = makeFakeClient();
+    renderHook(() => useProjects({ createClient: () => fake.client }));
+
+    act(() => fake.emitSessionState('/abs/one', runningSession('sess-1')));
+    expect(fake.requestTranscript).toHaveBeenCalledWith('sess-1');
+    expect(fake.requestTranscript).toHaveBeenCalledTimes(1);
+
+    // A later snapshot for the SAME id does not re-request.
+    act(() => fake.emitSessionState('/abs/one', runningSession('sess-1')));
+    expect(fake.requestTranscript).toHaveBeenCalledTimes(1);
+
+    // A second distinct running id triggers its own single request.
+    act(() => fake.emitSessionState('/abs/one', runningSession('sess-2')));
+    expect(fake.requestTranscript).toHaveBeenCalledWith('sess-2');
+    expect(fake.requestTranscript).toHaveBeenCalledTimes(2);
+  });
+
+  it('re-requests a transcript backfill for still-live sessions after a reconnect', () => {
+    const fake = makeFakeClient();
+    renderHook(() => useProjects({ createClient: () => fake.client }));
+
+    // Connect → live session appears → transcript backfilled once.
+    act(() => fake.emitStatus('connected'));
+    act(() => fake.emitSessionState('/abs/one', runningSession('sess-1')));
+    act(() => fake.emitSessionTranscript('/abs/one', 'sess-1', [transcriptEvent(0)]));
+    expect(fake.requestTranscript).toHaveBeenCalledTimes(1);
+
+    // Drop → reconnect: the still-live session is re-requested (events emitted
+    // during the gap only exist in the server buffer).
+    act(() => fake.emitStatus('disconnected'));
+    act(() => fake.emitStatus('connected'));
+
+    expect(fake.requestTranscript).toHaveBeenCalledTimes(2);
+    expect(fake.requestTranscript).toHaveBeenNthCalledWith(2, 'sess-1');
+
+    // Repeated snapshots on the SAME connection still dedupe.
+    act(() => fake.emitSessionState('/abs/one', runningSession('sess-1')));
+    expect(fake.requestTranscript).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not request a backfill for non-running session snapshots', () => {
+    const fake = makeFakeClient();
+    renderHook(() => useProjects({ createClient: () => fake.client }));
+
+    act(() =>
+      fake.emitSessionState('/abs/one', { ...runningSession('sess-1'), status: 'ended' }),
+    );
+
+    expect(fake.requestTranscript).not.toHaveBeenCalled();
+  });
+
+  it('delegates requestTranscript to the underlying client', () => {
+    const fake = makeFakeClient();
+    const { result } = renderHook(() =>
+      useProjects({ createClient: () => fake.client }),
+    );
+
+    act(() => result.current.requestTranscript('sess-9'));
+
+    expect(fake.requestTranscript).toHaveBeenCalledWith('sess-9');
   });
 
   it('closes the client on unmount', () => {
