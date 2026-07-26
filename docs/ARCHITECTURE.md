@@ -212,7 +212,7 @@ Single user → "scale" is the number of projects and concurrent agents, not tra
 |---|---|---|---|
 | Pinned projects | 5–15 | 50+ | Live-derive reads (git + tracker) per render. **Fix:** parallelize the fan-out; briefly cache the *derived* view (SPEC §5); light retried health-check on trackers, not a full auth probe per call. **Realized (PR #10):** the per-project tracker read shells `bash`, so a **global spawn semaphore** caps concurrent subprocesses at `MAX_CONCURRENT_TRACKER_SPAWNS = 4` (FIFO queue, waiter queue itself capped at `MAX_SPAWN_QUEUE = 64` — excess acquisitions reject and degrade to "tracker unreachable", never pile up); each socket's per-path read throttles are held in flood-guard Maps **bounded at `FLOOD_GUARD_MAX_KEYS = 256`** (expired-first eviction, then oldest-inserted) so a socket requesting many distinct paths can't grow memory without bound. |
 | Concurrent live agents | 1–5 | 10+ | **Plan rate limits** (not CPU, not money). **Fix:** throttle spawns into a queue; surface "waiting — plan limit" as a first-class fleet state; never silently pile up. |
-| Machine resources | fine | many subprocesses | Each owned session = one SDK subprocess. **Fix:** cap concurrent sessions; idle work items hold no process (state is in files). |
+| Machine resources | fine | many subprocesses | Each owned session = one SDK subprocess. **Fix:** cap concurrent sessions; idle work items hold no process (state is in files). **Realized (Session Manager):** a **global session-spawn semaphore** caps live sessions at `MAX_CONCURRENT_SESSIONS = 8` (a slot is held for the whole session lifetime; waiter queue capped at `MAX_SESSION_SPAWN_QUEUE = 64`, excess rejects). This is the **machine-resource cap only**, not the subscription rate-limit "waiting — plan limit" state above — that SDK-stream-driven first-class state is deferred to a later M2 task. |
 | SQLite size | tiny | years of `cost_ledger` | Negligible. **Fix (if ever):** prune old ledger rows. |
 
 **The one real ceiling:** the subscription rate limit caps how many agents can actively work at once.
@@ -256,6 +256,23 @@ socket is established — it gates the *connection*, not individual messages (pe
 - **HTTP-side twin.** The prod static handler also **rejects non-loopback `Host` headers (403)** before serving
   the token-bearing `index.html`, closing the DNS-rebinding path where a rebound page could `fetch('/')` and read
   the token. This is the HTTP analogue of the WS Origin gate; both fail closed.
+
+### Session-spawn access control (realized — Session Manager)
+
+Spawning an owned session launches a `claude` **subprocess** (bash + file tools) with `cwd = a project
+path` — the first surface that actually starts an agent, so its gate is stricter than the read frames:
+
+- **Two-layer path gate, fails closed.** A `session-spawn` frame is honored only when the path is (1) a
+  currently **pinned** project (`isPinnedPath`) **and** (2) realpath-resolves **inside a configured
+  `PROJECT_ROOT`** (`isWithinProjectRoots`, symlink-resolved on both sides). Pinning alone does *not*
+  bound the cwd (pin accepts any absolute path), so the containment check is what prevents launching an
+  agent in an arbitrary host directory (e.g. `~/.ssh`). Empty roots or an unresolvable path deny.
+- **Scrubbed subprocess env.** The spawned subprocess gets an **allowlisted env**, never the server's
+  full `process.env` (the SDK's `options.env` *replaces* the environment). Mirrors the tracker adapter's
+  `buildAdapterEnv`; deliberately excludes `ANTHROPIC_API_KEY` and every secret — auth is the CLI's
+  keychain OAuth (subscription), so a scrubbed env keeps agents from reading/exfiltrating server secrets.
+- **Role is allowlist-validated** (validated at the boundary and re-checked at dispatch against the
+  roster). **Concurrency** is bounded by the session-spawn semaphore (§5).
 
 ### Data classification
 

@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   project_path TEXT NOT NULL REFERENCES projects(path),
   work_item_id TEXT,
   sdk_session_id TEXT,
+  role TEXT,
   status TEXT,
   current_stage TEXT,
   created_at INTEGER NOT NULL

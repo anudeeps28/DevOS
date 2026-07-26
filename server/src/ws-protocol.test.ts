@@ -163,6 +163,54 @@ describe('parseInboundMessage', () => {
     });
   });
 
+  describe('session-spawn frames', () => {
+    it('accepts a spawn with an absolute path and a valid role', () => {
+      const result = parseInboundMessage(
+        JSON.stringify({ type: 'session-spawn', path: '/abs/project', role: 'shipwright' }),
+      );
+      expect(result).toEqual({ type: 'session-spawn', path: '/abs/project', role: 'shipwright' });
+    });
+
+    it('preserves workItemId when it is a string, omits it otherwise', () => {
+      const withId = parseInboundMessage(
+        JSON.stringify({ type: 'session-spawn', path: '/abs', role: 'navigator', workItemId: 'WI-1' }),
+      );
+      expect(withId).toEqual({ type: 'session-spawn', path: '/abs', role: 'navigator', workItemId: 'WI-1' });
+
+      const noId = parseInboundMessage(
+        JSON.stringify({ type: 'session-spawn', path: '/abs', role: 'navigator', workItemId: 42 }),
+      );
+      expect(noId).toBeNull(); // non-string workItemId is rejected
+    });
+
+    it('rejects a spawn with an over-long workItemId', () => {
+      const workItemId = 'x'.repeat(513); // exceeds MAX_WORK_ITEM_ID_LENGTH (512)
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'session-spawn', path: '/abs', role: 'navigator', workItemId }),
+        ),
+      ).toBeNull();
+    });
+
+    it('rejects a spawn with an invalid or absent role', () => {
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'session-spawn', path: '/abs', role: 'captain' })),
+      ).toBeNull();
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'session-spawn', path: '/abs' })),
+      ).toBeNull();
+    });
+
+    it('rejects a spawn with a relative or empty path', () => {
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'session-spawn', path: 'rel/dir', role: 'lookout' })),
+      ).toBeNull();
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'session-spawn', path: '', role: 'lookout' })),
+      ).toBeNull();
+    });
+  });
+
   it('never throws on malformed input', () => {
     const inputs: unknown[] = [
       42,

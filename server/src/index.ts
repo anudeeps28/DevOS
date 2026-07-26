@@ -10,6 +10,9 @@ import type { AddressInfo } from 'node:net';
 import { DB_PATH, HOST, PORT, PROD, PROJECT_ROOTS, WS_PATH, assertLoopbackHost } from './config.js';
 import { openDatabase } from './db/database.js';
 import { createRegistry, type Registry } from './registry/registry.js';
+import { createSessionStore } from './session/session-store.js';
+import { createSessionManager, type SessionManager } from './session/session-manager.js';
+import type { QueryFn } from './session/session-engine.js';
 import { createStaticHandler } from './static-server.js';
 import { resolveAuthToken } from './ws-auth.js';
 import { attachWsGateway } from './ws-gateway.js';
@@ -22,6 +25,8 @@ export interface CreateServerOptions {
   readonly authToken?: string;
   readonly requireToken?: boolean;
   readonly allowedOrigins?: readonly string[];
+  /** Engine seam override for the SessionManager — tests inject a fake `query`. */
+  readonly query?: QueryFn;
 }
 
 export interface DevOsServer {
@@ -30,6 +35,8 @@ export interface DevOsServer {
   readonly stop: () => Promise<void>;
   /** The project registry — exposed so in-process tests can pin fixtures directly. */
   readonly registry: Registry;
+  /** The session manager — exposed so in-process tests can inspect live sessions. */
+  readonly sessionManager: SessionManager;
   /** The resolved local WS auth token (minted or supplied) — exposed for tests. */
   readonly authToken: string;
 }
@@ -43,6 +50,11 @@ export function createServer(options?: CreateServerOptions): DevOsServer {
 
   const db = openDatabase(options?.dbPath ?? DB_PATH);
   const registry = createRegistry(db);
+  const sessionStore = createSessionStore(db);
+  const sessionManager = createSessionManager({
+    store: sessionStore,
+    ...(options?.query !== undefined ? { query: options.query } : {}),
+  });
 
   const authToken = resolveAuthToken(options?.authToken);
   const requireToken = options?.requireToken ?? PROD;
@@ -51,6 +63,7 @@ export function createServer(options?: CreateServerOptions): DevOsServer {
   const server = http.createServer((req, res) => staticHandler(req, res));
   const gateway = attachWsGateway(server, {
     registry,
+    sessionManager,
     projectRoots: options?.projectRoots ?? PROJECT_ROOTS,
     authToken,
     requireToken,
@@ -76,6 +89,8 @@ export function createServer(options?: CreateServerOptions): DevOsServer {
     });
 
   const stop = async (): Promise<void> => {
+    // Interrupt every live owned session before tearing down the transport + DB.
+    await sessionManager.stopAll();
     await gateway.close();
     await new Promise<void>((resolve, reject) => {
       server.close((err) => (err ? reject(err) : resolve()));
@@ -83,7 +98,7 @@ export function createServer(options?: CreateServerOptions): DevOsServer {
     db.close();
   };
 
-  return { server, start, stop, registry, authToken };
+  return { server, start, stop, registry, sessionManager, authToken };
 }
 
 function registerShutdown(instance: DevOsServer): void {

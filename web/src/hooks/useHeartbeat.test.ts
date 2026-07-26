@@ -40,12 +40,14 @@ function makeFakeClient() {
     onGitState: () => () => {},
     onTrackerState: () => () => {},
     onLifecycleSignals: () => () => {},
+    onSessionState: () => () => {},
     pin: () => {},
     unpin: () => {},
     discover: () => {},
     requestGitState: () => {},
     requestTrackerState: () => {},
     requestLifecycleSignals: () => {},
+    spawnSession: () => {},
     close,
   };
 

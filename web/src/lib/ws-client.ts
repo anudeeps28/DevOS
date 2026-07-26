@@ -100,6 +100,19 @@ export interface LifecycleSignals {
   readonly hasReleaseTags: boolean;
 }
 
+/**
+ * A validated owned-session live-state snapshot. Mirrors the server's SessionState
+ * (server/src/ws-protocol.ts) — duplicated typed contract, no shared package.
+ * Frozen — never mutated after construction.
+ */
+export interface SessionState {
+  readonly id: string;
+  readonly projectPath: string;
+  readonly role: string;
+  readonly status: string;
+  readonly sdkSessionId: string | null;
+}
+
 /** The slice of the WebSocket API this client depends on (keeps fakes tiny). */
 export interface WebSocketLike {
   readonly readyState: number;
@@ -148,6 +161,7 @@ export type CandidateListener = (candidates: readonly RegistryCandidate[]) => vo
 export type GitStateListener = (path: string, state: GitState) => void;
 export type TrackerStateListener = (path: string, state: TrackerState) => void;
 export type LifecycleSignalsListener = (path: string, signals: LifecycleSignals) => void;
+export type SessionStateListener = (path: string, session: SessionState) => void;
 
 /** Public, framework-agnostic client surface. */
 export interface WsClient {
@@ -166,6 +180,8 @@ export interface WsClient {
   readonly onTrackerState: (listener: TrackerStateListener) => () => void;
   /** Subscribe to validated lifecycle-signals snapshots. */
   readonly onLifecycleSignals: (listener: LifecycleSignalsListener) => () => void;
+  /** Subscribe to validated owned-session state snapshots. */
+  readonly onSessionState: (listener: SessionStateListener) => () => void;
   /** Pin a project by absolute path; no-op (warns) when the socket is not open. */
   readonly pin: (path: string, opts?: { displayName?: string; uiPrefs?: unknown }) => void;
   /** Unpin a project by absolute path; no-op (warns) when the socket is not open. */
@@ -178,6 +194,8 @@ export interface WsClient {
   readonly requestTrackerState: (path: string) => void;
   /** Request the current lifecycle signals for a project path; no-op (warns) when the socket is not open. */
   readonly requestLifecycleSignals: (path: string) => void;
+  /** Spawn an owned session for a pinned project + role; no-op (warns) when the socket is not open. */
+  readonly spawnSession: (path: string, role: string, workItemId?: string) => void;
   /** Tear down: cancels reconnects, closes the socket, drops subscribers. */
   readonly close: () => void;
 }
@@ -550,6 +568,55 @@ function parseLifecycleSignalsSnapshot(
 }
 
 /**
+ * Validate a single raw entry against the SessionState contract:
+ * `{ id: string, projectPath: string, role: string, status: string, sdkSessionId: string|null }`.
+ * Returns a frozen SessionState, or null for anything malformed.
+ */
+function parseSessionState(entry: unknown): SessionState | null {
+  if (typeof entry !== 'object' || entry === null) return null;
+
+  const record = entry as Record<string, unknown>;
+  const { id, projectPath, role, status, sdkSessionId } = record;
+
+  if (typeof id !== 'string' || id.length === 0) return null;
+  if (typeof projectPath !== 'string' || projectPath.length === 0) return null;
+  if (typeof role !== 'string') return null;
+  if (typeof status !== 'string') return null;
+  if (sdkSessionId !== null && typeof sdkSessionId !== 'string') return null;
+
+  return Object.freeze({ id, projectPath, role, status, sdkSessionId });
+}
+
+/**
+ * Validate a raw WS frame against the pinned session-state contract:
+ * `{ type: 'session-state', path: string, session: SessionState }`.
+ * Returns a frozen `{ path, session }`, or null for anything malformed.
+ */
+function parseSessionStateSnapshot(
+  data: unknown,
+): { path: string; session: SessionState } | null {
+  if (typeof data !== 'string') return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return null;
+  }
+
+  if (typeof parsed !== 'object' || parsed === null) return null;
+
+  const frame = parsed as Record<string, unknown>;
+  if (frame.type !== 'session-state') return null;
+  if (typeof frame.path !== 'string' || frame.path.length === 0) return null;
+
+  const session = parseSessionState(frame.session);
+  if (session === null) return null;
+
+  return Object.freeze({ path: frame.path, session });
+}
+
+/**
  * Peek the `type` discriminant of a raw frame without full validation, so
  * handleMessage can route to the right parser. Returns null for anything that
  * is not a JSON object with a string `type`. Never throws.
@@ -587,6 +654,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
   const gitStateListeners = new Set<GitStateListener>();
   const trackerStateListeners = new Set<TrackerStateListener>();
   const lifecycleSignalsListeners = new Set<LifecycleSignalsListener>();
+  const sessionStateListeners = new Set<SessionStateListener>();
 
   let state: ClientState = {
     status: 'connecting',
@@ -627,6 +695,10 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
 
   function emitLifecycleSignals(path: string, signals: LifecycleSignals): void {
     for (const listener of lifecycleSignalsListeners) listener(path, signals);
+  }
+
+  function emitSessionState(path: string, session: SessionState): void {
+    for (const listener of sessionStateListeners) listener(path, session);
   }
 
   // Write a frame only when the socket is OPEN; otherwise drop + warn (never throw).
@@ -709,6 +781,16 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
       return;
     }
 
+    if (type === 'session-state') {
+      const snapshot = parseSessionStateSnapshot(data);
+      if (snapshot === null) {
+        console.warn('[ws-client] dropped malformed frame:', data);
+        return;
+      }
+      emitSessionState(snapshot.path, snapshot.session);
+      return;
+    }
+
     // Never throw into the app — drop and warn.
     console.warn('[ws-client] dropped malformed frame:', data);
   }
@@ -768,6 +850,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     gitStateListeners.clear();
     trackerStateListeners.clear();
     lifecycleSignalsListeners.clear();
+    sessionStateListeners.clear();
 
     if (state.reconnectHandle !== null) {
       timers.clearTimeout(state.reconnectHandle);
@@ -812,6 +895,15 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
 
   function requestLifecycleSignals(path: string): void {
     sendFrame({ type: 'lifecycle-signals', path });
+  }
+
+  function spawnSession(path: string, role: string, workItemId?: string): void {
+    sendFrame({
+      type: 'session-spawn',
+      path,
+      role,
+      ...(workItemId !== undefined ? { workItemId } : {}),
+    });
   }
 
   connect();
@@ -861,12 +953,19 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
         lifecycleSignalsListeners.delete(listener);
       };
     },
+    onSessionState: (listener) => {
+      sessionStateListeners.add(listener);
+      return () => {
+        sessionStateListeners.delete(listener);
+      };
+    },
     pin,
     unpin,
     discover,
     requestGitState,
     requestTrackerState,
     requestLifecycleSignals,
+    spawnSession,
     close,
   };
 }
