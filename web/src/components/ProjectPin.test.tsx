@@ -6,6 +6,7 @@ import type {
   LifecycleSignals,
   RegistryCandidate,
   RegistryProject,
+  SessionState,
   TrackerState,
 } from '@/lib/ws-client';
 
@@ -17,11 +18,13 @@ const discover = vi.fn();
 const requestGitState = vi.fn();
 const requestTrackerState = vi.fn();
 const requestLifecycleSignals = vi.fn();
+const spawnSession = vi.fn();
 let projects: readonly RegistryProject[] = [];
 let candidates: readonly RegistryCandidate[] = [];
 let gitStates: Record<string, GitState> = {};
 let trackerStates: Record<string, TrackerState> = {};
 let lifecycleSignals: Record<string, LifecycleSignals> = {};
+let sessions: Record<string, readonly SessionState[]> = {};
 
 vi.mock('@/hooks/useProjects', () => ({
   useProjects: () => ({
@@ -36,6 +39,8 @@ vi.mock('@/hooks/useProjects', () => ({
     requestTrackerState,
     lifecycleSignals,
     requestLifecycleSignals,
+    sessions,
+    spawnSession,
   }),
 }));
 
@@ -104,12 +109,14 @@ describe('ProjectPin', () => {
     gitStates = {};
     trackerStates = {};
     lifecycleSignals = {};
+    sessions = {};
     pin.mockReset();
     unpin.mockReset();
     discover.mockReset();
     requestGitState.mockReset();
     requestTrackerState.mockReset();
     requestLifecycleSignals.mockReset();
+    spawnSession.mockReset();
   });
 
   afterEach(() => {
@@ -418,6 +425,46 @@ describe('ProjectPin', () => {
 
       expect(requestLifecycleSignals).toHaveBeenCalledWith('/abs/one');
       expect(requestLifecycleSignals).toHaveBeenCalledWith('/abs/two');
+    });
+  });
+
+  describe('session control', () => {
+    function sampleSession(id: string, path: string, status = 'running'): SessionState {
+      return { id, projectPath: path, role: 'shipwright', status, sdkSessionId: null };
+    }
+
+    it('shows "no sessions" when none are running for the project', () => {
+      projects = [sampleProject('/abs/one')];
+      render(<ProjectPin />);
+
+      const control = screen.getByTestId('session-control-/abs/one');
+      expect(control).toHaveAttribute('data-running', '0');
+      expect(control).toHaveTextContent('no sessions');
+    });
+
+    it('counts only running sessions in the indicator', () => {
+      projects = [sampleProject('/abs/one')];
+      sessions = {
+        '/abs/one': [
+          sampleSession('a', '/abs/one', 'running'),
+          sampleSession('b', '/abs/one', 'ended'),
+          sampleSession('c', '/abs/one', 'running'),
+        ],
+      };
+      render(<ProjectPin />);
+
+      const control = screen.getByTestId('session-control-/abs/one');
+      expect(control).toHaveAttribute('data-running', '2');
+      expect(control).toHaveTextContent('2 running');
+    });
+
+    it('fires spawnSession with the default role on click', () => {
+      projects = [sampleProject('/abs/one')];
+      render(<ProjectPin />);
+
+      fireEvent.click(screen.getByTestId('session-spawn-/abs/one'));
+
+      expect(spawnSession).toHaveBeenCalledWith('/abs/one', 'shipwright');
     });
   });
 });

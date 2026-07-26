@@ -23,6 +23,30 @@ export interface DatabaseHandle {
   readonly close: () => void;
 }
 
+/**
+ * Additive, idempotent schema migrations for DBs created before a column existed.
+ * `CREATE TABLE IF NOT EXISTS` never alters an existing table, so a pre-existing
+ * dev DB keeps its old column set — we add missing columns here. Each migration
+ * checks `PRAGMA table_info` first so re-opening an already-migrated DB is a no-op.
+ * Additive only: never drop/rename/retype a column (that would risk existing data).
+ */
+function applyAdditiveMigrations(raw: Database.Database): void {
+  ensureColumn(raw, 'sessions', 'role', 'TEXT');
+}
+
+/** Add `<column> <type>` to `<table>` when it is not already present. Idempotent. */
+function ensureColumn(
+  raw: Database.Database,
+  table: string,
+  column: string,
+  columnType: string,
+): void {
+  // table/column/type are internal constants (never user input) — safe to inline.
+  const columns = raw.pragma(`table_info(${table})`) as Array<{ name: string }>;
+  if (columns.some((c) => c.name === column)) return;
+  raw.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${columnType}`);
+}
+
 function ensureParentDir(dbPath: string): void {
   if (dbPath === IN_MEMORY_PATH) return;
   const dir = dirname(dbPath);
@@ -56,6 +80,7 @@ export function openDatabase(dbPath: string): DatabaseHandle {
     raw.pragma('journal_mode = WAL');
     raw.pragma('foreign_keys = ON');
     raw.exec(SCHEMA_SQL);
+    applyAdditiveMigrations(raw);
   } catch (error) {
     const cause = error instanceof Error ? error.message : String(error);
     throw new Error(`Failed to open SQLite database at "${dbPath}": ${cause}`);

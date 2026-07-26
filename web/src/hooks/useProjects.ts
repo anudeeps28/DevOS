@@ -6,6 +6,7 @@ import {
   type LifecycleSignals,
   type RegistryCandidate,
   type RegistryProject,
+  type SessionState,
   type TrackerState,
   type WsClient,
   type WsClientOptions,
@@ -34,6 +35,10 @@ export interface UseProjectsResult {
   readonly lifecycleSignals: Record<string, LifecycleSignals>;
   /** Request a fresh lifecycle-signals read for a project path; delegates to the live client. */
   readonly requestLifecycleSignals: (path: string) => void;
+  /** Latest owned-session states keyed by absolute project path (upserted by session id). */
+  readonly sessions: Record<string, readonly SessionState[]>;
+  /** Spawn an owned session for a pinned project + role; delegates to the live client. */
+  readonly spawnSession: (path: string, role: string, workItemId?: string) => void;
 }
 
 export interface UseProjectsOptions {
@@ -52,6 +57,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
   const [gitStates, setGitStates] = useState<Record<string, GitState>>({});
   const [trackerStates, setTrackerStates] = useState<Record<string, TrackerState>>({});
   const [lifecycleSignals, setLifecycleSignals] = useState<Record<string, LifecycleSignals>>({});
+  const [sessions, setSessions] = useState<Record<string, readonly SessionState[]>>({});
 
   // Hold the latest factory in a ref so the setup effect can run once (on mount)
   // without re-subscribing when an inline options object changes identity.
@@ -84,6 +90,13 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     const offLifecycleSignals = client.onLifecycleSignals((path, signals) =>
       setLifecycleSignals((prev) => ({ ...prev, [path]: signals })),
     );
+    // Immutable fold: a session-state snapshot upserts by session id within the path.
+    const offSessionState = client.onSessionState((path, session) =>
+      setSessions((prev) => {
+        const others = (prev[path] ?? []).filter((s) => s.id !== session.id);
+        return { ...prev, [path]: [...others, session] };
+      }),
+    );
     // Auto-refresh on connect: a freshly-opened socket requests a scan and a
     // git-state + tracker-state + lifecycle-signals read for every currently-known
     // pinned project.
@@ -104,6 +117,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
       offGitState();
       offTrackerState();
       offLifecycleSignals();
+      offSessionState();
       offStatus();
       client.close();
       clientRef.current = null;
@@ -147,6 +161,15 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     clientRef.current?.requestLifecycleSignals(path);
   }
 
+  function spawnSession(path: string, role: string, workItemId?: string): void {
+    // Forward only the args given — don't pass an explicit `undefined` workItemId.
+    if (workItemId !== undefined) {
+      clientRef.current?.spawnSession(path, role, workItemId);
+    } else {
+      clientRef.current?.spawnSession(path, role);
+    }
+  }
+
   return {
     projects,
     candidates,
@@ -159,5 +182,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     requestTrackerState,
     lifecycleSignals,
     requestLifecycleSignals,
+    sessions,
+    spawnSession,
   };
 }

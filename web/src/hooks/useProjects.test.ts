@@ -12,6 +12,8 @@ import type {
   RegistryCandidate,
   RegistryListener,
   RegistryProject,
+  SessionState,
+  SessionStateListener,
   StatusListener,
   TrackerState,
   TrackerStateListener,
@@ -30,12 +32,14 @@ function makeFakeClient() {
   let gitStateListener: GitStateListener | null = null;
   let trackerStateListener: TrackerStateListener | null = null;
   let lifecycleSignalsListener: LifecycleSignalsListener | null = null;
+  let sessionStateListener: SessionStateListener | null = null;
   const pin = vi.fn();
   const unpin = vi.fn();
   const discover = vi.fn();
   const requestGitState = vi.fn();
   const requestTrackerState = vi.fn();
   const requestLifecycleSignals = vi.fn();
+  const spawnSession = vi.fn();
   const close = vi.fn();
 
   const client: WsClient = {
@@ -78,12 +82,19 @@ function makeFakeClient() {
         lifecycleSignalsListener = null;
       };
     },
+    onSessionState: (listener) => {
+      sessionStateListener = listener;
+      return () => {
+        sessionStateListener = null;
+      };
+    },
     pin,
     unpin,
     discover,
     requestGitState,
     requestTrackerState,
     requestLifecycleSignals,
+    spawnSession,
     close,
   };
 
@@ -95,6 +106,7 @@ function makeFakeClient() {
     requestGitState,
     requestTrackerState,
     requestLifecycleSignals,
+    spawnSession,
     close,
     emitRegistry: (projects: readonly RegistryProject[]) =>
       registryListener?.(projects),
@@ -107,6 +119,8 @@ function makeFakeClient() {
       trackerStateListener?.(path, state),
     emitLifecycleSignals: (path: string, signals: LifecycleSignals) =>
       lifecycleSignalsListener?.(path, signals),
+    emitSessionState: (path: string, session: SessionState) =>
+      sessionStateListener?.(path, session),
   };
 }
 
@@ -266,6 +280,44 @@ describe('useProjects', () => {
     act(() => result.current.requestGitState('/abs/path'));
 
     expect(fake.requestGitState).toHaveBeenCalledWith('/abs/path');
+  });
+
+  it('folds session-state snapshots into sessions keyed by path, upserting by id', () => {
+    const fake = makeFakeClient();
+    const { result } = renderHook(() =>
+      useProjects({ createClient: () => fake.client }),
+    );
+
+    const running: SessionState = {
+      id: 'sess-1',
+      projectPath: '/abs/one',
+      role: 'shipwright',
+      status: 'running',
+      sdkSessionId: null,
+    };
+    act(() => fake.emitSessionState('/abs/one', running));
+    expect(result.current.sessions['/abs/one']).toEqual([running]);
+
+    // A later snapshot for the SAME id replaces (upserts) — not appended.
+    const ended: SessionState = { ...running, status: 'ended', sdkSessionId: 'sdk-1' };
+    act(() => fake.emitSessionState('/abs/one', ended));
+    expect(result.current.sessions['/abs/one']).toEqual([ended]);
+
+    // A second distinct id is appended alongside.
+    const second: SessionState = { ...running, id: 'sess-2' };
+    act(() => fake.emitSessionState('/abs/one', second));
+    expect(result.current.sessions['/abs/one']).toHaveLength(2);
+  });
+
+  it('delegates spawnSession to the underlying client', () => {
+    const fake = makeFakeClient();
+    const { result } = renderHook(() =>
+      useProjects({ createClient: () => fake.client }),
+    );
+
+    act(() => result.current.spawnSession('/abs/path', 'lookout'));
+
+    expect(fake.spawnSession).toHaveBeenCalledWith('/abs/path', 'lookout');
   });
 
   it('requests git-state for each pinned project when the registry arrives', () => {

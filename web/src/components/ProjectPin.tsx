@@ -2,8 +2,11 @@ import { useEffect, useState } from 'react';
 
 import { useProjects } from '@/hooks/useProjects';
 import { resolveStage } from '@/lib/lifecycle';
-import type { GitState, LifecycleSignals, TrackerState } from '@/lib/ws-client';
+import type { GitState, LifecycleSignals, SessionState, TrackerState } from '@/lib/ws-client';
 import { cn } from '@/lib/utils';
+
+/** Default role used by the card's one-click spawn (full role selection is a later task). */
+const DEFAULT_SPAWN_ROLE = 'shipwright';
 
 /** Stringify a nullable numeric field for a `data-*` attribute. */
 function attrNum(value: number | null): string {
@@ -189,6 +192,44 @@ function StageBadge({
 }
 
 /**
+ * Minimal owned-session control for one pinned card. Render-only (state lives in the
+ * hook): a one-click "Spawn" button that starts a session for this project, plus a
+ * running-count indicator. Deliberately thin — NO transcript, steering, or permission
+ * UI (each is a separate downstream M2 task).
+ */
+function SessionControl({
+  path,
+  sessions,
+  onSpawn,
+}: {
+  path: string;
+  sessions: readonly SessionState[] | undefined;
+  onSpawn: (path: string, role: string) => void;
+}): JSX.Element {
+  const runningCount = (sessions ?? []).filter((s) => s.status === 'running').length;
+
+  return (
+    <div
+      data-testid={`session-control-${path}`}
+      data-running={String(runningCount)}
+      className="flex items-center justify-between gap-2"
+    >
+      <span className="text-[10px] font-medium uppercase tracking-widest text-muted-foreground/60">
+        {runningCount > 0 ? `${runningCount} running` : 'no sessions'}
+      </span>
+      <button
+        data-testid={`session-spawn-${path}`}
+        type="button"
+        onClick={() => onSpawn(path, DEFAULT_SPAWN_ROLE)}
+        className="rounded-md border border-border px-2 py-0.5 text-xs font-medium text-muted-foreground hover:text-foreground"
+      >
+        Spawn
+      </button>
+    </div>
+  );
+}
+
+/**
  * Static mini-fleet placeholder for one pinned card. Render-only stub — NO fleet
  * plumbing, no hook, no WS frame (scope guard). Shows a muted "fleet" label and a
  * couple of skeleton dots so the card reserves a slot for the future live fleet view.
@@ -233,6 +274,8 @@ export function ProjectPin() {
     requestTrackerState,
     lifecycleSignals,
     requestLifecycleSignals,
+    sessions,
+    spawnSession,
   } = useProjects();
   const [path, setPath] = useState('');
 
@@ -361,6 +404,11 @@ export function ProjectPin() {
                   </button>
                 </div>
                 <MiniFleetPlaceholder path={project.path} />
+                <SessionControl
+                  path={project.path}
+                  sessions={sessions[project.path]}
+                  onSpawn={spawnSession}
+                />
                 <div className="flex min-w-0 flex-col gap-0.5">
                   <GitStatusLine path={project.path} state={gitStates[project.path]} />
                   <NextTaskLine path={project.path} state={trackerStates[project.path]} />

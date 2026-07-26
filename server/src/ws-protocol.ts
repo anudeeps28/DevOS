@@ -11,6 +11,7 @@
 //  - No on-disk checks here: path existence/discovery is deferred to a later task.
 
 import { isAbsolute } from 'node:path';
+import { isValidRole } from './session/roles.js';
 
 // Boundary size limits (defense-in-depth for the first client-writable surface).
 // The transport also enforces MAX_WS_PAYLOAD_BYTES via the WebSocketServer, but
@@ -19,6 +20,7 @@ export const MAX_WS_PAYLOAD_BYTES = 64 * 1024; // 64 KiB per frame
 const MAX_FRAME_CHARS = MAX_WS_PAYLOAD_BYTES; // reject an over-long raw frame early
 const MAX_PATH_LENGTH = 4096;
 const MAX_DISPLAY_NAME_LENGTH = 512;
+const MAX_WORK_ITEM_ID_LENGTH = 512;
 
 /** A persisted project anchor as sent to the client. */
 export interface ProjectAnchor {
@@ -175,6 +177,30 @@ export interface LifecycleSignalsSnapshot {
   readonly state: LifecycleSignalsState;
 }
 
+/** One owned session's live state, as sent to the client. */
+export interface SessionState {
+  readonly id: string;
+  readonly projectPath: string;
+  readonly role: string;
+  readonly status: string;
+  readonly sdkSessionId: string | null;
+}
+
+/** Inbound: spawn an owned Agent-SDK session for a pinned project + role. */
+export interface SessionSpawnMessage {
+  readonly type: 'session-spawn';
+  readonly path: string;
+  readonly role: string;
+  readonly workItemId?: string;
+}
+
+/** Outbound: a live-state snapshot for a single owned session. */
+export interface SessionStateSnapshot {
+  readonly type: 'session-state';
+  readonly path: string;
+  readonly session: SessionState;
+}
+
 /** Every message the server accepts from a client. */
 export type InboundMessage =
   | PinMessage
@@ -182,7 +208,8 @@ export type InboundMessage =
   | DiscoverMessage
   | GitStateMessage
   | TrackerStateMessage
-  | LifecycleSignalsMessage;
+  | LifecycleSignalsMessage
+  | SessionSpawnMessage;
 
 /** Every registry message the server emits to a client. */
 export type OutboundMessage =
@@ -191,7 +218,8 @@ export type OutboundMessage =
   | CandidatesSnapshot
   | GitStateSnapshot
   | TrackerStateSnapshot
-  | LifecycleSignalsSnapshot;
+  | LifecycleSignalsSnapshot
+  | SessionStateSnapshot;
 
 /**
  * Validate a raw WS frame against the inbound contract. Branches on `type` first:
@@ -259,6 +287,38 @@ export function parseInboundMessage(data: unknown): InboundMessage | null {
       return null;
     }
     return Object.freeze<LifecycleSignalsMessage>({ type: 'lifecycle-signals', path });
+  }
+
+  // `session-spawn` requires a non-empty ABSOLUTE path (like the read frames) AND a
+  // valid role (validated against the canonical roster). workItemId is optional.
+  if (type === 'session-spawn') {
+    const { path, role, workItemId } = frame;
+    if (
+      typeof path !== 'string' ||
+      path.length === 0 ||
+      path.length > MAX_PATH_LENGTH ||
+      !isAbsolute(path)
+    ) {
+      return null;
+    }
+    if (!isValidRole(role)) {
+      return null;
+    }
+    // workItemId is optional; when present it must be a bounded string (it is persisted
+    // to the sessions table — reject, don't truncate, so the boundary stays strict).
+    if (
+      workItemId !== undefined &&
+      (typeof workItemId !== 'string' || workItemId.length > MAX_WORK_ITEM_ID_LENGTH)
+    ) {
+      return null;
+    }
+    return Object.freeze<SessionSpawnMessage>({
+      type: 'session-spawn',
+      path,
+      role,
+      // Conditional spread keeps workItemId absent (never `undefined`) for exactOptionalPropertyTypes.
+      ...(typeof workItemId === 'string' ? { workItemId } : {}),
+    });
   }
 
   // `pin`/`unpin` share the absolute-path requirement.

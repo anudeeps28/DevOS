@@ -8,6 +8,7 @@ import {
   type LifecycleSignals,
   type RegistryCandidate,
   type RegistryProject,
+  type SessionState,
   type TrackerState,
   type WebSocketLike,
 } from '@/lib/ws-client';
@@ -852,5 +853,95 @@ describe('ws-client tracker-state frames', () => {
       data: trackerStateFrame('/abs/repo', sampleTrackerState('/abs/repo')),
     });
     expect(received).toHaveLength(1);
+  });
+});
+
+/** A well-formed session-state snapshot matching the SessionState contract. */
+function sampleSessionState(id: string, path: string): SessionState {
+  return {
+    id,
+    projectPath: path,
+    role: 'shipwright',
+    status: 'running',
+    sdkSessionId: null,
+  };
+}
+
+function sessionStateFrame(path: string, session: unknown): string {
+  return JSON.stringify({ type: 'session-state', path, session });
+}
+
+describe('ws-client session-state frames', () => {
+  beforeEach(() => {
+    FakeSocket.instances = [];
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function makeSessionClient() {
+    const received: { path: string; session: SessionState }[] = [];
+    const client = createWsClient({
+      url: 'ws://localhost/ws',
+      createWebSocket: (url) => new FakeSocket(url),
+    });
+    const off = client.onSessionState((path, session) => received.push({ path, session }));
+    const socket = FakeSocket.instances[0]!;
+    socket.open();
+    return { client, received, off, socket };
+  }
+
+  it('delivers a valid session-state frame with the correct path and a frozen session', () => {
+    const { received, socket } = makeSessionClient();
+    const session = sampleSessionState('sess-1', '/abs/repo');
+
+    socket.message(sessionStateFrame('/abs/repo', session));
+
+    expect(received).toHaveLength(1);
+    expect(received[0]!.path).toBe('/abs/repo');
+    expect(received[0]!.session).toEqual(session);
+    expect(Object.isFrozen(received[0]!.session)).toBe(true);
+  });
+
+  it('drops malformed session-state frames without emitting to listeners', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { received, socket } = makeSessionClient();
+    const base = sampleSessionState('sess-1', '/abs/repo');
+
+    // Missing session entirely.
+    expect(() =>
+      socket.message(JSON.stringify({ type: 'session-state', path: '/abs/repo' })),
+    ).not.toThrow();
+    // session.id empty.
+    expect(() =>
+      socket.message(sessionStateFrame('/abs/repo', { ...base, id: '' })),
+    ).not.toThrow();
+    // session.status non-string.
+    expect(() =>
+      socket.message(sessionStateFrame('/abs/repo', { ...base, status: 42 })),
+    ).not.toThrow();
+    // session.sdkSessionId a number (must be string|null).
+    expect(() =>
+      socket.message(sessionStateFrame('/abs/repo', { ...base, sdkSessionId: 7 })),
+    ).not.toThrow();
+
+    expect(received).toEqual([]);
+    expect(warn).toHaveBeenCalled();
+  });
+
+  it('spawnSession() sends a session-spawn frame once the socket is OPEN', () => {
+    const client = createWsClient({
+      url: 'ws://localhost/ws',
+      createWebSocket: (url) => new FakeSocket(url),
+    });
+    const socket = FakeSocket.instances[0]!;
+    socket.open();
+
+    client.spawnSession('/abs/repo', 'lookout', 'WI-9');
+
+    expect(socket.sent).toEqual([
+      JSON.stringify({ type: 'session-spawn', path: '/abs/repo', role: 'lookout', workItemId: 'WI-9' }),
+    ]);
   });
 });

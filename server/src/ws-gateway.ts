@@ -6,6 +6,8 @@
 // in prod, a local token carried on the Sec-WebSocket-Protocol subprotocol.
 
 import type { IncomingMessage, Server } from 'node:http';
+import { realpath } from 'node:fs/promises';
+import { sep } from 'node:path';
 import { WebSocket, WebSocketServer } from 'ws';
 import { HEARTBEAT_INTERVAL_MS, WS_PATH } from './config.js';
 import { scanCandidates } from './discovery/scanner.js';
@@ -13,6 +15,8 @@ import { readGitState } from './git/git-state-reader.js';
 import { createHeartbeat, type HeartbeatMessage } from './heartbeat.js';
 import { readLifecycleSignals } from './lifecycle/lifecycle-reader.js';
 import type { Registry } from './registry/registry.js';
+import { isValidRole } from './session/roles.js';
+import type { SessionManager } from './session/session-manager.js';
 import { readTrackerState } from './tracker/tracker-reader.js';
 import {
   buildAllowedOrigins,
@@ -83,9 +87,43 @@ export function pruneFloodGuard(map: Map<string, number>, now: number, windowMs:
   }
 }
 
+/** Resolve a path through symlinks; null when it doesn't exist or can't be resolved. */
+async function resolveReal(path: string): Promise<string | null> {
+  try {
+    return await realpath(path);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True when `candidate` resolves (through symlinks) to a directory INSIDE one of the
+ * configured project roots. Spawning a session launches a `claude` subprocess (bash +
+ * file tools) with cwd = candidate; pinning alone does NOT bound the cwd (pin accepts
+ * any absolute path), so this containment is the actual guard against launching an
+ * agent in an arbitrary host directory (e.g. `~/.ssh`). Fails CLOSED: a candidate or
+ * root that can't be realpath'd (missing dir, symlink error) never grants access, and
+ * empty roots deny everything. Realpath on BOTH sides defeats symlink-escape pins.
+ */
+async function isWithinProjectRoots(
+  candidate: string,
+  roots: readonly string[],
+): Promise<boolean> {
+  const real = await resolveReal(candidate);
+  if (real === null) return false;
+  for (const root of roots) {
+    const realRoot = await resolveReal(root);
+    if (realRoot === null) continue;
+    const prefix = realRoot.endsWith(sep) ? realRoot : realRoot + sep;
+    if (real === realRoot || real.startsWith(prefix)) return true;
+  }
+  return false;
+}
+
 export interface WsGatewayOptions {
   readonly intervalMs?: number;
   readonly registry: Registry;
+  readonly sessionManager: SessionManager;
   readonly projectRoots: readonly string[];
   readonly authToken: string;
   readonly requireToken: boolean;
@@ -152,6 +190,16 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
       sendFrame(client, snapshot);
     }
   };
+
+  // Push every owned-session state change to all OPEN clients so the Fleet/card
+  // views stay in sync across tabs (mirrors broadcastRegistry). The manager emits
+  // from detached stream-consume loops, AFTER the spawn call has returned.
+  options.sessionManager.onState((session) => {
+    const frame: OutboundMessage = { type: 'session-state', path: session.projectPath, session };
+    for (const client of wss.clients) {
+      sendFrame(client, frame);
+    }
+  });
 
   // Access control (A01): the per-path read frames (git-state, tracker-state,
   // lifecycle-signals) drive FS + git + adapter subprocesses at a client-supplied
@@ -301,6 +349,38 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
           });
         } catch (err) {
           console.error('[ws] lifecycle-signals read failed', err);
+        }
+        return;
+      }
+
+      // Session spawn: start an owned Agent-SDK session for a pinned project + role.
+      // No per-path flood-guard here (unlike the auto-firing read frames): spawns are
+      // deliberate actions and a project may legitimately run several concurrent
+      // sessions. The global session-spawn-limit semaphore (concurrency cap + bounded
+      // queue) is the DoS bound. `session-state` frames are pushed via onState above.
+      if (message.type === 'session-spawn') {
+        // Access control (layer 1): only spawn for pinned projects (fails closed).
+        if (!isPinnedPath(message.path)) return;
+        // Defense-in-depth: re-validate the role (parseInboundMessage already did) to
+        // narrow the string to the Role union before handing it to the manager.
+        if (!isValidRole(message.role)) return;
+        // Access control (layer 2): the spawn cwd runs a `claude` subprocess with bash +
+        // file tools, so it MUST resolve within a configured PROJECT_ROOT — pinning alone
+        // doesn't bound the cwd (pin takes any absolute path). Fails closed on any path
+        // that can't be contained. (Realpath is async → awaited here.)
+        if (!(await isWithinProjectRoots(message.path, options.projectRoots))) {
+          console.warn('[ws] rejected session-spawn — path outside project roots');
+          return;
+        }
+        try {
+          await options.sessionManager.spawn({
+            projectPath: message.path,
+            role: message.role,
+            ...(message.workItemId !== undefined ? { workItemId: message.workItemId } : {}),
+          });
+        } catch (err) {
+          // A spawn failure (e.g. queue full) must never crash the gateway.
+          console.error('[ws] session-spawn failed', err);
         }
         return;
       }
