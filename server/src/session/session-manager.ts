@@ -38,6 +38,8 @@ export interface SpawnInput {
   readonly workItemId?: string;
   /** Kickoff prompt; defaults to a minimal attach message (real work assignment is a later task). */
   readonly prompt?: string;
+  /** The pipeline stage this spawn represents; written to `sessions.current_stage` by the Bridge. */
+  readonly currentStage?: string;
 }
 
 export type StateListener = (snapshot: SessionSnapshot) => void;
@@ -213,6 +215,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         role,
         status: 'running',
         ...(input.workItemId !== undefined ? { workItemId: input.workItemId } : {}),
+        ...(input.currentStage !== undefined ? { currentStage: input.currentStage } : {}),
       });
     } catch (err) {
       release();
