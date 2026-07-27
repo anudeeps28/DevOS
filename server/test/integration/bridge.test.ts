@@ -20,7 +20,7 @@
 // containment guard passes; afterEach stops the server + removes the DB sidecars and
 // fixture dirs. NO live Claude.
 
-import { copyFileSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -32,11 +32,23 @@ import { WS_PATH } from '../../src/config.js';
 import type { BridgeStateSnapshot } from '../../src/ws-protocol.js';
 import type { EngineMessage, EngineSession, QueryFn, SpawnParams } from '../../src/session/session-engine.js';
 
-const REAL_ROSTER_PATH = join(
-  '/Users/anudeepsharma/Programming/DevOS',
-  '.claude',
-  'harness-roles.json',
-);
+// Self-provision a minimal valid roster fixture rather than copy the repo's
+// real `.claude/harness-roles.json` — a machine/CI-independent path (the repo
+// checks out at a different absolute path on the CI runner). Mirrors the shape
+// `readRoster` validates: schemaVersion 1, a pipeline whose every entry has a
+// matching `roles.<name>` def. The test only depends on the navigator → shipwright
+// ordering, but the full pipeline keeps the fixture faithful to production.
+const TEST_ROSTER = {
+  schemaVersion: 1,
+  pipeline: ['navigator', 'shipwright', 'lookout', 'warden', 'harbormaster'],
+  roles: {
+    navigator: { displayName: 'Navigator', stages: ['decide'], skills: [], agent: 'navigator', producesArtifacts: [] },
+    shipwright: { displayName: 'Shipwright', stages: ['build'], skills: [], agent: 'shipwright', producesArtifacts: [] },
+    lookout: { displayName: 'Lookout', stages: ['test'], skills: [], agent: 'lookout', producesArtifacts: [] },
+    warden: { displayName: 'Warden', stages: ['review'], skills: [], agent: 'warden', producesArtifacts: [] },
+    harbormaster: { displayName: 'Harbormaster', stages: ['ship'], skills: [], agent: 'harbormaster', producesArtifacts: [] },
+  },
+} as const;
 
 function isBridgeStateFrame(value: unknown): value is BridgeStateSnapshot {
   if (typeof value !== 'object' || value === null) return false;
@@ -185,7 +197,7 @@ function makeProjectDir(): string {
   const path = join(tmpdir(), `devos-bridge-proj-${randomUUID()}`);
   const claudeDir = join(path, '.claude');
   mkdirSync(claudeDir, { recursive: true });
-  copyFileSync(REAL_ROSTER_PATH, join(claudeDir, 'harness-roles.json'));
+  writeFileSync(join(claudeDir, 'harness-roles.json'), JSON.stringify(TEST_ROSTER), 'utf8');
   tmpDirs.push(path);
   return path;
 }
