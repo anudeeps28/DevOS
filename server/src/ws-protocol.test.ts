@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 
 import {
   parseInboundMessage,
+  type BridgeInterruptMessage,
+  type BridgeStartMessage,
   type DiscoverMessage,
+  type GateApproveMessage,
   type GitStateMessage,
   type PinMessage,
   type SessionTranscriptRequestMessage,
@@ -276,6 +279,116 @@ describe('parseInboundMessage', () => {
       ).toBeNull();
       expect(
         parseInboundMessage(JSON.stringify({ type: 'session-transcript-request' })),
+      ).toBeNull();
+    });
+  });
+
+  describe('bridge-start frames', () => {
+    it('accepts a bridge-start with an absolute path and no workItemId', () => {
+      const result = parseInboundMessage(
+        JSON.stringify({ type: 'bridge-start', path: '/abs/project' }),
+      );
+      expect(result).toEqual<BridgeStartMessage>({ type: 'bridge-start', path: '/abs/project' });
+      expect(Object.isFrozen(result)).toBe(true);
+    });
+
+    it('accepts a bridge-start with an absolute path and a workItemId', () => {
+      const result = parseInboundMessage(
+        JSON.stringify({ type: 'bridge-start', path: '/abs/project', workItemId: 'WI-1' }),
+      );
+      expect(result).toEqual<BridgeStartMessage>({
+        type: 'bridge-start',
+        path: '/abs/project',
+        workItemId: 'WI-1',
+      });
+    });
+
+    it('rejects a bridge-start with a missing or relative path', () => {
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'bridge-start' })),
+      ).toBeNull();
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'bridge-start', path: 'rel/dir' })),
+      ).toBeNull();
+    });
+
+    it('rejects a bridge-start with an over-long workItemId', () => {
+      const workItemId = 'x'.repeat(513); // exceeds MAX_WORK_ITEM_ID_LENGTH (512)
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'bridge-start', path: '/abs', workItemId }),
+        ),
+      ).toBeNull();
+    });
+  });
+
+  describe('gate-approve frames', () => {
+    it('accepts a gate-approve with an absolute path', () => {
+      const result = parseInboundMessage(
+        JSON.stringify({ type: 'gate-approve', path: '/abs/project' }),
+      );
+      expect(result).toEqual<GateApproveMessage>({
+        type: 'gate-approve',
+        path: '/abs/project',
+      });
+      expect(Object.isFrozen(result)).toBe(true);
+    });
+
+    it('rejects a gate-approve with a missing or relative path', () => {
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'gate-approve' })),
+      ).toBeNull();
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'gate-approve', path: 'rel/dir' })),
+      ).toBeNull();
+    });
+  });
+
+  describe('bridge-interrupt frames', () => {
+    it('accepts a bridge-interrupt with an absolute path and a reason', () => {
+      const result = parseInboundMessage(
+        JSON.stringify({ type: 'bridge-interrupt', path: '/abs/project', reason: 'stop now' }),
+      );
+      expect(result).toEqual<BridgeInterruptMessage>({
+        type: 'bridge-interrupt',
+        path: '/abs/project',
+        reason: 'stop now',
+      });
+      expect(Object.isFrozen(result)).toBe(true);
+    });
+
+    it('rejects a bridge-interrupt with a missing or relative path', () => {
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'bridge-interrupt', reason: 'stop now' }),
+        ),
+      ).toBeNull();
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'bridge-interrupt', path: 'rel/dir', reason: 'stop now' }),
+        ),
+      ).toBeNull();
+    });
+
+    it('rejects a bridge-interrupt with a non-string reason', () => {
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'bridge-interrupt', path: '/abs/project', reason: 42 }),
+        ),
+      ).toBeNull();
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'bridge-interrupt', path: '/abs/project' }),
+        ),
+      ).toBeNull();
+    });
+
+    it('rejects a bridge-interrupt with an over-long reason', () => {
+      const reason = 'x'.repeat(4097); // exceeds MAX_REASON_LENGTH (4096)
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'bridge-interrupt', path: '/abs/project', reason }),
+        ),
       ).toBeNull();
     });
   });
