@@ -15,6 +15,7 @@ import { readGitState } from './git/git-state-reader.js';
 import { createHeartbeat, type HeartbeatMessage } from './heartbeat.js';
 import { readLifecycleSignals } from './lifecycle/lifecycle-reader.js';
 import type { Registry } from './registry/registry.js';
+import type { Bridge } from './session/bridge.js';
 import { isValidRole } from './session/roles.js';
 import type { SessionManager } from './session/session-manager.js';
 import { readTrackerState } from './tracker/tracker-reader.js';
@@ -130,6 +131,7 @@ export interface WsGatewayOptions {
   readonly intervalMs?: number;
   readonly registry: Registry;
   readonly sessionManager: SessionManager;
+  readonly bridge: Bridge;
   readonly projectRoots: readonly string[];
   readonly authToken: string;
   readonly requireToken: boolean;
@@ -234,6 +236,17 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
     const frame: OutboundMessage = { type: 'session-transcript', path, sessionId, events };
     for (const client of wss.clients) {
       sendFrame(client, frame);
+    }
+  });
+
+  // Push every Bridge run state change to all OPEN clients so every tab's Bridge
+  // view stays in sync (mirrors the onState/onTranscript broadcasts above).
+  // Access control: broadcast ONLY runs owned by a currently-pinned project — the
+  // same isPinnedPath gate the other broadcasts apply (fails closed).
+  options.bridge.onState((snap) => {
+    if (!isPinnedPath(snap.path)) return;
+    for (const client of wss.clients) {
+      sendFrame(client, snap);
     }
   });
 
@@ -438,6 +451,45 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
           });
         } catch (err) {
           console.error('[ws] session-transcript backfill failed', err);
+        }
+        return;
+      }
+
+      // Bridge start: begin (or resume) a pipeline run for a pinned project. Mirrors
+      // session-spawn's two-layer access control (pinned + within project roots) since
+      // it ultimately spawns an owned session; fails closed on either check.
+      if (message.type === 'bridge-start') {
+        if (!isPinnedPath(message.path)) return;
+        if (!(await isWithinProjectRoots(message.path, options.projectRoots))) {
+          console.warn('[ws] rejected bridge-start — path outside project roots');
+          return;
+        }
+        try {
+          options.bridge.start(message.path, message.workItemId);
+        } catch (err) {
+          console.error('[ws] bridge-start failed', err);
+        }
+        return;
+      }
+
+      // Gate approve: advance a paused Bridge run for a pinned project (fails closed).
+      if (message.type === 'gate-approve') {
+        if (!isPinnedPath(message.path)) return;
+        try {
+          options.bridge.approveGate(message.path);
+        } catch (err) {
+          console.error('[ws] gate-approve failed', err);
+        }
+        return;
+      }
+
+      // Bridge interrupt: pause a running Bridge run for a pinned project (fails closed).
+      if (message.type === 'bridge-interrupt') {
+        if (!isPinnedPath(message.path)) return;
+        try {
+          options.bridge.interrupt(message.path, 'interrupt', message.reason);
+        } catch (err) {
+          console.error('[ws] bridge-interrupt failed', err);
         }
         return;
       }

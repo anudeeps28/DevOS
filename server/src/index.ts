@@ -10,6 +10,7 @@ import type { AddressInfo } from 'node:net';
 import { DB_PATH, HOST, PORT, PROD, PROJECT_ROOTS, WS_PATH, assertLoopbackHost } from './config.js';
 import { openDatabase } from './db/database.js';
 import { createRegistry, type Registry } from './registry/registry.js';
+import { createBridge, type Bridge } from './session/bridge.js';
 import { createSessionStore } from './session/session-store.js';
 import { createSessionManager, type SessionManager } from './session/session-manager.js';
 import type { QueryFn } from './session/session-engine.js';
@@ -37,6 +38,8 @@ export interface DevOsServer {
   readonly registry: Registry;
   /** The session manager — exposed so in-process tests can inspect live sessions. */
   readonly sessionManager: SessionManager;
+  /** The Bridge — exposed so integration tests can inspect pipeline runs. */
+  readonly bridge: Bridge;
   /** The resolved local WS auth token (minted or supplied) — exposed for tests. */
   readonly authToken: string;
 }
@@ -56,6 +59,8 @@ export function createServer(options?: CreateServerOptions): DevOsServer {
     ...(options?.query !== undefined ? { query: options.query } : {}),
   });
 
+  const bridge = createBridge({ sessionManager, registry });
+
   const authToken = resolveAuthToken(options?.authToken);
   const requireToken = options?.requireToken ?? PROD;
 
@@ -64,6 +69,7 @@ export function createServer(options?: CreateServerOptions): DevOsServer {
   const gateway = attachWsGateway(server, {
     registry,
     sessionManager,
+    bridge,
     projectRoots: options?.projectRoots ?? PROJECT_ROOTS,
     authToken,
     requireToken,
@@ -98,7 +104,7 @@ export function createServer(options?: CreateServerOptions): DevOsServer {
     db.close();
   };
 
-  return { server, start, stop, registry, sessionManager, authToken };
+  return { server, start, stop, registry, sessionManager, bridge, authToken };
 }
 
 function registerShutdown(instance: DevOsServer): void {

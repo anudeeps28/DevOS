@@ -154,6 +154,32 @@ export type TranscriptEvent = TranscriptEventBody & {
   readonly ts: number;
 };
 
+/**
+ * One parked bridge-inbox item — an interrupt, question, or escalation waiting
+ * on human input. Mirrors the server's inbox entry shape
+ * (server/src/ws-protocol.ts) — duplicated typed contract, no shared package.
+ * Frozen — never mutated after construction.
+ */
+export interface BridgeInboxItem {
+  readonly stage: string;
+  readonly kind: 'interrupt' | 'question' | 'escalation';
+  readonly reason: string;
+  readonly ts: number;
+}
+
+/**
+ * A validated bridge-state snapshot. Mirrors the server's BridgeStateSnapshot
+ * (server/src/ws-protocol.ts) — duplicated typed contract, no shared package.
+ * Frozen — never mutated after construction.
+ */
+export interface BridgeState {
+  readonly path: string;
+  readonly stage: string;
+  readonly gate: 'running' | 'awaiting-approval' | 'reworking' | 'escalated' | 'done';
+  readonly sessionId: string | null;
+  readonly inbox: readonly BridgeInboxItem[];
+}
+
 /** The slice of the WebSocket API this client depends on (keeps fakes tiny). */
 export interface WebSocketLike {
   readonly readyState: number;
@@ -208,6 +234,7 @@ export type SessionTranscriptListener = (
   sessionId: string,
   events: readonly TranscriptEvent[],
 ) => void;
+export type BridgeStateListener = (path: string, state: BridgeState) => void;
 
 /** Public, framework-agnostic client surface. */
 export interface WsClient {
@@ -230,6 +257,8 @@ export interface WsClient {
   readonly onSessionState: (listener: SessionStateListener) => () => void;
   /** Subscribe to validated owned-session transcript batches. */
   readonly onSessionTranscript: (listener: SessionTranscriptListener) => () => void;
+  /** Subscribe to validated bridge-state snapshots. */
+  readonly onBridgeState: (listener: BridgeStateListener) => () => void;
   /** Pin a project by absolute path; no-op (warns) when the socket is not open. */
   readonly pin: (path: string, opts?: { displayName?: string; uiPrefs?: unknown }) => void;
   /** Unpin a project by absolute path; no-op (warns) when the socket is not open. */
@@ -246,6 +275,12 @@ export interface WsClient {
   readonly spawnSession: (path: string, role: string, workItemId?: string) => void;
   /** Request the buffered transcript of a live owned session; no-op (warns) when the socket is not open. */
   readonly requestTranscript: (sessionId: string) => void;
+  /** Start (or resume) a bridge run for a project path; no-op (warns) when the socket is not open. */
+  readonly sendBridgeStart: (path: string, workItemId?: string) => void;
+  /** Approve the current gate for a bridge run; no-op (warns) when the socket is not open. */
+  readonly sendGateApprove: (path: string) => void;
+  /** Interrupt a running bridge with a reason; no-op (warns) when the socket is not open. */
+  readonly sendBridgeInterrupt: (path: string, reason: string) => void;
   /** Tear down: cancels reconnects, closes the socket, drops subscribers. */
   readonly close: () => void;
 }
@@ -773,6 +808,72 @@ function parseSessionTranscriptSnapshot(
 }
 
 /**
+ * Validate a single raw entry against the BridgeInboxItem contract:
+ * `{ stage: string, kind: 'interrupt'|'question'|'escalation', reason: string, ts: <finite number> }`.
+ * Returns a frozen BridgeInboxItem, or null for anything malformed.
+ */
+function parseBridgeInboxItem(entry: unknown): BridgeInboxItem | null {
+  if (typeof entry !== 'object' || entry === null) return null;
+
+  const record = entry as Record<string, unknown>;
+  const { stage, kind, reason, ts } = record;
+
+  if (typeof stage !== 'string') return null;
+  if (kind !== 'interrupt' && kind !== 'question' && kind !== 'escalation') return null;
+  if (typeof reason !== 'string') return null;
+  if (typeof ts !== 'number' || !Number.isFinite(ts)) return null;
+
+  return Object.freeze({ stage, kind, reason, ts });
+}
+
+/**
+ * Validate a raw WS frame against the pinned bridge-state contract:
+ * `{ type: 'bridge-state', path: string, stage: string, gate: <enum>,
+ *    sessionId: string|null, inbox: BridgeInboxItem[] }`.
+ * Returns a frozen BridgeState, or null for anything malformed.
+ */
+function parseBridgeState(data: unknown): BridgeState | null {
+  if (typeof data !== 'string') return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return null;
+  }
+
+  if (typeof parsed !== 'object' || parsed === null) return null;
+
+  const frame = parsed as Record<string, unknown>;
+  if (frame.type !== 'bridge-state') return null;
+
+  const { path, stage, gate, sessionId, inbox } = frame;
+
+  if (typeof path !== 'string' || path.length === 0) return null;
+  if (typeof stage !== 'string') return null;
+  if (
+    gate !== 'running' &&
+    gate !== 'awaiting-approval' &&
+    gate !== 'reworking' &&
+    gate !== 'escalated' &&
+    gate !== 'done'
+  ) {
+    return null;
+  }
+  if (sessionId !== null && typeof sessionId !== 'string') return null;
+  if (!Array.isArray(inbox)) return null;
+
+  const items: BridgeInboxItem[] = [];
+  for (const entry of inbox) {
+    const item = parseBridgeInboxItem(entry);
+    if (item === null) return null;
+    items.push(item);
+  }
+
+  return Object.freeze({ path, stage, gate, sessionId, inbox: Object.freeze(items) });
+}
+
+/**
  * Peek the `type` discriminant of a raw frame without full validation, so
  * handleMessage can route to the right parser. Returns null for anything that
  * is not a JSON object with a string `type`. Never throws.
@@ -812,6 +913,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
   const lifecycleSignalsListeners = new Set<LifecycleSignalsListener>();
   const sessionStateListeners = new Set<SessionStateListener>();
   const sessionTranscriptListeners = new Set<SessionTranscriptListener>();
+  const bridgeStateListeners = new Set<BridgeStateListener>();
 
   let state: ClientState = {
     status: 'connecting',
@@ -864,6 +966,10 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     events: readonly TranscriptEvent[],
   ): void {
     for (const listener of sessionTranscriptListeners) listener(path, sessionId, events);
+  }
+
+  function emitBridgeState(path: string, bridgeState: BridgeState): void {
+    for (const listener of bridgeStateListeners) listener(path, bridgeState);
   }
 
   // Write a frame only when the socket is OPEN; otherwise drop + warn (never throw).
@@ -966,6 +1072,16 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
       return;
     }
 
+    if (type === 'bridge-state') {
+      const bridgeState = parseBridgeState(data);
+      if (bridgeState === null) {
+        console.warn('[ws-client] dropped malformed frame:', data);
+        return;
+      }
+      emitBridgeState(bridgeState.path, bridgeState);
+      return;
+    }
+
     // Never throw into the app — drop and warn.
     console.warn('[ws-client] dropped malformed frame:', data);
   }
@@ -1027,6 +1143,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     lifecycleSignalsListeners.clear();
     sessionStateListeners.clear();
     sessionTranscriptListeners.clear();
+    bridgeStateListeners.clear();
 
     if (state.reconnectHandle !== null) {
       timers.clearTimeout(state.reconnectHandle);
@@ -1084,6 +1201,22 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
 
   function requestTranscript(sessionId: string): void {
     sendFrame({ type: 'session-transcript-request', sessionId });
+  }
+
+  function sendBridgeStart(path: string, workItemId?: string): void {
+    sendFrame({
+      type: 'bridge-start',
+      path,
+      ...(workItemId !== undefined ? { workItemId } : {}),
+    });
+  }
+
+  function sendGateApprove(path: string): void {
+    sendFrame({ type: 'gate-approve', path });
+  }
+
+  function sendBridgeInterrupt(path: string, reason: string): void {
+    sendFrame({ type: 'bridge-interrupt', path, reason });
   }
 
   connect();
@@ -1145,6 +1278,12 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
         sessionTranscriptListeners.delete(listener);
       };
     },
+    onBridgeState: (listener) => {
+      bridgeStateListeners.add(listener);
+      return () => {
+        bridgeStateListeners.delete(listener);
+      };
+    },
     pin,
     unpin,
     discover,
@@ -1153,6 +1292,9 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     requestLifecycleSignals,
     spawnSession,
     requestTranscript,
+    sendBridgeStart,
+    sendGateApprove,
+    sendBridgeInterrupt,
     close,
   };
 }

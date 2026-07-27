@@ -22,6 +22,7 @@ const MAX_PATH_LENGTH = 4096;
 const MAX_DISPLAY_NAME_LENGTH = 512;
 const MAX_WORK_ITEM_ID_LENGTH = 512;
 const MAX_SESSION_ID_LENGTH = 128;
+const MAX_REASON_LENGTH = 4096;
 
 /** A persisted project anchor as sent to the client. */
 export interface ProjectAnchor {
@@ -253,6 +254,47 @@ export interface SessionTranscriptRequestMessage {
   readonly sessionId: string;
 }
 
+/** Inbound: start (or resume) a Bridge run for a pinned project path. */
+export interface BridgeStartMessage {
+  readonly type: 'bridge-start';
+  readonly path: string;
+  readonly workItemId?: string;
+}
+
+/** Inbound: approve the current Bridge gate for a pinned project path. */
+export interface GateApproveMessage {
+  readonly type: 'gate-approve';
+  readonly path: string;
+}
+
+/** Inbound: interrupt the running Bridge for a pinned project path. */
+export interface BridgeInterruptMessage {
+  readonly type: 'bridge-interrupt';
+  readonly path: string;
+  readonly reason: string;
+}
+
+/** The gate a Bridge run is currently sitting at, as sent to the client. */
+export type BridgeGate = 'running' | 'awaiting-approval' | 'reworking' | 'escalated' | 'done';
+
+/** One item in a Bridge run's inbox — an interrupt, question, or escalation. */
+export interface BridgeInboxItem {
+  readonly stage: string;
+  readonly kind: 'interrupt' | 'question' | 'escalation';
+  readonly reason: string;
+  readonly ts: number;
+}
+
+/** Outbound: a live-state snapshot for a single Bridge run. */
+export interface BridgeStateSnapshot {
+  readonly type: 'bridge-state';
+  readonly path: string;
+  readonly stage: string;
+  readonly gate: BridgeGate;
+  readonly sessionId: string | null;
+  readonly inbox: readonly BridgeInboxItem[];
+}
+
 /** Every message the server accepts from a client. */
 export type InboundMessage =
   | PinMessage
@@ -262,7 +304,10 @@ export type InboundMessage =
   | TrackerStateMessage
   | LifecycleSignalsMessage
   | SessionSpawnMessage
-  | SessionTranscriptRequestMessage;
+  | SessionTranscriptRequestMessage
+  | BridgeStartMessage
+  | GateApproveMessage
+  | BridgeInterruptMessage;
 
 /** Every registry message the server emits to a client. */
 export type OutboundMessage =
@@ -273,7 +318,8 @@ export type OutboundMessage =
   | TrackerStateSnapshot
   | LifecycleSignalsSnapshot
   | SessionStateSnapshot
-  | SessionTranscriptSnapshot;
+  | SessionTranscriptSnapshot
+  | BridgeStateSnapshot;
 
 /**
  * Validate a raw WS frame against the inbound contract. Branches on `type` first:
@@ -390,6 +436,63 @@ export function parseInboundMessage(data: unknown): InboundMessage | null {
       type: 'session-transcript-request',
       sessionId,
     });
+  }
+
+  // `bridge-start` requires a non-empty ABSOLUTE path (like session-spawn). workItemId
+  // is optional and shares the same bounded-string requirement.
+  if (type === 'bridge-start') {
+    const { path, workItemId } = frame;
+    if (
+      typeof path !== 'string' ||
+      path.length === 0 ||
+      path.length > MAX_PATH_LENGTH ||
+      !isAbsolute(path)
+    ) {
+      return null;
+    }
+    if (
+      workItemId !== undefined &&
+      (typeof workItemId !== 'string' || workItemId.length > MAX_WORK_ITEM_ID_LENGTH)
+    ) {
+      return null;
+    }
+    return Object.freeze<BridgeStartMessage>({
+      type: 'bridge-start',
+      path,
+      // Conditional spread keeps workItemId absent (never `undefined`) for exactOptionalPropertyTypes.
+      ...(typeof workItemId === 'string' ? { workItemId } : {}),
+    });
+  }
+
+  // `gate-approve` shares the same non-empty ABSOLUTE-path requirement as git-state.
+  if (type === 'gate-approve') {
+    const { path } = frame;
+    if (
+      typeof path !== 'string' ||
+      path.length === 0 ||
+      path.length > MAX_PATH_LENGTH ||
+      !isAbsolute(path)
+    ) {
+      return null;
+    }
+    return Object.freeze<GateApproveMessage>({ type: 'gate-approve', path });
+  }
+
+  // `bridge-interrupt` requires the same ABSOLUTE path plus a bounded reason string.
+  if (type === 'bridge-interrupt') {
+    const { path, reason } = frame;
+    if (
+      typeof path !== 'string' ||
+      path.length === 0 ||
+      path.length > MAX_PATH_LENGTH ||
+      !isAbsolute(path)
+    ) {
+      return null;
+    }
+    if (typeof reason !== 'string' || reason.length > MAX_REASON_LENGTH) {
+      return null;
+    }
+    return Object.freeze<BridgeInterruptMessage>({ type: 'bridge-interrupt', path, reason });
   }
 
   // `pin`/`unpin` share the absolute-path requirement.

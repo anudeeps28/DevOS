@@ -44,6 +44,9 @@ function makeFakeClient() {
   const requestLifecycleSignals = vi.fn();
   const spawnSession = vi.fn();
   const requestTranscript = vi.fn();
+  const sendBridgeStart = vi.fn();
+  const sendGateApprove = vi.fn();
+  const sendBridgeInterrupt = vi.fn();
   const close = vi.fn();
 
   const client: WsClient = {
@@ -98,6 +101,7 @@ function makeFakeClient() {
         sessionTranscriptListener = null;
       };
     },
+    onBridgeState: () => () => {},
     pin,
     unpin,
     discover,
@@ -106,6 +110,9 @@ function makeFakeClient() {
     requestLifecycleSignals,
     spawnSession,
     requestTranscript,
+    sendBridgeStart,
+    sendGateApprove,
+    sendBridgeInterrupt,
     close,
   };
 
@@ -119,6 +126,9 @@ function makeFakeClient() {
     requestLifecycleSignals,
     spawnSession,
     requestTranscript,
+    sendBridgeStart,
+    sendGateApprove,
+    sendBridgeInterrupt,
     close,
     emitRegistry: (projects: readonly RegistryProject[]) =>
       registryListener?.(projects),

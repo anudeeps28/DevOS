@@ -42,6 +42,7 @@ function makeFakeClient() {
     onLifecycleSignals: () => () => {},
     onSessionState: () => () => {},
     onSessionTranscript: () => () => {},
+    onBridgeState: () => () => {},
     pin: () => {},
     unpin: () => {},
     discover: () => {},
@@ -50,6 +51,9 @@ function makeFakeClient() {
     requestLifecycleSignals: () => {},
     spawnSession: () => {},
     requestTranscript: () => {},
+    sendBridgeStart: () => {},
+    sendGateApprove: () => {},
+    sendBridgeInterrupt: () => {},
     close,
   };
 

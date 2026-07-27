@@ -13,6 +13,7 @@ import { WebSocket } from 'ws';
 
 import { WS_PATH } from './config.js';
 import type { Registry } from './registry/registry.js';
+import type { Bridge } from './session/bridge.js';
 import type {
   SessionManager,
   SessionSnapshot,
@@ -202,11 +203,21 @@ async function startGateway(options: HarnessOptions = {}): Promise<GatewayHarnes
     stopAll: () => Promise.resolve(),
   });
 
+  const bridge: Bridge = Object.freeze({
+    start: () => {},
+    approveGate: () => {},
+    interrupt: () => {},
+    onState: () => () => {},
+    getState: () => null,
+    getInbox: () => [],
+  });
+
   const server: Server = createServer();
   const gateway: WsGateway = attachWsGateway(server, {
     intervalMs: 60_000, // keep heartbeat noise out of short-lived tests
     registry,
     sessionManager,
+    bridge,
     projectRoots: [],
     authToken: '',
     requireToken: false,
