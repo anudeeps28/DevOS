@@ -21,6 +21,7 @@ const MAX_FRAME_CHARS = MAX_WS_PAYLOAD_BYTES; // reject an over-long raw frame e
 const MAX_PATH_LENGTH = 4096;
 const MAX_DISPLAY_NAME_LENGTH = 512;
 const MAX_WORK_ITEM_ID_LENGTH = 512;
+const MAX_SESSION_ID_LENGTH = 128;
 
 /** A persisted project anchor as sent to the client. */
 export interface ProjectAnchor {
@@ -201,6 +202,57 @@ export interface SessionStateSnapshot {
   readonly session: SessionState;
 }
 
+/**
+ * One normalized transcript event body — the payload of a live session's SDK
+ * message stream after normalization (see session/transcript-events.ts).
+ * Discriminated on `kind`.
+ */
+export type TranscriptEventBody =
+  | { readonly kind: 'init' }
+  | { readonly kind: 'assistant-text'; readonly text: string }
+  | {
+      readonly kind: 'tool-use';
+      readonly toolName: string;
+      readonly toolInput: string;
+      readonly toolUseId: string | null;
+    }
+  | {
+      readonly kind: 'tool-result';
+      readonly toolUseId: string | null;
+      readonly content: string;
+      readonly isError: boolean;
+    }
+  | {
+      readonly kind: 'result';
+      readonly durationMs: number;
+      readonly numTurns: number;
+      readonly totalCostUsd: number;
+      readonly inputTokens: number;
+      readonly outputTokens: number;
+      readonly isError: boolean;
+    };
+
+/** A transcript event body stamped with its session identity + ordering. */
+export type TranscriptEvent = TranscriptEventBody & {
+  readonly sessionId: string;
+  readonly seq: number;
+  readonly ts: number;
+};
+
+/** Outbound: a batch of transcript events for a single owned session. */
+export interface SessionTranscriptSnapshot {
+  readonly type: 'session-transcript';
+  readonly path: string;
+  readonly sessionId: string;
+  readonly events: readonly TranscriptEvent[];
+}
+
+/** Inbound: request the buffered transcript of a live owned session (backfill). */
+export interface SessionTranscriptRequestMessage {
+  readonly type: 'session-transcript-request';
+  readonly sessionId: string;
+}
+
 /** Every message the server accepts from a client. */
 export type InboundMessage =
   | PinMessage
@@ -209,7 +261,8 @@ export type InboundMessage =
   | GitStateMessage
   | TrackerStateMessage
   | LifecycleSignalsMessage
-  | SessionSpawnMessage;
+  | SessionSpawnMessage
+  | SessionTranscriptRequestMessage;
 
 /** Every registry message the server emits to a client. */
 export type OutboundMessage =
@@ -219,7 +272,8 @@ export type OutboundMessage =
   | GitStateSnapshot
   | TrackerStateSnapshot
   | LifecycleSignalsSnapshot
-  | SessionStateSnapshot;
+  | SessionStateSnapshot
+  | SessionTranscriptSnapshot;
 
 /**
  * Validate a raw WS frame against the inbound contract. Branches on `type` first:
@@ -318,6 +372,23 @@ export function parseInboundMessage(data: unknown): InboundMessage | null {
       role,
       // Conditional spread keeps workItemId absent (never `undefined`) for exactOptionalPropertyTypes.
       ...(typeof workItemId === 'string' ? { workItemId } : {}),
+    });
+  }
+
+  // `session-transcript-request` carries a session id (opaque, not a path) — a
+  // non-empty bounded string. Ownership/pinning is resolved by the gateway.
+  if (type === 'session-transcript-request') {
+    const { sessionId } = frame;
+    if (
+      typeof sessionId !== 'string' ||
+      sessionId.length === 0 ||
+      sessionId.length > MAX_SESSION_ID_LENGTH
+    ) {
+      return null;
+    }
+    return Object.freeze<SessionTranscriptRequestMessage>({
+      type: 'session-transcript-request',
+      sessionId,
     });
   }
 

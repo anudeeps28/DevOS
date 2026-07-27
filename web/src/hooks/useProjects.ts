@@ -8,9 +8,31 @@ import {
   type RegistryProject,
   type SessionState,
   type TrackerState,
+  type TranscriptEvent,
   type WsClient,
   type WsClientOptions,
 } from '@/lib/ws-client';
+
+/** Client-side bound on the folded per-session transcript (mirrors the server buffer). */
+const MAX_TRANSCRIPT_EVENTS = 500;
+
+/**
+ * Immutably fold a transcript batch into the existing per-session list: upsert
+ * (replace) by `seq`, keep ascending `seq` order, and bound to the last
+ * MAX_TRANSCRIPT_EVENTS events. Returns a NEW array; inputs are not mutated.
+ */
+function foldTranscript(
+  prev: readonly TranscriptEvent[],
+  incoming: readonly TranscriptEvent[],
+): readonly TranscriptEvent[] {
+  const bySeq = new Map<number, TranscriptEvent>();
+  for (const event of prev) bySeq.set(event.seq, event);
+  for (const event of incoming) bySeq.set(event.seq, event);
+  const merged = [...bySeq.values()].sort((a, b) => a.seq - b.seq);
+  return merged.length > MAX_TRANSCRIPT_EVENTS
+    ? merged.slice(merged.length - MAX_TRANSCRIPT_EVENTS)
+    : merged;
+}
 
 export interface UseProjectsResult {
   /** Latest validated registry snapshot; empty until the first one arrives. */
@@ -39,6 +61,10 @@ export interface UseProjectsResult {
   readonly sessions: Record<string, readonly SessionState[]>;
   /** Spawn an owned session for a pinned project + role; delegates to the live client. */
   readonly spawnSession: (path: string, role: string, workItemId?: string) => void;
+  /** Folded per-session transcripts keyed by session id (upserted + sorted by seq, bounded). */
+  readonly transcripts: Record<string, readonly TranscriptEvent[]>;
+  /** Request the buffered transcript of a live session; delegates to the live client. */
+  readonly requestTranscript: (sessionId: string) => void;
 }
 
 export interface UseProjectsOptions {
@@ -58,6 +84,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
   const [trackerStates, setTrackerStates] = useState<Record<string, TrackerState>>({});
   const [lifecycleSignals, setLifecycleSignals] = useState<Record<string, LifecycleSignals>>({});
   const [sessions, setSessions] = useState<Record<string, readonly SessionState[]>>({});
+  const [transcripts, setTranscripts] = useState<Record<string, readonly TranscriptEvent[]>>({});
 
   // Hold the latest factory in a ref so the setup effect can run once (on mount)
   // without re-subscribing when an inline options object changes identity.
@@ -72,10 +99,30 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
   const projectsRef = useRef(projects);
   projectsRef.current = projects;
 
+  // Hold the latest sessions so the mount-time onStatus handler can backfill
+  // transcripts for whatever live sessions are known at (re)connect.
+  const sessionsRef = useRef(sessions);
+  sessionsRef.current = sessions;
+
+  // Session ids a transcript backfill has already been requested for ON THE
+  // CURRENT CONNECTION — fired once per new live session id (not per snapshot).
+  // Cleared whenever the connection drops so the next 'connected' re-requests
+  // backfill for every still-live session (events emitted while disconnected
+  // never reach this client and must be re-fetched from the server buffer).
+  const requestedTranscriptsRef = useRef(new Set<string>());
+
   useEffect(() => {
     const factory = createClientRef.current ?? createWsClient;
     const client = factory();
     clientRef.current = client;
+    // Single backfill-request path: request a session's transcript exactly once
+    // per connection for each live session id (dedupe via requestedTranscriptsRef).
+    const requestBackfill = (session: SessionState): void => {
+      if (session.status !== 'running') return;
+      if (requestedTranscriptsRef.current.has(session.id)) return;
+      requestedTranscriptsRef.current.add(session.id);
+      client.requestTranscript(session.id);
+    };
     const offRegistry = client.onRegistry(setProjects);
     const offCandidates = client.onCandidates(setCandidates);
     // Immutable fold: a git-state snapshot replaces the map with a new object.
@@ -91,22 +138,43 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
       setLifecycleSignals((prev) => ({ ...prev, [path]: signals })),
     );
     // Immutable fold: a session-state snapshot upserts by session id within the path.
-    const offSessionState = client.onSessionState((path, session) =>
+    const offSessionState = client.onSessionState((path, session) => {
       setSessions((prev) => {
         const others = (prev[path] ?? []).filter((s) => s.id !== session.id);
         return { ...prev, [path]: [...others, session] };
-      }),
+      });
+      // A NEW live session id triggers exactly one transcript backfill request.
+      requestBackfill(session);
+    });
+    // Immutable fold: a transcript batch upserts by seq within the session id.
+    const offSessionTranscript = client.onSessionTranscript((_path, sessionId, events) =>
+      setTranscripts((prev) => ({
+        ...prev,
+        [sessionId]: foldTranscript(prev[sessionId] ?? [], events),
+      })),
     );
     // Auto-refresh on connect: a freshly-opened socket requests a scan and a
     // git-state + tracker-state + lifecycle-signals read for every currently-known
     // pinned project.
     const offStatus = client.onStatus((status) => {
-      if (status === 'connected') {
-        client.discover();
-        for (const project of projectsRef.current) {
-          client.requestGitState(project.path);
-          client.requestTrackerState(project.path);
-          client.requestLifecycleSignals(project.path);
+      if (status !== 'connected') {
+        // Connection dropped (or is re-establishing): forget per-connection
+        // backfill bookkeeping so the next 'connected' re-requests transcripts —
+        // events emitted during the gap only exist in the server-side buffer.
+        requestedTranscriptsRef.current = new Set();
+        return;
+      }
+      client.discover();
+      for (const project of projectsRef.current) {
+        client.requestGitState(project.path);
+        client.requestTrackerState(project.path);
+        client.requestLifecycleSignals(project.path);
+      }
+      // Backfill transcripts for known live sessions not yet requested on
+      // this connection.
+      for (const sessionList of Object.values(sessionsRef.current)) {
+        for (const session of sessionList) {
+          requestBackfill(session);
         }
       }
     });
@@ -118,6 +186,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
       offTrackerState();
       offLifecycleSignals();
       offSessionState();
+      offSessionTranscript();
       offStatus();
       client.close();
       clientRef.current = null;
@@ -170,6 +239,10 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     }
   }
 
+  function requestTranscript(sessionId: string): void {
+    clientRef.current?.requestTranscript(sessionId);
+  }
+
   return {
     projects,
     candidates,
@@ -184,5 +257,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     requestLifecycleSignals,
     sessions,
     spawnSession,
+    transcripts,
+    requestTranscript,
   };
 }

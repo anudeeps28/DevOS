@@ -113,6 +113,47 @@ export interface SessionState {
   readonly sdkSessionId: string | null;
 }
 
+/**
+ * One normalized transcript event body — the payload of a live session's SDK
+ * message stream. Mirrors the server's TranscriptEventBody
+ * (server/src/ws-protocol.ts, the source of truth) — duplicated typed contract,
+ * no shared package. Discriminated on `kind`. Frozen — never mutated.
+ */
+export type TranscriptEventBody =
+  | { readonly kind: 'init' }
+  | { readonly kind: 'assistant-text'; readonly text: string }
+  | {
+      readonly kind: 'tool-use';
+      readonly toolName: string;
+      readonly toolInput: string;
+      readonly toolUseId: string | null;
+    }
+  | {
+      readonly kind: 'tool-result';
+      readonly toolUseId: string | null;
+      readonly content: string;
+      readonly isError: boolean;
+    }
+  | {
+      readonly kind: 'result';
+      readonly durationMs: number;
+      readonly numTurns: number;
+      readonly totalCostUsd: number;
+      readonly inputTokens: number;
+      readonly outputTokens: number;
+      readonly isError: boolean;
+    };
+
+/**
+ * A transcript event body stamped with its session identity + ordering. Mirrors
+ * the server's TranscriptEvent (server/src/ws-protocol.ts, the source of truth).
+ */
+export type TranscriptEvent = TranscriptEventBody & {
+  readonly sessionId: string;
+  readonly seq: number;
+  readonly ts: number;
+};
+
 /** The slice of the WebSocket API this client depends on (keeps fakes tiny). */
 export interface WebSocketLike {
   readonly readyState: number;
@@ -162,6 +203,11 @@ export type GitStateListener = (path: string, state: GitState) => void;
 export type TrackerStateListener = (path: string, state: TrackerState) => void;
 export type LifecycleSignalsListener = (path: string, signals: LifecycleSignals) => void;
 export type SessionStateListener = (path: string, session: SessionState) => void;
+export type SessionTranscriptListener = (
+  path: string,
+  sessionId: string,
+  events: readonly TranscriptEvent[],
+) => void;
 
 /** Public, framework-agnostic client surface. */
 export interface WsClient {
@@ -182,6 +228,8 @@ export interface WsClient {
   readonly onLifecycleSignals: (listener: LifecycleSignalsListener) => () => void;
   /** Subscribe to validated owned-session state snapshots. */
   readonly onSessionState: (listener: SessionStateListener) => () => void;
+  /** Subscribe to validated owned-session transcript batches. */
+  readonly onSessionTranscript: (listener: SessionTranscriptListener) => () => void;
   /** Pin a project by absolute path; no-op (warns) when the socket is not open. */
   readonly pin: (path: string, opts?: { displayName?: string; uiPrefs?: unknown }) => void;
   /** Unpin a project by absolute path; no-op (warns) when the socket is not open. */
@@ -196,6 +244,8 @@ export interface WsClient {
   readonly requestLifecycleSignals: (path: string) => void;
   /** Spawn an owned session for a pinned project + role; no-op (warns) when the socket is not open. */
   readonly spawnSession: (path: string, role: string, workItemId?: string) => void;
+  /** Request the buffered transcript of a live owned session; no-op (warns) when the socket is not open. */
+  readonly requestTranscript: (sessionId: string) => void;
   /** Tear down: cancels reconnects, closes the socket, drops subscribers. */
   readonly close: () => void;
 }
@@ -617,6 +667,112 @@ function parseSessionStateSnapshot(
 }
 
 /**
+ * Validate a single raw entry against the TranscriptEvent contract: a `kind`
+ * discriminant plus kind-specific fields, stamped with sessionId/seq/ts.
+ * Mirrors server/src/ws-protocol.ts (the source of truth).
+ * Returns a frozen TranscriptEvent, or null for anything malformed.
+ */
+function parseTranscriptEvent(entry: unknown): TranscriptEvent | null {
+  if (typeof entry !== 'object' || entry === null) return null;
+
+  const record = entry as Record<string, unknown>;
+  const { kind, sessionId, seq, ts } = record;
+
+  if (typeof sessionId !== 'string' || sessionId.length === 0) return null;
+  if (typeof seq !== 'number' || !Number.isFinite(seq)) return null;
+  if (typeof ts !== 'number' || !Number.isFinite(ts)) return null;
+
+  const stamp = { sessionId, seq, ts } as const;
+
+  if (kind === 'init') {
+    return Object.freeze<TranscriptEvent>({ kind: 'init', ...stamp });
+  }
+
+  if (kind === 'assistant-text') {
+    const { text } = record;
+    if (typeof text !== 'string') return null;
+    return Object.freeze<TranscriptEvent>({ kind: 'assistant-text', text, ...stamp });
+  }
+
+  if (kind === 'tool-use') {
+    const { toolName, toolInput, toolUseId } = record;
+    if (typeof toolName !== 'string') return null;
+    if (typeof toolInput !== 'string') return null;
+    if (toolUseId !== null && typeof toolUseId !== 'string') return null;
+    return Object.freeze<TranscriptEvent>({ kind: 'tool-use', toolName, toolInput, toolUseId, ...stamp });
+  }
+
+  if (kind === 'tool-result') {
+    const { toolUseId, content, isError } = record;
+    if (toolUseId !== null && typeof toolUseId !== 'string') return null;
+    if (typeof content !== 'string') return null;
+    if (typeof isError !== 'boolean') return null;
+    return Object.freeze<TranscriptEvent>({ kind: 'tool-result', toolUseId, content, isError, ...stamp });
+  }
+
+  if (kind === 'result') {
+    const { durationMs, numTurns, totalCostUsd, inputTokens, outputTokens, isError } = record;
+    if (typeof durationMs !== 'number' || !Number.isFinite(durationMs)) return null;
+    if (typeof numTurns !== 'number' || !Number.isFinite(numTurns)) return null;
+    if (typeof totalCostUsd !== 'number' || !Number.isFinite(totalCostUsd)) return null;
+    if (typeof inputTokens !== 'number' || !Number.isFinite(inputTokens)) return null;
+    if (typeof outputTokens !== 'number' || !Number.isFinite(outputTokens)) return null;
+    if (typeof isError !== 'boolean') return null;
+    return Object.freeze<TranscriptEvent>({
+      kind: 'result',
+      durationMs,
+      numTurns,
+      totalCostUsd,
+      inputTokens,
+      outputTokens,
+      isError,
+      ...stamp,
+    });
+  }
+
+  return null; // unknown kind
+}
+
+/**
+ * Validate a raw WS frame against the pinned session-transcript contract:
+ * `{ type: 'session-transcript', path: string, sessionId: string, events: TranscriptEvent[] }`.
+ * Returns a frozen `{ path, sessionId, events }`, or null for anything malformed.
+ */
+function parseSessionTranscriptSnapshot(
+  data: unknown,
+): { path: string; sessionId: string; events: readonly TranscriptEvent[] } | null {
+  if (typeof data !== 'string') return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return null;
+  }
+
+  if (typeof parsed !== 'object' || parsed === null) return null;
+
+  const frame = parsed as Record<string, unknown>;
+  if (frame.type !== 'session-transcript') return null;
+  if (typeof frame.path !== 'string' || frame.path.length === 0) return null;
+  if (typeof frame.sessionId !== 'string' || frame.sessionId.length === 0) return null;
+  if (!Array.isArray(frame.events)) return null;
+
+  const events: TranscriptEvent[] = [];
+  for (const entry of frame.events) {
+    const event = parseTranscriptEvent(entry);
+    if (event === null) return null;
+    events.push(event);
+  }
+
+  return Object.freeze({
+    path: frame.path,
+    sessionId: frame.sessionId,
+    events: Object.freeze(events),
+  });
+}
+
+/**
  * Peek the `type` discriminant of a raw frame without full validation, so
  * handleMessage can route to the right parser. Returns null for anything that
  * is not a JSON object with a string `type`. Never throws.
@@ -655,6 +811,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
   const trackerStateListeners = new Set<TrackerStateListener>();
   const lifecycleSignalsListeners = new Set<LifecycleSignalsListener>();
   const sessionStateListeners = new Set<SessionStateListener>();
+  const sessionTranscriptListeners = new Set<SessionTranscriptListener>();
 
   let state: ClientState = {
     status: 'connecting',
@@ -699,6 +856,14 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
 
   function emitSessionState(path: string, session: SessionState): void {
     for (const listener of sessionStateListeners) listener(path, session);
+  }
+
+  function emitSessionTranscript(
+    path: string,
+    sessionId: string,
+    events: readonly TranscriptEvent[],
+  ): void {
+    for (const listener of sessionTranscriptListeners) listener(path, sessionId, events);
   }
 
   // Write a frame only when the socket is OPEN; otherwise drop + warn (never throw).
@@ -791,6 +956,16 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
       return;
     }
 
+    if (type === 'session-transcript') {
+      const snapshot = parseSessionTranscriptSnapshot(data);
+      if (snapshot === null) {
+        console.warn('[ws-client] dropped malformed frame:', data);
+        return;
+      }
+      emitSessionTranscript(snapshot.path, snapshot.sessionId, snapshot.events);
+      return;
+    }
+
     // Never throw into the app — drop and warn.
     console.warn('[ws-client] dropped malformed frame:', data);
   }
@@ -851,6 +1026,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     trackerStateListeners.clear();
     lifecycleSignalsListeners.clear();
     sessionStateListeners.clear();
+    sessionTranscriptListeners.clear();
 
     if (state.reconnectHandle !== null) {
       timers.clearTimeout(state.reconnectHandle);
@@ -906,6 +1082,10 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     });
   }
 
+  function requestTranscript(sessionId: string): void {
+    sendFrame({ type: 'session-transcript-request', sessionId });
+  }
+
   connect();
 
   return {
@@ -959,6 +1139,12 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
         sessionStateListeners.delete(listener);
       };
     },
+    onSessionTranscript: (listener) => {
+      sessionTranscriptListeners.add(listener);
+      return () => {
+        sessionTranscriptListeners.delete(listener);
+      };
+    },
     pin,
     unpin,
     discover,
@@ -966,6 +1152,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     requestTrackerState,
     requestLifecycleSignals,
     spawnSession,
+    requestTranscript,
     close,
   };
 }

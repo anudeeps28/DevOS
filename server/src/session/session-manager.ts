@@ -13,10 +13,12 @@
 // is the durable last-known anchor.
 
 import { randomUUID } from 'node:crypto';
+import type { TranscriptEvent } from '../ws-protocol.js';
 import type { Role } from './roles.js';
 import { defaultQuery, type EngineMessage, type EngineSession, type QueryFn } from './session-engine.js';
 import { acquireSessionSlot, type ReleaseSlot } from './session-spawn-limit.js';
 import type { SessionStore } from './session-store.js';
+import { normalizeMessage } from './transcript-events.js';
 
 export type SessionStatus = 'running' | 'ended' | 'errored';
 
@@ -40,12 +42,23 @@ export interface SpawnInput {
 
 export type StateListener = (snapshot: SessionSnapshot) => void;
 
+/** Fired with each frozen batch of transcript events captured from a live session. */
+export type TranscriptListener = (
+  projectPath: string,
+  sessionId: string,
+  events: readonly TranscriptEvent[],
+) => void;
+
 export interface SessionManager {
   readonly spawn: (input: SpawnInput) => Promise<SessionSnapshot>;
   readonly list: () => SessionSnapshot[];
   readonly get: (id: string) => SessionSnapshot | null;
   /** Register a listener fired on every session state change. Returns an unsubscribe fn. */
   readonly onState: (listener: StateListener) => () => void;
+  /** Register a listener fired on every transcript event batch. Returns an unsubscribe fn. */
+  readonly onTranscript: (listener: TranscriptListener) => () => void;
+  /** The live session's buffered transcript (frozen copy), or `[]` if absent/ended. */
+  readonly getTranscript: (id: string) => readonly TranscriptEvent[];
   /** Interrupt every live session (guarded). Called on server shutdown. */
   readonly stopAll: () => Promise<void>;
 }
@@ -58,6 +71,9 @@ export interface SessionManagerDeps {
 
 const DEFAULT_PROMPT = 'You are now attached to this project. Await further instructions.';
 
+/** Bound on the per-session in-memory transcript ring buffer (oldest dropped). */
+const MAX_TRANSCRIPT_EVENTS = 500;
+
 /** A live session held in memory while its generator runs. */
 interface LiveSession {
   readonly id: string;
@@ -65,6 +81,10 @@ interface LiveSession {
   readonly role: Role;
   status: SessionStatus;
   sdkSessionId: string | null;
+  /** Monotonic per-session transcript sequence counter. */
+  seq: number;
+  /** Bounded in-memory ring buffer — dies with the live session, never persisted (AC4). */
+  readonly transcript: TranscriptEvent[];
   readonly engine: EngineSession;
 }
 
@@ -77,6 +97,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   const query: QueryFn = deps.query ?? defaultQuery;
   const live = new Map<string, LiveSession>();
   const listeners = new Set<StateListener>();
+  const transcriptListeners = new Set<TranscriptListener>();
   // Track detached consume loops so stopAll can await their completion (so the final
   // 'ended'/'errored' status persists before the DB is closed on shutdown).
   const consuming = new Set<Promise<void>>();
@@ -101,6 +122,36 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     }
   };
 
+  const emitTranscript = (s: LiveSession, events: readonly TranscriptEvent[]): void => {
+    for (const listener of transcriptListeners) {
+      try {
+        listener(s.projectPath, s.id, events);
+      } catch (err) {
+        console.error('[session] transcript listener threw', err);
+      }
+    }
+  };
+
+  // Normalize one engine message into stamped transcript events, push them onto the
+  // session's bounded ring buffer, and fan the frozen batch out to listeners.
+  const captureTranscript = (s: LiveSession, message: EngineMessage): void => {
+    const bodies = normalizeMessage(message);
+    if (bodies.length === 0) return;
+    const batch: TranscriptEvent[] = [];
+    for (const body of bodies) {
+      const event = Object.freeze<TranscriptEvent>({
+        ...body,
+        sessionId: s.id,
+        seq: s.seq++,
+        ts: Date.now(),
+      });
+      s.transcript.push(event);
+      if (s.transcript.length > MAX_TRANSCRIPT_EVENTS) s.transcript.shift();
+      batch.push(event);
+    }
+    emitTranscript(s, Object.freeze(batch));
+  };
+
   const setStatus = (s: LiveSession, status: SessionStatus): void => {
     s.status = status;
     try {
@@ -116,6 +167,14 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   const consume = async (s: LiveSession, release: ReleaseSlot): Promise<void> => {
     try {
       for await (const message of s.engine) {
+        // Transcript capture is guarded PER MESSAGE: a throw here is logged and
+        // skipped — it must never rethrow or flip the session's status (AC5). No
+        // SessionStore call anywhere on this path — transcripts are in-memory only.
+        try {
+          captureTranscript(s, message);
+        } catch (err) {
+          console.error(`[session] transcript capture for ${s.id} threw`, err);
+        }
         if (isInitMessage(message) && typeof message.session_id === 'string') {
           s.sdkSessionId = message.session_id;
           try {
@@ -170,7 +229,16 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       throw err;
     }
 
-    const session: LiveSession = { id, projectPath, role, status: 'running', sdkSessionId: null, engine };
+    const session: LiveSession = {
+      id,
+      projectPath,
+      role,
+      status: 'running',
+      sdkSessionId: null,
+      seq: 0,
+      transcript: [],
+      engine,
+    };
     live.set(id, session);
     emit(session); // running
 
@@ -195,6 +263,16 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     return () => listeners.delete(listener);
   };
 
+  const onTranscript = (listener: TranscriptListener): (() => void) => {
+    transcriptListeners.add(listener);
+    return () => transcriptListeners.delete(listener);
+  };
+
+  const getTranscript = (id: string): readonly TranscriptEvent[] => {
+    const s = live.get(id);
+    return s === undefined ? [] : Object.freeze([...s.transcript]);
+  };
+
   const stopAll = async (): Promise<void> => {
     const running = [...live.values()];
     // Interrupt each live generator (guarded) — this closes its input stream so the
@@ -213,5 +291,5 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     await Promise.allSettled([...consuming]);
   };
 
-  return Object.freeze<SessionManager>({ spawn, list, get, onState, stopAll });
+  return Object.freeze<SessionManager>({ spawn, list, get, onState, onTranscript, getTranscript, stopAll });
 }
