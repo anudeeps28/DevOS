@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   createWsClient,
+  type BridgeState,
   type ConnectionStatus,
   type GitState,
   type Heartbeat,
@@ -1138,5 +1139,75 @@ describe('ws-client session-transcript frames', () => {
 
     expect(socket.sent).toEqual([]);
     expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  function makeBridgeStateClient() {
+    const received: { path: string; state: BridgeState }[] = [];
+    const client = createWsClient({
+      url: 'ws://localhost/ws',
+      createWebSocket: (url) => new FakeSocket(url),
+    });
+    client.onBridgeState((path, state) => received.push({ path, state }));
+    const socket = FakeSocket.instances[0]!;
+    socket.open();
+    return { client, received, socket };
+  }
+
+  it('parses and exposes a valid bridge-state frame', () => {
+    const { received, socket } = makeBridgeStateClient();
+    const frame = {
+      type: 'bridge-state',
+      path: '/abs/repo',
+      stage: 'implement',
+      gate: 'awaiting-approval',
+      sessionId: 'sess-1',
+      inbox: [{ stage: 'implement', kind: 'question', reason: 'need input', ts: 123 }],
+    };
+
+    socket.message(JSON.stringify(frame));
+
+    expect(received).toHaveLength(1);
+    expect(received[0]!.path).toBe('/abs/repo');
+    expect(received[0]!.state).toEqual({
+      path: '/abs/repo',
+      stage: 'implement',
+      gate: 'awaiting-approval',
+      sessionId: 'sess-1',
+      inbox: [{ stage: 'implement', kind: 'question', reason: 'need input', ts: 123 }],
+    });
+    expect(Object.isFrozen(received[0]!.state)).toBe(true);
+  });
+
+  it('drops a malformed bridge-state frame without emitting to listeners', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { received, socket } = makeBridgeStateClient();
+
+    socket.message(
+      JSON.stringify({
+        type: 'bridge-state',
+        path: '/abs/repo',
+        stage: 'implement',
+        gate: 'not-a-real-gate',
+        sessionId: null,
+        inbox: [],
+      }),
+    );
+
+    expect(received).toEqual([]);
+    expect(warn).toHaveBeenCalled();
+  });
+
+  it('sendBridgeStart/sendGateApprove/sendBridgeInterrupt send the matching inbound frames', () => {
+    const { client, socket } = makeBridgeStateClient();
+
+    client.sendBridgeStart('/abs/repo', 'wi-1');
+    client.sendGateApprove('/abs/repo');
+    client.sendBridgeInterrupt('/abs/repo', 'stop please');
+
+    expect(socket.sent).toEqual([
+      JSON.stringify({ type: 'bridge-start', path: '/abs/repo', workItemId: 'wi-1' }),
+      JSON.stringify({ type: 'gate-approve', path: '/abs/repo' }),
+      JSON.stringify({ type: 'bridge-interrupt', path: '/abs/repo', reason: 'stop please' }),
+    ]);
   });
 });
