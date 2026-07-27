@@ -1,7 +1,7 @@
 ---
 name: implement
-description: Build a feature from a tracker task (local task, GitHub issue, or Todoist task) or plain description — understand, plan, execute, evaluate, and PR in a streamlined flow. Lighter than /story — designed for solo devs and small teams. Usage: /implement <issue-id, task-title, or description> [--discuss] [--research] [--quick] [--auto] [--full]
-argument-hint: "#42, 'Build login flow', or 'add dark mode to settings page'"
+description: Build a feature from a tracker task (local task, GitHub issue, or Todoist task) or plain description — understand, plan, execute, evaluate, and PR in a streamlined flow, or loop back on a rejected PR with `--rework <PR#>`. Lighter than /story — designed for solo devs and small teams. Usage: /implement <issue-id, task-title, or description> [--discuss] [--research] [--quick] [--auto] [--full] [--autonomous] [--rework <PR#>]
+argument-hint: "#42, 'Build login flow', 'add dark mode to settings page', or --rework 58 'also rename the flag'"
 ---
 
 **Core Philosophy:** Understand it, plan it, build it, check it, ship it — with a human gate at each step. Like `/story` but without the sprint ceremony.
@@ -26,14 +26,17 @@ cd /Users/anudeepsharma/Programming/DevOS && git status && git branch --show-cur
 
 Parse `$ARGUMENTS`:
 
+0. **Detect `--rework <PR#>` first — this is a MODE SELECTOR, not an additive flag.** If `$ARGUMENTS` starts with (or contains) `--rework <PR#>`, where `<PR#>` is the numeric PR number, extract it and treat any remaining free text after it as optional typed feedback. **Validate that `<PR#>` matches `^[0-9]+$` before using it anywhere** — if it is missing or non-numeric, stop and ask; never pass an unvalidated `<PR#>` into a `gh` command or a script argument. Unlike `--discuss`/`--research`/`--quick`/`--auto`/`--full`/`--autonomous` (which combine with the normal build flow), `--rework` **short-circuits** the entire Understand → Plan → Build → PR flow below and jumps straight to the Rework mode section further down this file. `--rework` is itself an **explicit autonomous entry point** — invoking the flag *is* the signal (the same role `--autonomous` plays for the forward flow), so it runs under the self-answer rule of `rules/autonomous-mode.md` without needing a separate `--autonomous`. If `--rework` is detected, skip steps 1-4 below and the branch-creation step, and go directly to that section.
+
 1. **Extract flags** into a set (strip them out before interpreting the rest):
    - `--discuss` → run a pre-plan clarification step (Phase 1a)
    - `--research` → run a codebase-scan step before the planner (Phase 1b)
    - `--quick` → skip Phase 3 (evaluation + acceptance testing)
    - `--auto` → auto-run all waves without pausing between them (still stops on failure)
    - `--full` → sugar for `--discuss` + `--research` (does NOT imply `--quick` or `--auto`)
+   - `--autonomous` → run the entire flow with **no human STOP checkpoints** — self-answer reversible questions, pause only when genuinely blocked, auto-push and open a PR as the single human gate (see **Autonomous mode** below). Implies `--auto`.
 
-   `--full`, `--quick`, and `--auto` are orthogonal and may be combined. Expand `--full` into the underlying two flags before proceeding.
+   `--full`, `--quick`, `--auto`, and `--autonomous` are orthogonal and may be combined. Before proceeding, expand `--full` into its underlying two flags, and expand `--autonomous` to also set `--auto`. `--autonomous` does NOT imply `--quick` — evaluation, acceptance testing, and the e2e goal gate still run.
 
 2. **Classify the remaining arguments:**
    - **Detect the active tracker:** Read `.claude/.harness-manifest.json` → `tracker` field. If not set, fall back to `tasks/tracker-config.md` `**Type:**` field. If neither exists, default to `local`.
@@ -64,6 +67,154 @@ git checkout -b implement/<issue-id-or-slugified-title>
 
 ---
 
+## Autonomous mode (only if `--autonomous` is set)
+
+When `--autonomous` is set, run the **entire** flow — Understand → Goal → Plan → Execute → Local
+Verify → Evaluate → PR — **without stopping at any human checkpoint**. The PR is the single human
+gate. This mode changes *only* whether the flow pauses; it changes nothing about *what work is done*
+— every phase (including Goal Definition and all safety machinery) still runs.
+
+**Self-answer rule.** At every point where the flow would normally STOP and wait for Anudeep:
+- If the decision is **reversible** AND there is a clear recommended option → **take the recommended
+  option, do not wait**, and append one line to the **decisions log** (see below).
+- Otherwise → **pause and ask** (this is the only thing that stops an autonomous run mid-flight).
+
+**Pause-anyway triggers** (an autonomous run stops and asks the human on any of these):
+- a **contradiction** — the task, brief, or code conflict in a way you cannot reconcile with a recommendation;
+- an **irreversible action** — anything destructive or hard to undo (deleting data, force-push, etc.);
+- a **scope change** — the work turns out materially larger or different than the approved brief/goal;
+- the **3-failed-attempts** rule fires (route to `/debug` as usual).
+
+A task **FAIL or BLOCKED** result also halts the run — that is a genuine block, not a checkpoint, and
+`--auto`'s "pause on failure" behavior is unchanged.
+
+**Decisions log.** Keep a running list of every self-answered decision as
+`- <question> → <chosen option> (reversible; <one-line why>)`. Accumulate it across all phases in the
+shared sink `tasks/stories/<id>/decisions-log.md` (create it if absent) — inherited sub-skills append
+to the **same** file — and surface it verbatim in the PR body under **"Decisions made on your
+behalf"** (Phase 3).
+
+**Propagation to sub-skills (inherited).** The full autonomous convention — the self-answer rule,
+pause-anyway triggers, decisions-log sink, and inheritance mechanism — is centralized in
+`rules/autonomous-mode.md`. Sub-skills and agents **inherit** the mode; they have **no `--autonomous`
+flag of their own**. When `--autonomous` is set, `/implement` propagates the mode two ways:
+1. **Invocation context** — every sub-skill/agent spawn below (`/local-test`, `/debug`, the executor
+   and review agents) is told, in its invocation, that this is an autonomous run and to self-answer
+   its checkpoints per `rules/autonomous-mode.md`, appending to the shared decisions-log.
+2. **Durable marker** — write `run-mode: autonomous` into `tasks/stories/<id>/executor-state.md` (the
+   file this flow already updates every wave), so a standalone resume (e.g. `/run-tasks <id>` after an
+   interruption) inherits the mode without a live orchestrator.
+
+`/local-test` and the review agents (evaluator / acceptance / architect / security) have no human
+checkpoints, so the mode is a **no-op** for them — they always report back and never pause; their
+findings' fix-vs-skip decision is self-answered here in Phase 3. `/debug` runs inherited-autonomous
+and **self-drives** the diagnosis, pausing only if it cannot build a deterministic signal or exhausts
+its hypotheses (see `rules/autonomous-mode.md`).
+
+Throughout the phases below, any block that says **STOP** is **auto-resolved by the self-answer rule
+above when `--autonomous` is set** — record the decision and proceed, unless a pause-anyway trigger fires.
+
+---
+
+## Rework mode (only if `--rework <PR#>` is set)
+
+`--rework <PR#>` loops `/implement` back onto an already-open, already-reviewed PR instead of starting
+a fresh build — mirroring the fetch → analyze → fix → reply → resolve pattern of
+`skills/babysit-pr/SKILL.md`, but driving straight through it under autonomous self-answer semantics
+(no gates until the push) rather than pausing at babysit-pr's four GATEs. `--rework` is an explicit
+autonomous entry point in its own right (see step 0) — the flag is the signal, so this is not an
+"inherited" run and needs no `--autonomous`.
+
+**a. No fresh build.** On a valid `--rework`, do **not** run Phase 1 (Understand), Phase 1.5 (Goal
+Definition), or Phase 1c (Plan). Do **not** create a new branch. Do **not** open a new PR.
+
+**b. Check out the PR's existing head branch.** First confirm the PR's head is in *this* repo, not a
+fork — a cross-repo (fork) head branch name is not fork-qualified, so a later push could silently land
+on a same-named branch of `origin` instead of the contributor's fork:
+
+```bash
+gh pr view <PR#> --json isCrossRepository,headRefName,headRepositoryOwner
+```
+
+If `isCrossRepository` is `true`, **treat it as a pause-anyway trigger and stop** — you cannot safely
+push to a fork's branch from here; ask the human. Otherwise check out the head branch:
+
+```bash
+HEAD_BRANCH=$(gh pr view <PR#> --json headRefName -q .headRefName)
+git checkout "$HEAD_BRANCH"
+```
+
+Never create a new branch with `checkout` for this step — this is the same branch the open PR already tracks, not a new one.
+
+**c. Fetch unresolved review threads.**
+
+```bash
+bash "/Users/anudeepsharma/Programming/DevOS/.claude/code-platform/active/get-pr-review-threads.sh" <PR#>
+```
+
+Returns JSON `[{id, threadId, file, line, content, author}]`, already filtered to unresolved threads.
+If the result is `[]`/empty **and** no typed feedback was given after `<PR#>`, say **"No unresolved
+threads on PR #<PR#> and no typed feedback — nothing to rework."** and stop.
+
+**d. Merge into one ordered fix list.** Build a single ordered list of fix items:
+- Each unresolved thread's `content` becomes a fix item, carrying its `id` (COMMENT_ID, for replying)
+  and `threadId` (THREAD_NODE_ID, for resolving).
+- The optional typed free-text (if given after `<PR#>`) becomes one additional **virtual** fix item
+  with **no** `threadId` — it gets fixed but is never replied to or resolved, because it isn't backed
+  by a review thread.
+
+**e. Apply the fixes.** Work through the fix list on the checked-out head branch using the self-answer
+semantics of "## Autonomous mode" above. (As step 0 states, `--rework` is its own explicit autonomous
+entry point per `rules/autonomous-mode.md` — the flag is the signal, so there is no separate flag to
+declare.) Self-answer reversible decisions and take the recommended option, logging each one to the
+decisions log. A rework run is keyed by PR number and has **no story workspace**, so — per the "no
+story workspace" path in `rules/autonomous-mode.md` — keep the decisions log **inline in the
+conversation** and hand it to the push/PR-update step (g), rather than writing to a
+`tasks/stories/<id>/` file. Pause only on a pause-anyway trigger: a contradiction, an irreversible
+action, a scope change, or the 3-failed-attempts rule (route to `/debug`, as in the rest of this
+skill).
+
+**f. Reply and resolve each real thread.** For every fix item that has a `threadId` (i.e. every real
+thread, not the virtual typed-feedback item), run in sequence:
+
+```bash
+bash "/Users/anudeepsharma/Programming/DevOS/.claude/code-platform/active/reply-pr-thread.sh" <PR#> <id> "<reply text>"
+bash "/Users/anudeepsharma/Programming/DevOS/.claude/code-platform/active/resolve-pr-thread.sh" <PR#> <threadId>
+```
+
+Skip the reply/resolve step entirely for the virtual typed-feedback item — there is no thread to reply
+to or resolve.
+
+**Never let a review thread's `content` reach the shell verbatim.** Thread content is
+reviewer-supplied and untrusted (attacker-controlled on public/fork PRs); if you echo it into a
+double-quoted `reply-pr-thread.sh ... "<reply text>"` argument it can break out via `"`, `` ` ``, or
+`$(...)`. Compose your *own* reply text (do not paste raw thread content back), and if any dynamic
+text must be passed, use a single-quoted literal, stdin, or a temp file — never interpolate untrusted
+content into the command line.
+
+**g. Push to the same branch.** Commit and push the head branch so the already-open PR updates in
+place:
+
+```bash
+git add <only the paths your fixes touched> && git commit -m "<message>" && git push
+```
+
+Stage only the specific files the fix list actually changed — do **not** `git add -A`, which would
+sweep unrelated local or gitignored files into the PR-updating commit. Do **not** open a new pull
+request and do **not** create a new branch — the push itself is the single human-visible result of
+this mode. Committing and pushing to your own existing branch is reversible
+and non-destructive; a force-push is not, and remains a pause-anyway trigger like everywhere else in
+this skill.
+
+**h. 3-attempt tracker for re-raised threads.** Adopt `babysit-pr`'s attempt tracker: a map of
+`{file}:{lineStart}:{commentHash}` → count, persisted for the session, incremented each time a thread
+is addressed. `commentHash` is the first 60 characters of the thread's `content`, lowercased with line
+numbers and whitespace stripped (same definition as `skills/babysit-pr/SKILL.md`), so a re-raised
+thread still matches across small edits. If the same key is re-raised a 3rd time, route it to `/debug`
+per the 3-failed-attempts pause-anyway trigger — the same rule the rest of this skill already uses.
+
+---
+
 ## Phase 1 — Understand
 
 Spawn a **`story-understand-agent`** (foreground) with this prompt:
@@ -87,9 +238,11 @@ Then say **exactly:**
 
 *(Confirm to proceed to Phase 1.5. Say "yes" or give corrections.)*
 
+*(In `--autonomous`: skipped — accept the brief as-is, log "brief accepted as understood", and continue. If the brief materially contradicts the task, that is a pause-anyway trigger.)*
+
 ---
 
-Do NOT proceed until Anudeep responds. If Anudeep gives corrections, append them to `/Users/anudeepsharma/Programming/DevOS/tasks/stories/<id>/brief.md` under a "Corrections from Anudeep" section.
+Do NOT proceed until Anudeep responds (unless `--autonomous`). If Anudeep gives corrections, append them to `/Users/anudeepsharma/Programming/DevOS/tasks/stories/<id>/brief.md` under a "Corrections from Anudeep" section.
 
 ---
 
@@ -144,9 +297,11 @@ Then say **exactly:**
 
 *(Confirm to proceed to planning.)*
 
+*(In `--autonomous`: the goal is still fully **defined** here — never skipped — but the confirmation is self-answered. Adopt the goal you defined, log "goal self-approved: [one-line gate]", and continue. The escape hatch ("skip gate — no runtime impact") is itself a reversible call you may self-answer.)*
+
 ---
 
-Do NOT proceed until Anudeep responds. The confirmed goal is the input to the planner — it turns the goal into the test strategy + test/eval tasks.
+Do NOT proceed until Anudeep responds (unless `--autonomous`). The confirmed goal is the input to the planner — it turns the goal into the test strategy + test/eval tasks.
 
 ### Phase 1b — Research (only if `--research` is set)
 
@@ -213,9 +368,11 @@ Then say **exactly:**
 
 *(Say "go" or "go A" for wave-by-wave, "go B" for auto-run. Tip: use `--auto` flag to skip this question next time.)*
 
+*(In `--autonomous`: skipped — the plan is self-approved (log "plan self-approved: [N] tasks"), and because `--autonomous` implies `--auto`, execution runs in mode B. A materially wrong or oversized plan is a scope-change pause-anyway trigger.)*
+
 ---
 
-Do NOT proceed until Anudeep responds.
+Do NOT proceed until Anudeep responds (unless `--autonomous`).
 
 **Plan revision stall detection:** If Anudeep requests changes, re-run the planner with corrections. Track issue count across iterations. If issues don't decrease between consecutive iterations, stop: "Plan revision is stalling — (A) approve as-is, (B) adjust scope, (C) manual control." Max 3 revision iterations before escalating.
 
@@ -223,7 +380,7 @@ Do NOT proceed until Anudeep responds.
 
 ## Phase 2 — Execute (wave by wave)
 
-Once Anudeep approves, note the **execution mode**: if `--auto` flag was set, use mode B. Otherwise use what they chose at STOP 1 (A = wave-by-wave, B = auto-run; default A if not specified).
+Once Anudeep approves, note the **execution mode**: if `--auto` flag was set, use mode B. Otherwise use what they chose at STOP 1 (A = wave-by-wave, B = auto-run; default A if not specified). `--autonomous` implies `--auto`, so an autonomous run is always mode B — the wave pauses never fire, but a FAIL/BLOCKED still halts the run exactly as mode B's "pause on failure" does.
 
 Parse the XML task plan from Phase 1. Group tasks by `parallel_group` into waves.
 
@@ -256,7 +413,7 @@ For **each wave:**
 |---|---|---|---|
 | 1 | "..." | PASS/FAIL/BLOCKED | [one line] |
 
-**C2. Update the executor state:** Write/update `tasks/stories/<id>/executor-state.md` with the current progress table and wave log. Update after EVERY wave, not just at the end. This file is the resume state if the session is interrupted, and is read by `/improve-harness` for pattern detection. **In the same pass, mark each PASSed task `completed` in the `TodoWrite` list and mark the next wave's task(s) `in_progress`.** FAILed/BLOCKED tasks stay `in_progress` until resolved.
+**C2. Update the executor state:** Write/update `tasks/stories/<id>/executor-state.md` with the current progress table and wave log. Update after EVERY wave, not just at the end. This file is the resume state if the session is interrupted, and is read by `/improve-harness` for pattern detection. **In the same pass, mark each PASSed task `completed` in the `TodoWrite` list and mark the next wave's task(s) `in_progress`.** FAILed/BLOCKED tasks stay `in_progress` until resolved. **If `--autonomous` is set, include a `run-mode: autonomous` line in this file** so a standalone resume (`/run-tasks <id>`) inherits the mode (see the propagation contract in "Autonomous mode" above).
 
 **D. STOP after each wave (behavior depends on execution mode):**
 
@@ -336,15 +493,18 @@ Spawn a **`story-pr-agent`** (foreground) with:
 - Story ID: [issue ID or branch name]
 - Completed tasks: [list from Phase 2]
 - Branch: [current branch]
+- [If `--autonomous`] Decisions log: the contents of `tasks/stories/<id>/decisions-log.md` (the shared sink that `/implement` **and** every inherited sub-skill appended to) — the PR body MUST include a **"Decisions made on your behalf"** section rendering this list verbatim, so the reviewer sees every reversible call made without them.
 
 Output the PR preparation report.
 
 ---
 **STOP 3 — Review the commit messages and PR description above. Run the git commands shown, then say "push" when ready.**
 
+*(In `--autonomous`: skipped — do not wait. Commit, push the branch, and open the PR yourself with the commands below. The PR is opened **as a normal (non-draft) PR** — it is the single human gate, so a pre-push stop would defeat the purpose. Committing/pushing your own branch and opening a PR are reversible and non-destructive; force-push or any history rewrite is NOT, and remains a pause-anyway trigger.)*
+
 ---
 
-Wait for Anudeep to commit and push. Then create the PR:
+Wait for Anudeep to commit and push (unless `--autonomous`, in which case do it now). Then create the PR:
 
 ```bash
 gh pr create --title "<title>" --body "<body from PR agent>"
@@ -354,7 +514,7 @@ gh pr create --title "<title>" --body "<body from PR agent>"
 
 ## Hard rules
 
-- Never chain phases — always wait for confirmation at each STOP
+- Never chain phases — always wait for confirmation at each STOP — **unless `--autonomous`**, which auto-resolves every STOP via the self-answer rule (see **Autonomous mode**) and pauses only on a contradiction, an irreversible action, a scope change, or the 3-attempt rule
 - Never skip Phase 1 (understand) — the brief grounds planning in what the codebase actually looks like
 - Never skip Phase 1.5 (goal definition) — the goal is the input to planning and the terminal condition; the only way past the gate is the explicit "skip gate — no runtime impact" escape hatch
 - Never commit during Phase 2 — all commits happen in Phase 3
@@ -364,6 +524,10 @@ gh pr create --title "<title>" --body "<body from PR agent>"
 - **"Done" is goal-met, not "compiles"** — outside `--quick`, the feature ships only when acceptance criteria are met and the e2e gate is green (or human-accepted for no-oracle features)
 - `--discuss` and `--research` are additive, opt-in, and never change any STOP checkpoint — they run *before* Phase 1.5, not instead of it
 - `--full` expands to `--discuss --research` at parse time; it does NOT imply `--quick`, so `--full --quick` is a valid, meaningful combo
+- `--autonomous` skips only the **human STOP checkpoints** — it NEVER skips a phase, the goal definition, the evaluator/acceptance/e2e gate, local tests, or a failure pause; it implies `--auto` but NOT `--quick`, and it does not change any default or `--auto` behavior
+- In `--autonomous`, every self-answered decision is logged and surfaced in the PR under "Decisions made on your behalf"; the PR is opened non-draft as the single human gate
+- `--autonomous` propagates to invoked sub-skills and agents, which **inherit** the mode (no flag of their own) per `rules/autonomous-mode.md` — via invocation context plus a `run-mode: autonomous` marker in `executor-state.md`; `/local-test` and the review agents are no-ops, and `/debug` self-drives
 - For 1-2 file changes, don't over-decompose into multiple tasks
 - A task is only ✅ when its `<verify>` command passes — verify commands MUST include running relevant tests
 - If NOT ACCEPTED by the acceptance-test-agent, the feature is not done — fix before PR
+- `--rework <PR#>` is a mode selector, not a fresh build — it checks out the PR's existing head branch, merges unresolved review threads with any typed feedback into one fix list, fixes + replies/resolves each real thread, and pushes to the SAME branch so the open PR updates in place. It NEVER opens a new PR or creates a new branch, is its own **explicit** autonomous entry point (the flag is the signal — it runs under the self-answer rule of `rules/autonomous-mode.md`, no `--autonomous` needed), and pauses only on a pause-anyway trigger.
