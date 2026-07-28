@@ -24,6 +24,7 @@ const MAX_WORK_ITEM_ID_LENGTH = 512;
 const MAX_SESSION_ID_LENGTH = 128;
 const MAX_REASON_LENGTH = 4096;
 export const MAX_STEER_TEXT_LENGTH = 8192;
+export const MAX_REQUEST_ID_LENGTH = 128;
 
 /** A persisted project anchor as sent to the client. */
 export interface ProjectAnchor {
@@ -233,7 +234,13 @@ export type TranscriptEventBody =
       readonly outputTokens: number;
       readonly isError: boolean;
     }
-  | { readonly kind: 'user-text'; readonly text: string };
+  | { readonly kind: 'user-text'; readonly text: string }
+  | {
+      readonly kind: 'permission';
+      readonly requestId: string;
+      readonly toolName: string;
+      readonly decision: 'allow' | 'deny';
+    };
 
 /** A transcript event body stamped with its session identity + ordering. */
 export type TranscriptEvent = TranscriptEventBody & {
@@ -267,6 +274,26 @@ export interface SessionInputMessage {
 export interface SessionInterruptMessage {
   readonly type: 'session-interrupt';
   readonly sessionId: string;
+}
+
+/** Outbound: a permission request raised by a live owned session, awaiting a decision. */
+export interface PermissionRequestSnapshot {
+  readonly type: 'permission-request';
+  readonly path: string;
+  readonly sessionId: string;
+  readonly requestId: string;
+  readonly toolUseId: string | null;
+  readonly toolName: string;
+  readonly title: string | null;
+  readonly input: string;
+}
+
+/** Inbound: the user's decision on an outstanding permission request. */
+export interface PermissionDecisionMessage {
+  readonly type: 'permission-decision';
+  readonly sessionId: string;
+  readonly requestId: string;
+  readonly decision: 'allow' | 'deny';
 }
 
 /** Inbound: start (or resume) a Bridge run for a pinned project path. */
@@ -322,6 +349,7 @@ export type InboundMessage =
   | SessionTranscriptRequestMessage
   | SessionInputMessage
   | SessionInterruptMessage
+  | PermissionDecisionMessage
   | BridgeStartMessage
   | GateApproveMessage
   | BridgeInterruptMessage;
@@ -336,6 +364,7 @@ export type OutboundMessage =
   | LifecycleSignalsSnapshot
   | SessionStateSnapshot
   | SessionTranscriptSnapshot
+  | PermissionRequestSnapshot
   | BridgeStateSnapshot;
 
 /**
@@ -491,6 +520,35 @@ export function parseInboundMessage(data: unknown): InboundMessage | null {
       type: 'session-input',
       sessionId,
       text,
+    });
+  }
+
+  // `permission-decision` carries a session id (like session-interrupt) plus a
+  // request id and a decision that must be exactly 'allow' or 'deny'.
+  if (type === 'permission-decision') {
+    const { sessionId, requestId, decision } = frame;
+    if (
+      typeof sessionId !== 'string' ||
+      sessionId.length === 0 ||
+      sessionId.length > MAX_SESSION_ID_LENGTH
+    ) {
+      return null;
+    }
+    if (
+      typeof requestId !== 'string' ||
+      requestId.length === 0 ||
+      requestId.length > MAX_REQUEST_ID_LENGTH
+    ) {
+      return null;
+    }
+    if (decision !== 'allow' && decision !== 'deny') {
+      return null;
+    }
+    return Object.freeze<PermissionDecisionMessage>({
+      type: 'permission-decision',
+      sessionId,
+      requestId,
+      decision,
     });
   }
 
