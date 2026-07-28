@@ -70,6 +70,8 @@ function makeFakeSession(sdkId: string): EngineSession {
   return Object.assign(gen(), {
     interrupt: async (): Promise<unknown> => undefined,
     send: async (): Promise<void> => {},
+    onPermissionRequest: (): void => {},
+    resolvePermission: (): void => {},
   });
 }
 

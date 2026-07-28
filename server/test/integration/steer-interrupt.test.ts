@@ -161,6 +161,8 @@ function makeSteerableSession(sdkId: string): {
       queue.push(text);
       wake();
     },
+    onPermissionRequest: (): void => {},
+    resolvePermission: (): void => {},
   });
 
   return {
