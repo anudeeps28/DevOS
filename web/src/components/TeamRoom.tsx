@@ -1,4 +1,5 @@
-import { AlertCircle, Bot, CheckCircle2, Gauge, Wrench } from 'lucide-react';
+import { useState } from 'react';
+import { AlertCircle, Bot, CheckCircle2, Gauge, MessageSquare, Wrench } from 'lucide-react';
 
 import type { SessionState, TranscriptEvent } from '@/lib/ws-client';
 import { cn } from '@/lib/utils';
@@ -50,6 +51,19 @@ function TranscriptRow({ event }: { event: TranscriptEvent }): JSX.Element | nul
         className="flex items-start gap-2 text-sm text-foreground"
       >
         <Bot aria-hidden className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+        <span className="min-w-0 whitespace-pre-wrap break-words">{event.text}</span>
+      </li>
+    );
+  }
+
+  if (event.kind === 'user-text') {
+    return (
+      <li
+        data-testid={`transcript-row-${event.seq}`}
+        data-kind="user-text"
+        className="flex items-start gap-2 text-sm font-medium text-foreground"
+      >
+        <MessageSquare aria-hidden className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
         <span className="min-w-0 whitespace-pre-wrap break-words">{event.text}</span>
       </li>
     );
@@ -127,11 +141,25 @@ function TranscriptRow({ event }: { event: TranscriptEvent }): JSX.Element | nul
 export function TeamRoom({
   sessions,
   transcripts,
+  sendSessionInput,
+  interruptSession,
 }: {
   sessions: Record<string, readonly SessionState[]>;
   transcripts: Record<string, readonly TranscriptEvent[]>;
+  sendSessionInput: (sessionId: string, text: string) => void;
+  interruptSession: (sessionId: string) => void;
 }): JSX.Element {
   const live = selectLiveSession(sessions);
+  const [draft, setDraft] = useState('');
+
+  // Steer the live session with the trimmed draft, then clear the field. Guarded so
+  // an empty draft or a vanished session is a no-op.
+  const handleSend = (): void => {
+    const text = draft.trim();
+    if (text.length === 0 || live === null) return;
+    sendSessionInput(live.id, text);
+    setDraft('');
+  };
 
   return (
     <section
@@ -165,6 +193,35 @@ export function TeamRoom({
               <TranscriptRow key={event.seq} event={event} />
             ))}
           </ul>
+          <div className="flex flex-col gap-2 border-t border-border pt-2">
+            <textarea
+              data-testid="team-room-input"
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              placeholder="Message the agent…"
+              rows={2}
+              className="w-full resize-none rounded-md border border-border bg-background px-2 py-1.5 text-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            />
+            <div className="flex items-center gap-2">
+              <button
+                data-testid="team-room-send"
+                type="button"
+                onClick={handleSend}
+                disabled={draft.trim().length === 0}
+                className="rounded-md border border-border bg-primary px-3 py-1 text-xs font-medium text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Send
+              </button>
+              <button
+                data-testid="team-room-interrupt"
+                type="button"
+                onClick={() => interruptSession(live.id)}
+                className="rounded-md border border-border px-3 py-1 text-xs font-medium text-muted-foreground hover:text-foreground"
+              >
+                Interrupt
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </section>

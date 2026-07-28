@@ -27,6 +27,8 @@ function App() {
     sessions,
     spawnSession,
     transcripts,
+    sendSessionInput,
+    interruptSession,
   } = useProjects();
 
   return (
@@ -49,7 +51,12 @@ function App() {
         sessions={sessions}
         spawnSession={spawnSession}
       />
-      <TeamRoom sessions={sessions} transcripts={transcripts} />
+      <TeamRoom
+        sessions={sessions}
+        transcripts={transcripts}
+        sendSessionInput={sendSessionInput}
+        interruptSession={interruptSession}
+      />
     </main>
   );
 }

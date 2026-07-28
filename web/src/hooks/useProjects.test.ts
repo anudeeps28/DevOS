@@ -44,6 +44,8 @@ function makeFakeClient() {
   const requestLifecycleSignals = vi.fn();
   const spawnSession = vi.fn();
   const requestTranscript = vi.fn();
+  const sendSessionInput = vi.fn();
+  const interruptSession = vi.fn();
   const sendBridgeStart = vi.fn();
   const sendGateApprove = vi.fn();
   const sendBridgeInterrupt = vi.fn();
@@ -110,6 +112,8 @@ function makeFakeClient() {
     requestLifecycleSignals,
     spawnSession,
     requestTranscript,
+    sendSessionInput,
+    interruptSession,
     sendBridgeStart,
     sendGateApprove,
     sendBridgeInterrupt,
@@ -126,6 +130,8 @@ function makeFakeClient() {
     requestLifecycleSignals,
     spawnSession,
     requestTranscript,
+    sendSessionInput,
+    interruptSession,
     sendBridgeStart,
     sendGateApprove,
     sendBridgeInterrupt,
@@ -670,6 +676,28 @@ describe('useProjects', () => {
     act(() => result.current.requestTranscript('sess-9'));
 
     expect(fake.requestTranscript).toHaveBeenCalledWith('sess-9');
+  });
+
+  it('delegates sendSessionInput to the underlying client', () => {
+    const fake = makeFakeClient();
+    const { result } = renderHook(() =>
+      useProjects({ createClient: () => fake.client }),
+    );
+
+    act(() => result.current.sendSessionInput('sess-9', 'steer me'));
+
+    expect(fake.sendSessionInput).toHaveBeenCalledWith('sess-9', 'steer me');
+  });
+
+  it('delegates interruptSession to the underlying client', () => {
+    const fake = makeFakeClient();
+    const { result } = renderHook(() =>
+      useProjects({ createClient: () => fake.client }),
+    );
+
+    act(() => result.current.interruptSession('sess-9'));
+
+    expect(fake.interruptSession).toHaveBeenCalledWith('sess-9');
   });
 
   it('closes the client on unmount', () => {
