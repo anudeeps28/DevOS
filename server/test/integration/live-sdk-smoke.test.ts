@@ -60,4 +60,48 @@ describe.skipIf(!LIVE)('live Agent-SDK spawn (subscription auth)', () => {
       rmSync(cwd, { recursive: true, force: true });
     }
   }, 90_000);
+
+  // Steer + interrupt (story 6h6hMV8QfFvwCMP8) against the REAL SDK: the streaming
+  // input stays open after kickoff, accepts a mid-run `send()`, the agent replies, and
+  // `interrupt()` aborts the turn without a fatal throw. A confidence smoke, not a
+  // strict causal proof — CI always uses the deterministic fake in steer-interrupt.test.ts.
+  it('accepts a steered message on a live open session and survives an interrupt', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'devos-live-steer-'));
+    try {
+      const session = defaultQuery({
+        cwd,
+        role: 'shipwright',
+        prompt: 'Wait for my next instruction; do not act until I send it.',
+      });
+
+      let steered = false;
+      let sawAssistantAfterSteer = false;
+      const deadline = Date.now() + 60_000;
+      for await (const message of session) {
+        if (message.type === 'system' && message.subtype === 'init') {
+          // Steer: push a follow-up user message into the STILL-OPEN input stream.
+          await session.send('Reply with the single word: OK.');
+          steered = true;
+          continue;
+        }
+        if (steered && message.type === 'assistant') {
+          sawAssistantAfterSteer = true;
+          break;
+        }
+        if (Date.now() > deadline) break;
+      }
+
+      // Interrupt the live turn — must not throw fatally (the manager guards it the same way).
+      try {
+        await session.interrupt();
+      } catch {
+        // session already ended — nothing to interrupt
+      }
+
+      expect(steered).toBe(true);
+      expect(sawAssistantAfterSteer).toBe(true);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  }, 90_000);
 });
