@@ -55,6 +55,7 @@ function makeSession(): {
       wake();
       return undefined;
     },
+    send: async (): Promise<void> => {},
   });
 
   return {

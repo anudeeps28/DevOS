@@ -198,6 +198,7 @@ function makeScriptedSession(content: readonly EngineMessage[]): {
       releaseGate();
       return undefined;
     },
+    send: async (): Promise<void> => {},
   });
   return { engine, release: releaseGate };
 }

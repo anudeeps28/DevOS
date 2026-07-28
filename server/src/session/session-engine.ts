@@ -39,6 +39,7 @@ export interface EngineMessage {
  */
 export interface EngineSession extends AsyncIterable<EngineMessage> {
   interrupt(): Promise<unknown>;
+  send(text: string): Promise<void>;
 }
 
 /** Parameters for spawning one owned session. */
@@ -103,14 +104,16 @@ function roleAppend(role: Role): string {
   return `You are running as the DevOS "${role}" role session for this project stage.`;
 }
 
-/**
- * Streaming-input prompt: yield the single kickoff message, then close the input
- * stream. Using an async-iterable (not a bare string) keeps the session in
- * streaming-input mode — the mode that later enables live steering + interrupt
- * (a separate M2 task). Here we send one message and let the turn complete.
- */
-async function* kickoffInput(text: string): AsyncGenerator<SDKUserMessage> {
-  yield {
+/** The push-pull queue handed to the SDK's streaming-input `prompt`, plus the
+ * `push`/`close` controls that let a live session steer an in-flight turn. */
+export interface InputStream {
+  readonly stream: AsyncGenerator<SDKUserMessage>;
+  push(text: string): void;
+  close(): void;
+}
+
+function toUserMessage(text: string): SDKUserMessage {
+  return {
     type: 'user',
     message: { role: 'user', content: text },
     parent_tool_use_id: null,
@@ -118,9 +121,87 @@ async function* kickoffInput(text: string): AsyncGenerator<SDKUserMessage> {
 }
 
 /**
+ * Bound on the un-drained steer queue: a compromised/misbehaving localhost client
+ * could push `session-input` frames faster than the SDK drains them (there is no
+ * flood-guard on steer — it is a deliberate user action). Cap the backlog so the
+ * queue can't grow without limit; pushes past the cap are dropped (oldest kept, so
+ * in-order delivery of already-queued steers is preserved).
+ */
+export const MAX_PENDING_INPUTS = 256;
+
+/**
+ * Streaming-input prompt: yield the `initial` kickoff message, then stay OPEN —
+ * awaiting and yielding each `push(text)` message in order — and complete only
+ * once `close()` is called (draining any still-queued messages first). Using an
+ * async-iterable (not a bare string) keeps the session in streaming-input mode,
+ * the mode that enables live steering + interrupt.
+ */
+export function createInputStream(initial: string): InputStream {
+  const pending: string[] = [];
+  let waitingResolver: (() => void) | null = null;
+  let closed = false;
+
+  const wake = (): void => {
+    if (waitingResolver !== null) {
+      const resolve = waitingResolver;
+      waitingResolver = null;
+      resolve();
+    }
+  };
+
+  async function* stream(): AsyncGenerator<SDKUserMessage> {
+    yield toUserMessage(initial);
+    for (;;) {
+      const next = pending.shift();
+      if (next !== undefined) {
+        yield toUserMessage(next);
+        continue;
+      }
+      if (closed) return;
+      await new Promise<void>((resolve) => {
+        waitingResolver = resolve;
+      });
+    }
+  }
+
+  return {
+    stream: stream(),
+    push: (text: string): void => {
+      if (closed) return;
+      // Fail safe under a push flood: drop rather than grow unbounded.
+      if (pending.length >= MAX_PENDING_INPUTS) {
+        console.warn('[session] input queue full — dropping steer message');
+        return;
+      }
+      pending.push(text);
+      wake();
+    },
+    close: (): void => {
+      closed = true;
+      wake();
+    },
+  };
+}
+
+/** Wrap a session's message iteration so the input stream is always closed when
+ * iteration finishes — a torn-down/ended session releases its queue, and
+ * `stopAll` still terminates the underlying SDK generator. */
+async function* withInputClose(
+  messages: AsyncIterable<EngineMessage>,
+  input: InputStream,
+): AsyncGenerator<EngineMessage> {
+  try {
+    yield* messages;
+  } finally {
+    input.close();
+  }
+}
+
+/**
  * The real-SDK default engine: start a `query()` generator in streaming-input mode
  * with `cwd = project root` and the role wired into the system prompt. Returns the
- * SDK `Query`, which structurally satisfies `EngineSession`.
+ * SDK `Query` wrapped so its input queue closes on iteration end, plus `send()` to
+ * push a steering message into the open stream.
  */
 export const defaultQuery: QueryFn = ({ cwd, role, prompt }): EngineSession => {
   const options: Options = {
@@ -129,5 +210,12 @@ export const defaultQuery: QueryFn = ({ cwd, role, prompt }): EngineSession => {
     env: buildSessionEnv(),
     systemPrompt: { type: 'preset', preset: 'claude_code', append: roleAppend(role) },
   };
-  return query({ prompt: kickoffInput(prompt), options });
+  const input = createInputStream(prompt);
+  const q = query({ prompt: input.stream, options });
+  return Object.assign(withInputClose(q, input), {
+    interrupt: (): Promise<unknown> => q.interrupt(),
+    send: async (text: string): Promise<void> => {
+      input.push(text);
+    },
+  });
 };

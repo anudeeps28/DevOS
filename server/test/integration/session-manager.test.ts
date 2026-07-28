@@ -74,6 +74,7 @@ function makeFakeSession(sdkId: string, throwAfterInit: boolean): EngineSession 
       resolveOpen?.();
       return undefined;
     },
+    send: async (): Promise<void> => {},
   });
 }
 
