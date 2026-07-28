@@ -11,20 +11,28 @@ import type { EngineMessage, EngineSession, QueryFn, SpawnParams } from './sessi
 
 const PROJECT = '/tmp/devos-sm-project';
 
-/** A controllable fake EngineSession: push any message, end, or throw on demand. */
-function makeSession(): {
+/** A controllable fake EngineSession: push any message, end, throw, steer, or interrupt on demand. */
+function makeSession(opts: { endsOnInterrupt?: boolean } = {}): {
   session: EngineSession;
   emit: (message: EngineMessage) => void;
   emitInit: (sessionId: string) => void;
   finish: () => void;
   throwError: (err: unknown) => void;
   interrupted: () => boolean;
+  interruptCount: () => number;
+  sent: () => string[];
 } {
+  // Whether interrupt() ends the generator. Default true (models stopAll's shutdown
+  // interrupt, closing the stream). Set false to model per-turn interrupt that leaves
+  // the session running.
+  const endsOnInterrupt = opts.endsOnInterrupt ?? true;
   const buffer: EngineMessage[] = [];
   let resolveNext: (() => void) | null = null;
   let done = false;
   let error: unknown = null;
   let wasInterrupted = false;
+  let interruptCalls = 0;
+  const sentTexts: string[] = [];
 
   const wake = (): void => {
     if (resolveNext !== null) {
@@ -52,9 +60,15 @@ function makeSession(): {
   const session: EngineSession = Object.assign(gen(), {
     interrupt: async (): Promise<unknown> => {
       wasInterrupted = true;
-      done = true;
-      wake();
+      interruptCalls += 1;
+      if (endsOnInterrupt) {
+        done = true;
+        wake();
+      }
       return undefined;
+    },
+    send: async (text: string): Promise<void> => {
+      sentTexts.push(text);
     },
   });
 
@@ -77,6 +91,8 @@ function makeSession(): {
       wake();
     },
     interrupted: () => wasInterrupted,
+    interruptCount: () => interruptCalls,
+    sent: () => [...sentTexts],
   };
 }
 
@@ -207,6 +223,104 @@ describe('SessionManager', () => {
     const store = freshStore();
     // Constructing with no query must not throw (defaults to defaultQuery).
     expect(() => createSessionManager({ store })).not.toThrow();
+  });
+});
+
+describe('SessionManager steer + interrupt', () => {
+  it('sendInput echoes a user-text transcript event AND pushes the text into the engine', async () => {
+    const store = freshStore();
+    const fake = makeSession();
+    const mgr = createSessionManager({ store, query: () => fake.session });
+    const received: TranscriptEvent[] = [];
+    mgr.onTranscript((_path, _id, events) => received.push(...events));
+
+    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'shipwright' });
+    mgr.sendInput(snap.id, 'focus on the auth module');
+    await waitUntil(() => received.some((e) => e.kind === 'user-text'));
+
+    const echo = received.find((e) => e.kind === 'user-text');
+    expect(echo).toMatchObject({
+      kind: 'user-text',
+      text: 'focus on the auth module',
+      sessionId: snap.id,
+    });
+    expect(Object.isFrozen(echo)).toBe(true);
+    // The full text reaches the engine's live input stream.
+    expect(fake.sent()).toEqual(['focus on the auth module']);
+
+    fake.finish();
+    await mgr.stopAll();
+  });
+
+  it('sendInput for an unknown/ended session is a guarded no-op (no throw, no echo, no send)', async () => {
+    const store = freshStore();
+    const fake = makeSession();
+    const mgr = createSessionManager({ store, query: () => fake.session });
+    const received: TranscriptEvent[] = [];
+    mgr.onTranscript((_path, _id, events) => received.push(...events));
+
+    await mgr.spawn({ projectPath: PROJECT, role: 'shipwright' });
+    expect(() => mgr.sendInput('does-not-exist', 'hello')).not.toThrow();
+    expect(fake.sent()).toEqual([]);
+    expect(received).toHaveLength(0);
+
+    fake.finish();
+    await mgr.stopAll();
+  });
+
+  it('a rejecting engine.send is isolated — never crashes and a sibling stays running', async () => {
+    const store = freshStore();
+    const bad = makeSession();
+    const good = makeSession();
+    const sessions = [bad.session, good.session];
+    let i = 0;
+    const mgr = createSessionManager({ store, query: () => sessions[i++] as EngineSession });
+
+    const badSnap = await mgr.spawn({ projectPath: PROJECT, role: 'warden' });
+    const goodSnap = await mgr.spawn({ projectPath: PROJECT, role: 'harbormaster' });
+
+    // Swap in a send that rejects — sendInput must swallow it (per-session isolation).
+    (bad.session as unknown as { send: (t: string) => Promise<void> }).send = async () => {
+      throw new Error('send boom');
+    };
+
+    expect(() => mgr.sendInput(badSnap.id, 'x')).not.toThrow();
+    // Give the rejected promise a tick to settle (caught inside sendInput).
+    await new Promise((r) => setTimeout(r, 5));
+    expect(mgr.list().find((s) => s.id === goodSnap.id)?.status).toBe('running');
+
+    bad.finish();
+    good.finish();
+    await mgr.stopAll();
+  });
+
+  it('interrupt aborts the current turn but does NOT end the session (stays running)', async () => {
+    const store = freshStore();
+    const fake = makeSession({ endsOnInterrupt: false });
+    const mgr = createSessionManager({ store, query: () => fake.session });
+
+    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'shipwright' });
+    await mgr.interrupt(snap.id);
+
+    expect(fake.interruptCount()).toBe(1);
+    // Session is NOT terminated — the manager still lists it as running.
+    expect(mgr.list().find((s) => s.id === snap.id)?.status).toBe('running');
+
+    fake.finish();
+    await mgr.stopAll();
+  });
+
+  it('interrupt for an unknown/ended session is a guarded no-op', async () => {
+    const store = freshStore();
+    const fake = makeSession();
+    const mgr = createSessionManager({ store, query: () => fake.session });
+
+    await mgr.spawn({ projectPath: PROJECT, role: 'shipwright' });
+    await expect(mgr.interrupt('nope')).resolves.toBeUndefined();
+    expect(fake.interruptCount()).toBe(0);
+
+    fake.finish();
+    await mgr.stopAll();
   });
 });
 

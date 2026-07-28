@@ -1,8 +1,27 @@
-import { render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { fireEvent, render, screen } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
 
 import { TeamRoom } from '@/components/TeamRoom';
 import type { SessionState, TranscriptEvent } from '@/lib/ws-client';
+
+/** Render TeamRoom, defaulting the two sender props so tests opt in only when needed. */
+function renderRoom(
+  sessions: Record<string, readonly SessionState[]>,
+  transcripts: Record<string, readonly TranscriptEvent[]>,
+  senders: {
+    sendSessionInput?: (sessionId: string, text: string) => void;
+    interruptSession?: (sessionId: string) => void;
+  } = {},
+): void {
+  render(
+    <TeamRoom
+      sessions={sessions}
+      transcripts={transcripts}
+      sendSessionInput={senders.sendSessionInput ?? (() => {})}
+      interruptSession={senders.interruptSession ?? (() => {})}
+    />,
+  );
+}
 
 function runningSession(id: string, path = '/abs/one'): SessionState {
   return {
@@ -40,25 +59,20 @@ function fixtureEvents(): readonly TranscriptEvent[] {
 
 describe('TeamRoom', () => {
   it('shows the empty state when there is no running session', () => {
-    render(<TeamRoom sessions={{}} transcripts={{}} />);
+    renderRoom({}, {});
 
     expect(screen.getByTestId('team-room-empty')).toBeInTheDocument();
   });
 
   it('shows the empty state when all sessions have ended', () => {
     const ended: SessionState = { ...runningSession('sess-1'), status: 'ended' };
-    render(<TeamRoom sessions={{ '/abs/one': [ended] }} transcripts={{}} />);
+    renderRoom({ '/abs/one': [ended] }, {});
 
     expect(screen.getByTestId('team-room-empty')).toBeInTheDocument();
   });
 
   it('renders every transcript row kind for the live session', () => {
-    render(
-      <TeamRoom
-        sessions={{ '/abs/one': [runningSession('sess-1')] }}
-        transcripts={{ 'sess-1': fixtureEvents() }}
-      />,
-    );
+    renderRoom({ '/abs/one': [runningSession('sess-1')] }, { 'sess-1': fixtureEvents() });
 
     expect(screen.queryByTestId('team-room-empty')).not.toBeInTheDocument();
     expect(screen.getByTestId('team-room-session-sess-1')).toBeInTheDocument();
@@ -77,12 +91,7 @@ describe('TeamRoom', () => {
   });
 
   it('renders the result metrics row with tokens, duration, turns, and cost', () => {
-    render(
-      <TeamRoom
-        sessions={{ '/abs/one': [runningSession('sess-1')] }}
-        transcripts={{ 'sess-1': fixtureEvents() }}
-      />,
-    );
+    renderRoom({ '/abs/one': [runningSession('sess-1')] }, { 'sess-1': fixtureEvents() });
 
     const resultRow = screen.getByTestId('transcript-row-4');
     expect(resultRow).toHaveAttribute('data-error', 'false');
@@ -97,12 +106,7 @@ describe('TeamRoom', () => {
     const events: readonly TranscriptEvent[] = [
       { kind: 'tool-result', toolUseId: null, content: 'boom', isError: true, ...stamp(0) },
     ];
-    render(
-      <TeamRoom
-        sessions={{ '/abs/one': [runningSession('sess-1')] }}
-        transcripts={{ 'sess-1': events }}
-      />,
-    );
+    renderRoom({ '/abs/one': [runningSession('sess-1')] }, { 'sess-1': events });
 
     const row = screen.getByTestId('transcript-row-0');
     expect(row).toHaveAttribute('data-kind', 'tool-result');
@@ -111,15 +115,9 @@ describe('TeamRoom', () => {
   });
 
   it('shows the most recent running session when several exist', () => {
-    render(
-      <TeamRoom
-        sessions={{
-          '/abs/one': [runningSession('sess-1'), runningSession('sess-2')],
-        }}
-        transcripts={{
-          'sess-2': [{ kind: 'assistant-text', text: 'from sess-2', ...stamp(0, 'sess-2') }],
-        }}
-      />,
+    renderRoom(
+      { '/abs/one': [runningSession('sess-1'), runningSession('sess-2')] },
+      { 'sess-2': [{ kind: 'assistant-text', text: 'from sess-2', ...stamp(0, 'sess-2') }] },
     );
 
     expect(screen.getByTestId('team-room-session-sess-2')).toBeInTheDocument();
@@ -131,15 +129,56 @@ describe('TeamRoom', () => {
     const events: readonly TranscriptEvent[] = [
       { kind: 'tool-use', toolName: 'Write', toolInput: longInput, toolUseId: null, ...stamp(0) },
     ];
-    render(
-      <TeamRoom
-        sessions={{ '/abs/one': [runningSession('sess-1')] }}
-        transcripts={{ 'sess-1': events }}
-      />,
-    );
+    renderRoom({ '/abs/one': [runningSession('sess-1')] }, { 'sess-1': events });
 
     const row = screen.getByTestId('transcript-row-0');
     expect(row.textContent).toContain('…');
     expect(row.textContent).not.toContain(longInput);
+  });
+
+  it('renders a user-text row (the human steer echo) with its own kind', () => {
+    const events: readonly TranscriptEvent[] = [
+      { kind: 'user-text', text: 'focus on the auth module', ...stamp(0) },
+    ];
+    renderRoom({ '/abs/one': [runningSession('sess-1')] }, { 'sess-1': events });
+
+    const row = screen.getByTestId('transcript-row-0');
+    expect(row).toHaveAttribute('data-kind', 'user-text');
+    expect(row).toHaveTextContent('focus on the auth module');
+  });
+
+  it('typing a message and clicking Send steers the live session and clears the field', () => {
+    const sendSessionInput = vi.fn();
+    renderRoom({ '/abs/one': [runningSession('sess-1')] }, {}, { sendSessionInput });
+
+    const input = screen.getByTestId('team-room-input') as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: 'refactor the parser' } });
+    fireEvent.click(screen.getByTestId('team-room-send'));
+
+    expect(sendSessionInput).toHaveBeenCalledWith('sess-1', 'refactor the parser');
+    expect(input.value).toBe('');
+  });
+
+  it('disables Send for an empty (or whitespace-only) draft', () => {
+    const sendSessionInput = vi.fn();
+    renderRoom({ '/abs/one': [runningSession('sess-1')] }, {}, { sendSessionInput });
+
+    const send = screen.getByTestId('team-room-send') as HTMLButtonElement;
+    expect(send).toBeDisabled();
+
+    fireEvent.change(screen.getByTestId('team-room-input'), { target: { value: '   ' } });
+    expect(send).toBeDisabled();
+
+    fireEvent.click(send);
+    expect(sendSessionInput).not.toHaveBeenCalled();
+  });
+
+  it('clicking Interrupt interrupts the live session', () => {
+    const interruptSession = vi.fn();
+    renderRoom({ '/abs/one': [runningSession('sess-1')] }, {}, { interruptSession });
+
+    fireEvent.click(screen.getByTestId('team-room-interrupt'));
+
+    expect(interruptSession).toHaveBeenCalledWith('sess-1');
   });
 });

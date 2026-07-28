@@ -455,6 +455,38 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
         return;
       }
 
+      // Steer: push mid-run user text into a live owned session's input stream.
+      // Same resolve → isPinnedPath fail-closed gate as session-transcript-request
+      // (an unknown/ended session or an unpinned project is a silent no-op). No
+      // flood-guard: this is a deliberate user action, like session-spawn. The reply
+      // (and the user-text echo) flow back through the existing session-transcript
+      // broadcast — nothing to send from here.
+      if (message.type === 'session-input') {
+        const snap = options.sessionManager.get(message.sessionId);
+        if (snap === null) return;
+        if (!isPinnedPath(snap.projectPath)) return;
+        try {
+          options.sessionManager.sendInput(message.sessionId, message.text);
+        } catch (err) {
+          console.error('[ws] session-input failed', err);
+        }
+        return;
+      }
+
+      // Interrupt: abort a live owned session's current turn (the session stays
+      // running). Same fail-closed gate as session-input.
+      if (message.type === 'session-interrupt') {
+        const snap = options.sessionManager.get(message.sessionId);
+        if (snap === null) return;
+        if (!isPinnedPath(snap.projectPath)) return;
+        try {
+          await options.sessionManager.interrupt(message.sessionId);
+        } catch (err) {
+          console.error('[ws] session-interrupt failed', err);
+        }
+        return;
+      }
+
       // Bridge start: begin (or resume) a pipeline run for a pinned project. Mirrors
       // session-spawn's two-layer access control (pinned + within project roots) since
       // it ultimately spawns an owned session; fails closed on either check.

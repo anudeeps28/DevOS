@@ -2,13 +2,17 @@ import { describe, expect, it } from 'vitest';
 
 import {
   parseInboundMessage,
+  MAX_STEER_TEXT_LENGTH,
   type BridgeInterruptMessage,
   type BridgeStartMessage,
   type DiscoverMessage,
   type GateApproveMessage,
   type GitStateMessage,
   type PinMessage,
+  type SessionInputMessage,
+  type SessionInterruptMessage,
   type SessionTranscriptRequestMessage,
+  type TranscriptEventBody,
   type UnpinMessage,
 } from './ws-protocol.js';
 
@@ -283,6 +287,109 @@ describe('parseInboundMessage', () => {
     });
   });
 
+  describe('session-input frames', () => {
+    it('accepts a session-input with a non-empty sessionId and text, frozen', () => {
+      const result = parseInboundMessage(
+        JSON.stringify({ type: 'session-input', sessionId: 'sess-1', text: 'hello' }),
+      );
+
+      expect(result).toEqual<SessionInputMessage>({
+        type: 'session-input',
+        sessionId: 'sess-1',
+        text: 'hello',
+      });
+      expect(Object.isFrozen(result)).toBe(true);
+    });
+
+    it('accepts an empty text string', () => {
+      const result = parseInboundMessage(
+        JSON.stringify({ type: 'session-input', sessionId: 'sess-1', text: '' }),
+      );
+      expect(result).toEqual<SessionInputMessage>({
+        type: 'session-input',
+        sessionId: 'sess-1',
+        text: '',
+      });
+    });
+
+    it('accepts text exactly at MAX_STEER_TEXT_LENGTH', () => {
+      const text = 'x'.repeat(MAX_STEER_TEXT_LENGTH);
+      const result = parseInboundMessage(
+        JSON.stringify({ type: 'session-input', sessionId: 'sess-1', text }),
+      );
+      expect(result).not.toBeNull();
+    });
+
+    it('rejects text over MAX_STEER_TEXT_LENGTH', () => {
+      const text = 'x'.repeat(MAX_STEER_TEXT_LENGTH + 1);
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'session-input', sessionId: 'sess-1', text }),
+        ),
+      ).toBeNull();
+    });
+
+    it('rejects a missing, empty, or wrong-type sessionId', () => {
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'session-input', text: 'hello' })),
+      ).toBeNull();
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'session-input', sessionId: '', text: 'hello' }),
+        ),
+      ).toBeNull();
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'session-input', sessionId: 42, text: 'hello' }),
+        ),
+      ).toBeNull();
+    });
+
+    it('rejects a missing or non-string text', () => {
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'session-input', sessionId: 'sess-1' })),
+      ).toBeNull();
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'session-input', sessionId: 'sess-1', text: 42 }),
+        ),
+      ).toBeNull();
+    });
+  });
+
+  describe('session-interrupt frames', () => {
+    it('accepts a session-interrupt with a non-empty bounded sessionId, frozen', () => {
+      const result = parseInboundMessage(
+        JSON.stringify({ type: 'session-interrupt', sessionId: 'sess-1' }),
+      );
+
+      expect(result).toEqual<SessionInterruptMessage>({
+        type: 'session-interrupt',
+        sessionId: 'sess-1',
+      });
+      expect(Object.isFrozen(result)).toBe(true);
+    });
+
+    it('rejects a missing, empty, or wrong-type sessionId', () => {
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'session-interrupt' })),
+      ).toBeNull();
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'session-interrupt', sessionId: '' })),
+      ).toBeNull();
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'session-interrupt', sessionId: 42 })),
+      ).toBeNull();
+    });
+
+    it('rejects an over-long sessionId', () => {
+      const sessionId = 's'.repeat(129); // exceeds MAX_SESSION_ID_LENGTH (128)
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'session-interrupt', sessionId })),
+      ).toBeNull();
+    });
+  });
+
   describe('bridge-start frames', () => {
     it('accepts a bridge-start with an absolute path and no workItemId', () => {
       const result = parseInboundMessage(
@@ -411,5 +518,12 @@ describe('parseInboundMessage', () => {
     for (const input of inputs) {
       expect(() => parseInboundMessage(input)).not.toThrow();
     }
+  });
+
+  describe('TranscriptEventBody', () => {
+    it('accepts a user-text shape', () => {
+      const body: TranscriptEventBody = { kind: 'user-text', text: 'steer this' };
+      expect(body).toEqual({ kind: 'user-text', text: 'steer this' });
+    });
   });
 });

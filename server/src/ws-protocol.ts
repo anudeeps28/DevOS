@@ -23,6 +23,7 @@ const MAX_DISPLAY_NAME_LENGTH = 512;
 const MAX_WORK_ITEM_ID_LENGTH = 512;
 const MAX_SESSION_ID_LENGTH = 128;
 const MAX_REASON_LENGTH = 4096;
+export const MAX_STEER_TEXT_LENGTH = 8192;
 
 /** A persisted project anchor as sent to the client. */
 export interface ProjectAnchor {
@@ -231,7 +232,8 @@ export type TranscriptEventBody =
       readonly inputTokens: number;
       readonly outputTokens: number;
       readonly isError: boolean;
-    };
+    }
+  | { readonly kind: 'user-text'; readonly text: string };
 
 /** A transcript event body stamped with its session identity + ordering. */
 export type TranscriptEvent = TranscriptEventBody & {
@@ -251,6 +253,19 @@ export interface SessionTranscriptSnapshot {
 /** Inbound: request the buffered transcript of a live owned session (backfill). */
 export interface SessionTranscriptRequestMessage {
   readonly type: 'session-transcript-request';
+  readonly sessionId: string;
+}
+
+/** Inbound: steer a live owned session with mid-run user text. */
+export interface SessionInputMessage {
+  readonly type: 'session-input';
+  readonly sessionId: string;
+  readonly text: string;
+}
+
+/** Inbound: interrupt a live owned session. */
+export interface SessionInterruptMessage {
+  readonly type: 'session-interrupt';
   readonly sessionId: string;
 }
 
@@ -305,6 +320,8 @@ export type InboundMessage =
   | LifecycleSignalsMessage
   | SessionSpawnMessage
   | SessionTranscriptRequestMessage
+  | SessionInputMessage
+  | SessionInterruptMessage
   | BridgeStartMessage
   | GateApproveMessage
   | BridgeInterruptMessage;
@@ -435,6 +452,45 @@ export function parseInboundMessage(data: unknown): InboundMessage | null {
     return Object.freeze<SessionTranscriptRequestMessage>({
       type: 'session-transcript-request',
       sessionId,
+    });
+  }
+
+  // `session-interrupt` carries a session id (opaque, not a path) — a non-empty
+  // bounded string, same shape as session-transcript-request.
+  if (type === 'session-interrupt') {
+    const { sessionId } = frame;
+    if (
+      typeof sessionId !== 'string' ||
+      sessionId.length === 0 ||
+      sessionId.length > MAX_SESSION_ID_LENGTH
+    ) {
+      return null;
+    }
+    return Object.freeze<SessionInterruptMessage>({
+      type: 'session-interrupt',
+      sessionId,
+    });
+  }
+
+  // `session-input` carries a session id (like session-interrupt) plus a bounded
+  // steering text. An over-long text is rejected (not truncated) so the boundary
+  // stays strict.
+  if (type === 'session-input') {
+    const { sessionId, text } = frame;
+    if (
+      typeof sessionId !== 'string' ||
+      sessionId.length === 0 ||
+      sessionId.length > MAX_SESSION_ID_LENGTH
+    ) {
+      return null;
+    }
+    if (typeof text !== 'string' || text.length > MAX_STEER_TEXT_LENGTH) {
+      return null;
+    }
+    return Object.freeze<SessionInputMessage>({
+      type: 'session-input',
+      sessionId,
+      text,
     });
   }
 

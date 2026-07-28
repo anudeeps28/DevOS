@@ -13,12 +13,12 @@
 // is the durable last-known anchor.
 
 import { randomUUID } from 'node:crypto';
-import type { TranscriptEvent } from '../ws-protocol.js';
+import type { TranscriptEvent, TranscriptEventBody } from '../ws-protocol.js';
 import type { Role } from './roles.js';
 import { defaultQuery, type EngineMessage, type EngineSession, type QueryFn } from './session-engine.js';
 import { acquireSessionSlot, type ReleaseSlot } from './session-spawn-limit.js';
 import type { SessionStore } from './session-store.js';
-import { normalizeMessage } from './transcript-events.js';
+import { MAX_TEXT_CHARS, normalizeMessage } from './transcript-events.js';
 
 export type SessionStatus = 'running' | 'ended' | 'errored';
 
@@ -61,6 +61,17 @@ export interface SessionManager {
   readonly onTranscript: (listener: TranscriptListener) => () => void;
   /** The live session's buffered transcript (frozen copy), or `[]` if absent/ended. */
   readonly getTranscript: (id: string) => readonly TranscriptEvent[];
+  /**
+   * Steer a live session with mid-run user text: echo a `user-text` transcript event
+   * (the SDK does not echo streaming-input) then push the text into the live input
+   * stream. Guarded + per-session isolated; a no-op for an unknown/ended session.
+   */
+  readonly sendInput: (id: string, text: string) => void;
+  /**
+   * Interrupt a live session's CURRENT TURN without ending the session — the status
+   * stays `running`. Guarded; a no-op for an unknown/ended session.
+   */
+  readonly interrupt: (id: string) => Promise<void>;
   /** Interrupt every live session (guarded). Called on server shutdown. */
   readonly stopAll: () => Promise<void>;
 }
@@ -134,23 +145,27 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     }
   };
 
+  // Stamp one body with this session's identity + ordering, push it onto the bounded
+  // ring buffer (oldest dropped), and return the frozen event. Shared by transcript
+  // capture (from the engine stream) and the user-text echo (from sendInput).
+  const pushEvent = (s: LiveSession, body: TranscriptEventBody): TranscriptEvent => {
+    const event = Object.freeze<TranscriptEvent>({
+      ...body,
+      sessionId: s.id,
+      seq: s.seq++,
+      ts: Date.now(),
+    });
+    s.transcript.push(event);
+    if (s.transcript.length > MAX_TRANSCRIPT_EVENTS) s.transcript.shift();
+    return event;
+  };
+
   // Normalize one engine message into stamped transcript events, push them onto the
   // session's bounded ring buffer, and fan the frozen batch out to listeners.
   const captureTranscript = (s: LiveSession, message: EngineMessage): void => {
     const bodies = normalizeMessage(message);
     if (bodies.length === 0) return;
-    const batch: TranscriptEvent[] = [];
-    for (const body of bodies) {
-      const event = Object.freeze<TranscriptEvent>({
-        ...body,
-        sessionId: s.id,
-        seq: s.seq++,
-        ts: Date.now(),
-      });
-      s.transcript.push(event);
-      if (s.transcript.length > MAX_TRANSCRIPT_EVENTS) s.transcript.shift();
-      batch.push(event);
-    }
+    const batch: TranscriptEvent[] = bodies.map((body) => pushEvent(s, body));
     emitTranscript(s, Object.freeze(batch));
   };
 
@@ -276,6 +291,51 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     return s === undefined ? [] : Object.freeze([...s.transcript]);
   };
 
+  const sendInput = (id: string, text: string): void => {
+    const s = live.get(id);
+    if (s === undefined) {
+      // Unknown/ended session — guarded no-op (a late steer after teardown, not an error path).
+      console.error(`[session] sendInput: no live session ${id}`);
+      return;
+    }
+    // Echo the human's own message into the transcript FIRST — the SDK does not echo
+    // streaming-input on the output stream, so without this the typed message is silent.
+    const echo = pushEvent(
+      s,
+      Object.freeze<TranscriptEventBody>({
+        kind: 'user-text',
+        text: text.length > MAX_TEXT_CHARS ? text.slice(0, MAX_TEXT_CHARS) : text,
+      }),
+    );
+    emitTranscript(s, Object.freeze([echo]));
+    // Push the FULL text into the live input stream (ws-protocol already bounds it at
+    // MAX_STEER_TEXT_LENGTH; only the transcript echo is truncated for frame size).
+    // Per-session isolated: a throw or async rejection is logged, never rethrown.
+    try {
+      void s.engine.send(text).catch((err) => {
+        console.error(`[session] sendInput: engine.send rejected for ${id}`, err);
+      });
+    } catch (err) {
+      console.error(`[session] sendInput: engine.send threw for ${id}`, err);
+    }
+  };
+
+  const interrupt = async (id: string): Promise<void> => {
+    const s = live.get(id);
+    if (s === undefined) {
+      // Unknown/ended session — guarded no-op.
+      console.error(`[session] interrupt: no live session ${id}`);
+      return;
+    }
+    // Interrupt the current turn only. Do NOT change status: the session stays `running`
+    // — the consume loop keeps consuming the stream (turn-abort is the SDK's job).
+    try {
+      await s.engine.interrupt();
+    } catch (err) {
+      console.error(`[session] interrupt failed for ${id}`, err);
+    }
+  };
+
   const stopAll = async (): Promise<void> => {
     const running = [...live.values()];
     // Interrupt each live generator (guarded) — this closes its input stream so the
@@ -294,5 +354,15 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     await Promise.allSettled([...consuming]);
   };
 
-  return Object.freeze<SessionManager>({ spawn, list, get, onState, onTranscript, getTranscript, stopAll });
+  return Object.freeze<SessionManager>({
+    spawn,
+    list,
+    get,
+    onState,
+    onTranscript,
+    getTranscript,
+    sendInput,
+    interrupt,
+    stopAll,
+  });
 }

@@ -65,6 +65,10 @@ export interface UseProjectsResult {
   readonly transcripts: Record<string, readonly TranscriptEvent[]>;
   /** Request the buffered transcript of a live session; delegates to the live client. */
   readonly requestTranscript: (sessionId: string) => void;
+  /** Steer a live owned session with mid-run user text; delegates to the live client. */
+  readonly sendSessionInput: (sessionId: string, text: string) => void;
+  /** Interrupt a live owned session's current turn; delegates to the live client. */
+  readonly interruptSession: (sessionId: string) => void;
 }
 
 export interface UseProjectsOptions {
@@ -243,6 +247,14 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     clientRef.current?.requestTranscript(sessionId);
   }
 
+  function sendSessionInput(sessionId: string, text: string): void {
+    clientRef.current?.sendSessionInput(sessionId, text);
+  }
+
+  function interruptSession(sessionId: string): void {
+    clientRef.current?.interruptSession(sessionId);
+  }
+
   return {
     projects,
     candidates,
@@ -259,5 +271,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     spawnSession,
     transcripts,
     requestTranscript,
+    sendSessionInput,
+    interruptSession,
   };
 }

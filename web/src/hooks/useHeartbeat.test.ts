@@ -51,6 +51,8 @@ function makeFakeClient() {
     requestLifecycleSignals: () => {},
     spawnSession: () => {},
     requestTranscript: () => {},
+    sendSessionInput: () => {},
+    interruptSession: () => {},
     sendBridgeStart: () => {},
     sendGateApprove: () => {},
     sendBridgeInterrupt: () => {},
