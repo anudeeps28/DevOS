@@ -56,6 +56,8 @@ function makeSession(): {
       return undefined;
     },
     send: async (): Promise<void> => {},
+    onPermissionRequest: (): void => {},
+    resolvePermission: (): void => {},
   });
 
   return {

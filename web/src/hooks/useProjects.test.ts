@@ -49,6 +49,7 @@ function makeFakeClient() {
   const sendBridgeStart = vi.fn();
   const sendGateApprove = vi.fn();
   const sendBridgeInterrupt = vi.fn();
+  const sendPermissionDecision = vi.fn();
   const close = vi.fn();
 
   const client: WsClient = {
@@ -104,6 +105,7 @@ function makeFakeClient() {
       };
     },
     onBridgeState: () => () => {},
+    onPermissionRequest: () => () => {},
     pin,
     unpin,
     discover,
@@ -117,6 +119,7 @@ function makeFakeClient() {
     sendBridgeStart,
     sendGateApprove,
     sendBridgeInterrupt,
+    sendPermissionDecision,
     close,
   };
 
@@ -135,6 +138,7 @@ function makeFakeClient() {
     sendBridgeStart,
     sendGateApprove,
     sendBridgeInterrupt,
+    sendPermissionDecision,
     close,
     emitRegistry: (projects: readonly RegistryProject[]) =>
       registryListener?.(projects),

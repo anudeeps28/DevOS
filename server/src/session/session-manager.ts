@@ -15,7 +15,14 @@
 import { randomUUID } from 'node:crypto';
 import type { TranscriptEvent, TranscriptEventBody } from '../ws-protocol.js';
 import type { Role } from './roles.js';
-import { defaultQuery, type EngineMessage, type EngineSession, type QueryFn } from './session-engine.js';
+import {
+  defaultQuery,
+  type EngineMessage,
+  type EnginePermissionRequest,
+  type EngineSession,
+  type PermissionDecision,
+  type QueryFn,
+} from './session-engine.js';
 import { acquireSessionSlot, type ReleaseSlot } from './session-spawn-limit.js';
 import type { SessionStore } from './session-store.js';
 import { MAX_TEXT_CHARS, normalizeMessage } from './transcript-events.js';
@@ -51,6 +58,13 @@ export type TranscriptListener = (
   events: readonly TranscriptEvent[],
 ) => void;
 
+/** Fired with each permission request raised by a live session, awaiting a decision. */
+export type PermissionRequestListener = (
+  projectPath: string,
+  sessionId: string,
+  req: EnginePermissionRequest,
+) => void;
+
 export interface SessionManager {
   readonly spawn: (input: SpawnInput) => Promise<SessionSnapshot>;
   readonly list: () => SessionSnapshot[];
@@ -59,6 +73,8 @@ export interface SessionManager {
   readonly onState: (listener: StateListener) => () => void;
   /** Register a listener fired on every transcript event batch. Returns an unsubscribe fn. */
   readonly onTranscript: (listener: TranscriptListener) => () => void;
+  /** Register a listener fired on every permission request. Returns an unsubscribe fn. */
+  readonly onPermissionRequest: (listener: PermissionRequestListener) => () => void;
   /** The live session's buffered transcript (frozen copy), or `[]` if absent/ended. */
   readonly getTranscript: (id: string) => readonly TranscriptEvent[];
   /**
@@ -72,6 +88,12 @@ export interface SessionManager {
    * stays `running`. Guarded; a no-op for an unknown/ended session.
    */
   readonly interrupt: (id: string) => Promise<void>;
+  /**
+   * Resolve a pending permission request with the operator's decision, then record a
+   * `permission` audit transcript event. Guarded + per-session isolated; a no-op for
+   * an unknown/ended session.
+   */
+  readonly resolvePermission: (id: string, requestId: string, decision: PermissionDecision) => void;
   /** Interrupt every live session (guarded). Called on server shutdown. */
   readonly stopAll: () => Promise<void>;
 }
@@ -99,6 +121,8 @@ interface LiveSession {
   /** Bounded in-memory ring buffer — dies with the live session, never persisted (AC4). */
   readonly transcript: TranscriptEvent[];
   readonly engine: EngineSession;
+  /** requestId → toolName, populated as permission requests are raised (for the audit event). */
+  readonly permissionToolNames: Map<string, string>;
 }
 
 function isInitMessage(message: EngineMessage): boolean {
@@ -111,6 +135,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   const live = new Map<string, LiveSession>();
   const listeners = new Set<StateListener>();
   const transcriptListeners = new Set<TranscriptListener>();
+  const permissionRequestListeners = new Set<PermissionRequestListener>();
   // Track detached consume loops so stopAll can await their completion (so the final
   // 'ended'/'errored' status persists before the DB is closed on shutdown).
   const consuming = new Set<Promise<void>>();
@@ -141,6 +166,16 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         listener(s.projectPath, s.id, events);
       } catch (err) {
         console.error('[session] transcript listener threw', err);
+      }
+    }
+  };
+
+  const emitPermission = (s: LiveSession, req: EnginePermissionRequest): void => {
+    for (const listener of permissionRequestListeners) {
+      try {
+        listener(s.projectPath, s.id, req);
+      } catch (err) {
+        console.error('[session] permission request listener threw', err);
       }
     }
   };
@@ -256,9 +291,17 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       seq: 0,
       transcript: [],
       engine,
+      permissionToolNames: new Map(),
     };
     live.set(id, session);
     emit(session); // running
+
+    // Register the permission relay BEFORE starting the consume loop, so no early
+    // request can be raised without a listener attached.
+    engine.onPermissionRequest((req) => {
+      session.permissionToolNames.set(req.requestId, req.toolName);
+      emitPermission(session, req);
+    });
 
     // Detached — spawn returns immediately so many sessions multiplex concurrently.
     // Tracked in `consuming` so stopAll can await completion on shutdown.
@@ -284,6 +327,11 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   const onTranscript = (listener: TranscriptListener): (() => void) => {
     transcriptListeners.add(listener);
     return () => transcriptListeners.delete(listener);
+  };
+
+  const onPermissionRequest = (listener: PermissionRequestListener): (() => void) => {
+    permissionRequestListeners.add(listener);
+    return () => permissionRequestListeners.delete(listener);
   };
 
   const getTranscript = (id: string): readonly TranscriptEvent[] => {
@@ -336,6 +384,45 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     }
   };
 
+  const resolvePermission = (id: string, requestId: string, decision: PermissionDecision): void => {
+    const s = live.get(id);
+    if (s === undefined) {
+      // Unknown/ended session — guarded no-op.
+      console.error(`[session] resolvePermission: no live session ${id}`);
+      return;
+    }
+    // Idempotency guard: only a request that is actually pending for THIS session is
+    // resolved + audited. `permissionToolNames` holds an entry from when the request was
+    // raised until it is resolved here, so an unknown/stale/duplicate requestId (a second
+    // tab's click, or a forged decision) finds no entry and is a silent no-op — matching
+    // the broker's idempotent `resolve` and keeping the audit trail honest.
+    const toolName = s.permissionToolNames.get(requestId);
+    if (toolName === undefined) {
+      return;
+    }
+    // Prune the entry as we resolve it: bounds the map's growth over a long session
+    // (the broker's `pending` map is capped at MAX_PENDING_PERMISSIONS; this side map was not)
+    // and ensures a repeat decision for the same requestId is the no-op above.
+    s.permissionToolNames.delete(requestId);
+    // Per-session isolated: a throw is logged, never rethrown.
+    try {
+      s.engine.resolvePermission(requestId, decision);
+    } catch (err) {
+      console.error(`[session] resolvePermission: engine.resolvePermission threw for ${id}`, err);
+    }
+    // Audit trail: record the decision as a transcript event.
+    const event = pushEvent(
+      s,
+      Object.freeze<TranscriptEventBody>({
+        kind: 'permission',
+        requestId,
+        toolName,
+        decision,
+      }),
+    );
+    emitTranscript(s, Object.freeze([event]));
+  };
+
   const stopAll = async (): Promise<void> => {
     const running = [...live.values()];
     // Interrupt each live generator (guarded) — this closes its input stream so the
@@ -360,9 +447,11 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     get,
     onState,
     onTranscript,
+    onPermissionRequest,
     getTranscript,
     sendInput,
     interrupt,
+    resolvePermission,
     stopAll,
   });
 }

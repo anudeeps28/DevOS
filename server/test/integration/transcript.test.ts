@@ -199,6 +199,8 @@ function makeScriptedSession(content: readonly EngineMessage[]): {
       return undefined;
     },
     send: async (): Promise<void> => {},
+    onPermissionRequest: (): void => {},
+    resolvePermission: (): void => {},
   });
   return { engine, release: releaseGate };
 }

@@ -15,6 +15,10 @@ import { WS_PATH } from './config.js';
 import type { Registry } from './registry/registry.js';
 import type { Bridge } from './session/bridge.js';
 import type {
+  EnginePermissionRequest,
+  PermissionDecision,
+} from './session/session-engine.js';
+import type {
   SessionManager,
   SessionSnapshot,
   TranscriptListener,
@@ -148,6 +152,18 @@ interface GatewayHarness {
   readonly steerCalls: () => readonly { readonly sessionId: string; readonly text: string }[];
   /** Every `interrupt(sessionId)` the gateway forwarded to the manager. */
   readonly interruptCalls: () => readonly string[];
+  /** Fire the manager's permission-request channel as if a live session raised one. */
+  readonly firePermissionRequest: (
+    path: string,
+    sessionId: string,
+    req: EnginePermissionRequest,
+  ) => void;
+  /** Every `resolvePermission(sessionId, requestId, decision)` the gateway forwarded. */
+  readonly permissionCalls: () => readonly {
+    readonly sessionId: string;
+    readonly requestId: string;
+    readonly decision: PermissionDecision;
+  }[];
   readonly close: () => Promise<void>;
 }
 
@@ -157,6 +173,8 @@ interface TestClient {
   readonly transcriptFrames: () => readonly TranscriptFrame[];
   /** Resolve once at least `count` transcript frames arrived; reject on timeout. */
   readonly waitForTranscriptCount: (count: number, timeoutMs?: number) => Promise<void>;
+  /** Every `permission-request` frame seen so far. */
+  readonly permissionRequestFrames: () => readonly Record<string, unknown>[];
   readonly close: () => void;
 }
 
@@ -178,6 +196,9 @@ async function startGateway(options: HarnessOptions = {}): Promise<GatewayHarnes
   const sessions = options.sessions ?? {};
   const transcripts = options.transcripts ?? {};
   const transcriptListeners = new Set<TranscriptListener>();
+  const permissionRequestListeners = new Set<
+    (path: string, sessionId: string, req: EnginePermissionRequest) => void
+  >();
 
   const registry: Registry = Object.freeze({
     listProjects: () => pinnedPaths.map(anchor),
@@ -194,6 +215,11 @@ async function startGateway(options: HarnessOptions = {}): Promise<GatewayHarnes
 
   const steerCalls: { readonly sessionId: string; readonly text: string }[] = [];
   const interruptCalls: string[] = [];
+  const permissionCalls: {
+    readonly sessionId: string;
+    readonly requestId: string;
+    readonly decision: PermissionDecision;
+  }[] = [];
 
   const sessionManager: SessionManager = Object.freeze({
     spawn: () => Promise.reject(new Error('spawn not used in gateway transcript tests')),
@@ -207,6 +233,17 @@ async function startGateway(options: HarnessOptions = {}): Promise<GatewayHarnes
       };
     },
     getTranscript: (id: string) => transcripts[id] ?? [],
+    onPermissionRequest: (
+      listener: (path: string, sessionId: string, req: EnginePermissionRequest) => void,
+    ) => {
+      permissionRequestListeners.add(listener);
+      return () => {
+        permissionRequestListeners.delete(listener);
+      };
+    },
+    resolvePermission: (id: string, requestId: string, decision: PermissionDecision) => {
+      permissionCalls.push({ sessionId: id, requestId, decision });
+    },
     sendInput: (id: string, text: string) => {
       steerCalls.push({ sessionId: id, text });
     },
@@ -250,6 +287,12 @@ async function startGateway(options: HarnessOptions = {}): Promise<GatewayHarnes
     },
     steerCalls: () => [...steerCalls],
     interruptCalls: () => [...interruptCalls],
+    firePermissionRequest: (path: string, sessionId: string, req: EnginePermissionRequest) => {
+      for (const listener of permissionRequestListeners) {
+        listener(path, sessionId, req);
+      }
+    },
+    permissionCalls: () => [...permissionCalls],
     close: async () => {
       await gateway.close();
       await new Promise<void>((resolve) => {
@@ -266,6 +309,7 @@ function openClient(url: string, openTimeoutMs = 3000): Promise<TestClient> {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(url);
     const frames: TranscriptFrame[] = [];
+    const permissionFrames: Record<string, unknown>[] = [];
     let opened = false;
 
     const openTimer = setTimeout(() => {
@@ -296,6 +340,12 @@ function openClient(url: string, openTimeoutMs = 3000): Promise<TestClient> {
         (parsed as { type?: unknown }).type === 'session-transcript'
       ) {
         frames.push(parsed as TranscriptFrame);
+      } else if (
+        typeof parsed === 'object' &&
+        parsed !== null &&
+        (parsed as { type?: unknown }).type === 'permission-request'
+      ) {
+        permissionFrames.push(parsed as Record<string, unknown>);
       }
     });
 
@@ -327,6 +377,7 @@ function openClient(url: string, openTimeoutMs = 3000): Promise<TestClient> {
             };
             poll();
           }),
+        permissionRequestFrames: () => [...permissionFrames],
         close: () => {
           socket.removeAllListeners();
           socket.close();
@@ -501,5 +552,97 @@ describe('ws-gateway steer + interrupt routing', () => {
     await settle();
     expect(harness.steerCalls()).toEqual([]);
     expect(harness.interruptCalls()).toEqual([]);
+  });
+});
+
+describe('ws-gateway permission routing', () => {
+  const permReq: EnginePermissionRequest = {
+    requestId: 'req-1',
+    toolUseId: 'tu-1',
+    toolName: 'Bash',
+    title: 'run a command',
+    input: '{"command":"ls"}',
+  };
+
+  it('routes a permission-decision for a pinned session to resolvePermission(id, requestId, decision)', async () => {
+    const harness = await startGateway({
+      pinnedPaths: [PROJECT_PATH],
+      sessions: { [SESSION_ID]: liveSnapshot(SESSION_ID, PROJECT_PATH) },
+    });
+    const client = await openClient(harness.url);
+
+    client.send({
+      type: 'permission-decision',
+      sessionId: SESSION_ID,
+      requestId: 'req-1',
+      decision: 'allow',
+    });
+
+    await settle();
+    expect(harness.permissionCalls()).toEqual([
+      { sessionId: SESSION_ID, requestId: 'req-1', decision: 'allow' },
+    ]);
+  });
+
+  it('is a no-op for an unknown session (fails closed)', async () => {
+    const harness = await startGateway({ pinnedPaths: [PROJECT_PATH] }); // no live sessions
+    const client = await openClient(harness.url);
+
+    client.send({
+      type: 'permission-decision',
+      sessionId: 'no-such-session',
+      requestId: 'req-1',
+      decision: 'deny',
+    });
+
+    await settle();
+    expect(harness.permissionCalls()).toEqual([]);
+  });
+
+  it('is a no-op when the owning path is not pinned (fails closed)', async () => {
+    const harness = await startGateway({
+      pinnedPaths: [], // session exists, but its project is NOT pinned
+      sessions: { [SESSION_ID]: liveSnapshot(SESSION_ID, PROJECT_PATH) },
+    });
+    const client = await openClient(harness.url);
+
+    client.send({
+      type: 'permission-decision',
+      sessionId: SESSION_ID,
+      requestId: 'req-1',
+      decision: 'allow',
+    });
+
+    await settle();
+    expect(harness.permissionCalls()).toEqual([]);
+  });
+
+  it('broadcasts a permission-request only for a pinned path', async () => {
+    const harness = await startGateway({ pinnedPaths: [PROJECT_PATH] });
+    const client = await openClient(harness.url);
+
+    harness.firePermissionRequest(PROJECT_PATH, SESSION_ID, permReq);
+
+    await settle();
+    const frames = client.permissionRequestFrames();
+    expect(frames).toHaveLength(1);
+    expect(frames[0]).toMatchObject({
+      type: 'permission-request',
+      path: PROJECT_PATH,
+      sessionId: SESSION_ID,
+      requestId: 'req-1',
+      toolName: 'Bash',
+      input: '{"command":"ls"}',
+    });
+  });
+
+  it('broadcasts nothing for a permission-request whose path is not pinned (fails closed)', async () => {
+    const harness = await startGateway({ pinnedPaths: [] }); // path NOT pinned
+    const client = await openClient(harness.url);
+
+    harness.firePermissionRequest(PROJECT_PATH, SESSION_ID, permReq);
+
+    await settle();
+    expect(client.permissionRequestFrames()).toEqual([]);
   });
 });

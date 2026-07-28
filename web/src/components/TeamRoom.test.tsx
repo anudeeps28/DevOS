@@ -2,7 +2,7 @@ import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { TeamRoom } from '@/components/TeamRoom';
-import type { SessionState, TranscriptEvent } from '@/lib/ws-client';
+import type { PermissionRequest, SessionState, TranscriptEvent } from '@/lib/ws-client';
 
 /** Render TeamRoom, defaulting the two sender props so tests opt in only when needed. */
 function renderRoom(
@@ -11,6 +11,8 @@ function renderRoom(
   senders: {
     sendSessionInput?: (sessionId: string, text: string) => void;
     interruptSession?: (sessionId: string) => void;
+    pendingPermissions?: Record<string, readonly PermissionRequest[]>;
+    resolvePermission?: (sessionId: string, requestId: string, decision: 'allow' | 'deny') => void;
   } = {},
 ): void {
   render(
@@ -19,6 +21,12 @@ function renderRoom(
       transcripts={transcripts}
       sendSessionInput={senders.sendSessionInput ?? (() => {})}
       interruptSession={senders.interruptSession ?? (() => {})}
+      {...(senders.pendingPermissions !== undefined
+        ? { pendingPermissions: senders.pendingPermissions }
+        : {})}
+      {...(senders.resolvePermission !== undefined
+        ? { resolvePermission: senders.resolvePermission }
+        : {})}
     />,
   );
 }
@@ -180,5 +188,76 @@ describe('TeamRoom', () => {
     fireEvent.click(screen.getByTestId('team-room-interrupt'));
 
     expect(interruptSession).toHaveBeenCalledWith('sess-1');
+  });
+
+  it('renders a pending permission card for the live session with its title', () => {
+    const request: PermissionRequest = {
+      path: '/abs/one',
+      sessionId: 'sess-1',
+      requestId: 'req1',
+      toolUseId: 'tu-1',
+      toolName: 'Bash',
+      title: 'Run shell command',
+      input: '{"command":"ls"}',
+    };
+    renderRoom(
+      { '/abs/one': [runningSession('sess-1')] },
+      {},
+      { pendingPermissions: { 'sess-1': [request] } },
+    );
+
+    const card = screen.getByTestId('permission-card-req1');
+    expect(card).toBeInTheDocument();
+    expect(card).toHaveTextContent('Run shell command');
+  });
+
+  it('clicking Allow on a permission card resolves it with "allow"', () => {
+    const resolvePermission = vi.fn();
+    const request: PermissionRequest = {
+      path: '/abs/one',
+      sessionId: 'sess-1',
+      requestId: 'req1',
+      toolUseId: 'tu-1',
+      toolName: 'Bash',
+      title: 'Run shell command',
+      input: '{"command":"ls"}',
+    };
+    renderRoom(
+      { '/abs/one': [runningSession('sess-1')] },
+      {},
+      { pendingPermissions: { 'sess-1': [request] }, resolvePermission },
+    );
+
+    fireEvent.click(screen.getByTestId('permission-allow-req1'));
+
+    expect(resolvePermission).toHaveBeenCalledWith('sess-1', 'req1', 'allow');
+  });
+
+  it('clicking Deny on a permission card resolves it with "deny"', () => {
+    const resolvePermission = vi.fn();
+    const request: PermissionRequest = {
+      path: '/abs/one',
+      sessionId: 'sess-1',
+      requestId: 'req1',
+      toolUseId: 'tu-1',
+      toolName: 'Bash',
+      title: 'Run shell command',
+      input: '{"command":"ls"}',
+    };
+    renderRoom(
+      { '/abs/one': [runningSession('sess-1')] },
+      {},
+      { pendingPermissions: { 'sess-1': [request] }, resolvePermission },
+    );
+
+    fireEvent.click(screen.getByTestId('permission-deny-req1'));
+
+    expect(resolvePermission).toHaveBeenCalledWith('sess-1', 'req1', 'deny');
+  });
+
+  it('renders no permission card when pendingPermissions is empty', () => {
+    renderRoom({ '/abs/one': [runningSession('sess-1')] }, {}, { pendingPermissions: {} });
+
+    expect(screen.queryByTestId(/^permission-card-/)).not.toBeInTheDocument();
   });
 });

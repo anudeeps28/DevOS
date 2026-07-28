@@ -43,6 +43,7 @@ function makeFakeClient() {
     onSessionState: () => () => {},
     onSessionTranscript: () => () => {},
     onBridgeState: () => () => {},
+    onPermissionRequest: () => () => {},
     pin: () => {},
     unpin: () => {},
     discover: () => {},
@@ -56,6 +57,7 @@ function makeFakeClient() {
     sendBridgeStart: () => {},
     sendGateApprove: () => {},
     sendBridgeInterrupt: () => {},
+    sendPermissionDecision: () => {},
     close,
   };
 

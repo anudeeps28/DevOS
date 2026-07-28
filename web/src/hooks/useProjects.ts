@@ -4,6 +4,7 @@ import {
   createWsClient,
   type GitState,
   type LifecycleSignals,
+  type PermissionRequest,
   type RegistryCandidate,
   type RegistryProject,
   type SessionState,
@@ -69,6 +70,14 @@ export interface UseProjectsResult {
   readonly sendSessionInput: (sessionId: string, text: string) => void;
   /** Interrupt a live owned session's current turn; delegates to the live client. */
   readonly interruptSession: (sessionId: string) => void;
+  /** Pending permission requests keyed by session id (upserted by requestId). */
+  readonly pendingPermissions: Record<string, readonly PermissionRequest[]>;
+  /** Resolve a pending permission request with an allow/deny decision; delegates to the live client. */
+  readonly resolvePermission: (
+    sessionId: string,
+    requestId: string,
+    decision: 'allow' | 'deny',
+  ) => void;
 }
 
 export interface UseProjectsOptions {
@@ -89,6 +98,9 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
   const [lifecycleSignals, setLifecycleSignals] = useState<Record<string, LifecycleSignals>>({});
   const [sessions, setSessions] = useState<Record<string, readonly SessionState[]>>({});
   const [transcripts, setTranscripts] = useState<Record<string, readonly TranscriptEvent[]>>({});
+  const [pendingPermissions, setPendingPermissions] = useState<
+    Record<string, readonly PermissionRequest[]>
+  >({});
 
   // Hold the latest factory in a ref so the setup effect can run once (on mount)
   // without re-subscribing when an inline options object changes identity.
@@ -149,7 +161,25 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
       });
       // A NEW live session id triggers exactly one transcript backfill request.
       requestBackfill(session);
+      // A session that stopped running has no more pending permission requests.
+      if (session.status !== 'running') {
+        setPendingPermissions((prev) => {
+          if (!(session.id in prev)) return prev;
+          const next = { ...prev };
+          delete next[session.id];
+          return next;
+        });
+      }
     });
+    // Immutable fold: a permission request upserts by requestId within the session id.
+    const offPermissionRequest = client.onPermissionRequest((req) =>
+      setPendingPermissions((prev) => {
+        const others = (prev[req.sessionId] ?? []).filter(
+          (p) => p.requestId !== req.requestId,
+        );
+        return { ...prev, [req.sessionId]: [...others, req] };
+      }),
+    );
     // Immutable fold: a transcript batch upserts by seq within the session id.
     const offSessionTranscript = client.onSessionTranscript((_path, sessionId, events) =>
       setTranscripts((prev) => ({
@@ -191,6 +221,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
       offLifecycleSignals();
       offSessionState();
       offSessionTranscript();
+      offPermissionRequest();
       offStatus();
       client.close();
       clientRef.current = null;
@@ -255,6 +286,19 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     clientRef.current?.interruptSession(sessionId);
   }
 
+  function resolvePermission(
+    sessionId: string,
+    requestId: string,
+    decision: 'allow' | 'deny',
+  ): void {
+    clientRef.current?.sendPermissionDecision(sessionId, requestId, decision);
+    setPendingPermissions((prev) => {
+      const list = prev[sessionId];
+      if (list === undefined) return prev;
+      return { ...prev, [sessionId]: list.filter((p) => p.requestId !== requestId) };
+    });
+  }
+
   return {
     projects,
     candidates,
@@ -273,5 +317,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     requestTranscript,
     sendSessionInput,
     interruptSession,
+    pendingPermissions,
+    resolvePermission,
   };
 }

@@ -7,7 +7,14 @@ import { createRegistry } from '../registry/registry.js';
 import type { TranscriptEvent } from '../ws-protocol.js';
 import { createSessionStore } from './session-store.js';
 import { createSessionManager, type SessionSnapshot } from './session-manager.js';
-import type { EngineMessage, EngineSession, QueryFn, SpawnParams } from './session-engine.js';
+import type {
+  EngineMessage,
+  EnginePermissionRequest,
+  EngineSession,
+  PermissionDecision,
+  QueryFn,
+  SpawnParams,
+} from './session-engine.js';
 
 const PROJECT = '/tmp/devos-sm-project';
 
@@ -21,6 +28,8 @@ function makeSession(opts: { endsOnInterrupt?: boolean } = {}): {
   interrupted: () => boolean;
   interruptCount: () => number;
   sent: () => string[];
+  emitPermissionRequest: (req: EnginePermissionRequest) => void;
+  resolvePermissionCalls: () => Array<{ requestId: string; decision: PermissionDecision }>;
 } {
   // Whether interrupt() ends the generator. Default true (models stopAll's shutdown
   // interrupt, closing the stream). Set false to model per-turn interrupt that leaves
@@ -33,6 +42,8 @@ function makeSession(opts: { endsOnInterrupt?: boolean } = {}): {
   let wasInterrupted = false;
   let interruptCalls = 0;
   const sentTexts: string[] = [];
+  let permissionListener: ((req: EnginePermissionRequest) => void) | null = null;
+  const resolvePermissionCalls: Array<{ requestId: string; decision: PermissionDecision }> = [];
 
   const wake = (): void => {
     if (resolveNext !== null) {
@@ -70,6 +81,12 @@ function makeSession(opts: { endsOnInterrupt?: boolean } = {}): {
     send: async (text: string): Promise<void> => {
       sentTexts.push(text);
     },
+    onPermissionRequest: (listener: (req: EnginePermissionRequest) => void): void => {
+      permissionListener = listener;
+    },
+    resolvePermission: (requestId: string, decision: PermissionDecision): void => {
+      resolvePermissionCalls.push({ requestId, decision });
+    },
   });
 
   return {
@@ -93,6 +110,10 @@ function makeSession(opts: { endsOnInterrupt?: boolean } = {}): {
     interrupted: () => wasInterrupted,
     interruptCount: () => interruptCalls,
     sent: () => [...sentTexts],
+    emitPermissionRequest: (req) => {
+      permissionListener?.(req);
+    },
+    resolvePermissionCalls: () => [...resolvePermissionCalls],
   };
 }
 
@@ -553,5 +574,126 @@ describe('SessionManager transcript', () => {
       expect(JSON.stringify(call)).not.toContain('TRANSCRIPT-MARKER-TEXT');
     }
     expect(updateCalls.every(([, status]) => status === 'running' || status === 'ended')).toBe(true);
+  });
+});
+
+describe('SessionManager permission relay', () => {
+  it('onPermissionRequest fires the listener with (projectPath, sessionId, req)', async () => {
+    const store = freshStore();
+    const fake = makeSession();
+    const mgr = createSessionManager({ store, query: () => fake.session });
+    const received: Array<{ projectPath: string; sessionId: string; req: EnginePermissionRequest }> = [];
+    mgr.onPermissionRequest((projectPath, sessionId, req) => {
+      received.push({ projectPath, sessionId, req });
+    });
+
+    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'shipwright' });
+
+    const request: EnginePermissionRequest = {
+      requestId: 'req-1',
+      toolUseId: 'tu-1',
+      toolName: 'Bash',
+      title: null,
+      input: '{"command":"ls"}',
+    };
+    fake.emitPermissionRequest(request);
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toEqual({ projectPath: PROJECT, sessionId: snap.id, req: request });
+
+    fake.finish();
+    await mgr.stopAll();
+  });
+
+  it('resolvePermission for a live session calls through to the engine and emits a permission audit event', async () => {
+    const store = freshStore();
+    const fake = makeSession();
+    const mgr = createSessionManager({ store, query: () => fake.session });
+    const received: TranscriptEvent[] = [];
+    mgr.onTranscript((_path, _id, events) => received.push(...events));
+
+    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'shipwright' });
+    fake.emitPermissionRequest({
+      requestId: 'req-2',
+      toolUseId: 'tu-2',
+      toolName: 'Bash',
+      title: null,
+      input: '{}',
+    });
+
+    mgr.resolvePermission(snap.id, 'req-2', 'deny');
+
+    expect(fake.resolvePermissionCalls()).toEqual([{ requestId: 'req-2', decision: 'deny' }]);
+    const auditEvent = received.find((e) => e.kind === 'permission');
+    expect(auditEvent).toMatchObject({
+      kind: 'permission',
+      requestId: 'req-2',
+      toolName: 'Bash',
+      decision: 'deny',
+      sessionId: snap.id,
+    });
+    expect(Object.isFrozen(auditEvent)).toBe(true);
+
+    fake.finish();
+    await mgr.stopAll();
+  });
+
+  it('resolvePermission for an unknown session id is a silent no-op', async () => {
+    const store = freshStore();
+    const fake = makeSession();
+    const mgr = createSessionManager({ store, query: () => fake.session });
+
+    await mgr.spawn({ projectPath: PROJECT, role: 'shipwright' });
+    expect(() => mgr.resolvePermission('does-not-exist', 'req-x', 'allow')).not.toThrow();
+    expect(fake.resolvePermissionCalls()).toEqual([]);
+
+    fake.finish();
+    await mgr.stopAll();
+  });
+
+  it('resolvePermission for an unknown/stale requestId on a live session is an idempotent no-op (no phantom audit)', async () => {
+    const store = freshStore();
+    const fake = makeSession();
+    const mgr = createSessionManager({ store, query: () => fake.session });
+    const received: TranscriptEvent[] = [];
+    mgr.onTranscript((_path, _id, events) => received.push(...events));
+
+    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'shipwright' });
+    // No request was ever raised for 'ghost-req' — a forged/stale decision must NOT reach
+    // the engine and must NOT inject a phantom permission audit event.
+    mgr.resolvePermission(snap.id, 'ghost-req', 'allow');
+
+    expect(fake.resolvePermissionCalls()).toEqual([]);
+    expect(received.some((e) => e.kind === 'permission')).toBe(false);
+
+    fake.finish();
+    await mgr.stopAll();
+  });
+
+  it('resolvePermission is idempotent for a repeated decision on the same requestId', async () => {
+    const store = freshStore();
+    const fake = makeSession();
+    const mgr = createSessionManager({ store, query: () => fake.session });
+    const received: TranscriptEvent[] = [];
+    mgr.onTranscript((_path, _id, events) => received.push(...events));
+
+    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'shipwright' });
+    fake.emitPermissionRequest({
+      requestId: 'req-dup',
+      toolUseId: 'tu-dup',
+      toolName: 'Write',
+      title: null,
+      input: '{}',
+    });
+
+    // First decision resolves + audits; a second click (e.g. from another tab) is a no-op.
+    mgr.resolvePermission(snap.id, 'req-dup', 'allow');
+    mgr.resolvePermission(snap.id, 'req-dup', 'deny');
+
+    expect(fake.resolvePermissionCalls()).toEqual([{ requestId: 'req-dup', decision: 'allow' }]);
+    expect(received.filter((e) => e.kind === 'permission')).toHaveLength(1);
+
+    fake.finish();
+    await mgr.stopAll();
   });
 });

@@ -9,8 +9,15 @@
 // Auth: the SDK inherits the CLI's keychain OAuth (Claude subscription) — no API
 // key in V1 (VERIFIED — see tasks/notes.md Decision 2026-07-18).
 
-import { query, type Options, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import {
+  query,
+  type CanUseTool,
+  type Options,
+  type PermissionResult,
+  type SDKUserMessage,
+} from '@anthropic-ai/claude-agent-sdk';
 import type { Role } from './roles.js';
+import { MAX_TEXT_CHARS } from './transcript-events.js';
 
 /**
  * The minimal message shape SessionManager reads off a session stream. The real
@@ -40,6 +47,10 @@ export interface EngineMessage {
 export interface EngineSession extends AsyncIterable<EngineMessage> {
   interrupt(): Promise<unknown>;
   send(text: string): Promise<void>;
+  /** Register a listener fired on every permission request raised by this session. */
+  onPermissionRequest(listener: (req: EnginePermissionRequest) => void): void;
+  /** Resolve a pending permission request by id. Idempotent no-op for an unknown id. */
+  resolvePermission(requestId: string, decision: PermissionDecision): void;
 }
 
 /** Parameters for spawning one owned session. */
@@ -102,6 +113,97 @@ function buildSessionEnv(): Record<string, string> {
 /** A one-line role identity appended to the default Claude Code system prompt. */
 function roleAppend(role: Role): string {
   return `You are running as the DevOS "${role}" role session for this project stage.`;
+}
+
+/** Truncate `text` to at most `max` characters. */
+function truncate(text: string, max: number): string {
+  return text.length > max ? text.slice(0, max) : text;
+}
+
+/** A permission request raised by a live session, awaiting an operator decision. */
+export interface EnginePermissionRequest {
+  readonly requestId: string;
+  readonly toolUseId: string | null;
+  readonly toolName: string;
+  readonly title: string | null;
+  readonly input: string;
+}
+
+export type PermissionDecision = 'allow' | 'deny';
+
+/**
+ * Bound on the un-resolved permission queue: a compromised/misbehaving session could
+ * raise `canUseTool` requests faster than the operator decides. Cap the backlog so it
+ * can't grow without limit — past the cap, new requests are fail-closed (denied).
+ */
+export const MAX_PENDING_PERMISSIONS = 256;
+
+/** One session's permission broker: bridges the SDK's `canUseTool` callback to a
+ * listener-driven request/resolve flow the manager can relay over the wire. */
+export interface PermissionBroker {
+  readonly canUseTool: CanUseTool;
+  onRequest(listener: (req: EnginePermissionRequest) => void): void;
+  resolve(requestId: string, decision: PermissionDecision): void;
+  denyAll(): void;
+}
+
+/** Create a per-session permission broker mirroring `createInputStream`'s push-pull
+ * pattern: `canUseTool` parks a resolver per requestId, `resolve` looks it up and
+ * settles it, `denyAll` fails closed on teardown. */
+export function createPermissionBroker(): PermissionBroker {
+  const pending = new Map<string, (result: PermissionResult) => void>();
+  let listener: ((req: EnginePermissionRequest) => void) | null = null;
+
+  const canUseTool: CanUseTool = (toolName, input, opts) =>
+    new Promise<PermissionResult>((resolve) => {
+      if (pending.size >= MAX_PENDING_PERMISSIONS) {
+        resolve({ behavior: 'deny', message: 'permission queue full' });
+        return;
+      }
+      pending.set(opts.requestId, resolve);
+      opts.signal?.addEventListener(
+        'abort',
+        () => {
+          const r = pending.get(opts.requestId);
+          if (r !== undefined) {
+            pending.delete(opts.requestId);
+            r({ behavior: 'deny', message: 'aborted' });
+          }
+        },
+        // Auto-remove after firing so a fired abort handler doesn't linger on the signal.
+        { once: true },
+      );
+      listener?.({
+        requestId: opts.requestId,
+        toolUseId: opts.toolUseID ?? null,
+        toolName,
+        title: opts.title ?? null,
+        input: truncate(JSON.stringify(input), MAX_TEXT_CHARS),
+      });
+    });
+
+  return {
+    canUseTool,
+    onRequest: (l): void => {
+      listener = l;
+    },
+    resolve: (requestId, decision): void => {
+      const r = pending.get(requestId);
+      if (r === undefined) return;
+      pending.delete(requestId);
+      r(
+        decision === 'allow'
+          ? { behavior: 'allow' }
+          : { behavior: 'deny', message: 'Denied by operator' },
+      );
+    },
+    denyAll: (): void => {
+      for (const r of pending.values()) {
+        r({ behavior: 'deny', message: 'session ended' });
+      }
+      pending.clear();
+    },
+  };
 }
 
 /** The push-pull queue handed to the SDK's streaming-input `prompt`, plus the
@@ -183,39 +285,62 @@ export function createInputStream(initial: string): InputStream {
   };
 }
 
-/** Wrap a session's message iteration so the input stream is always closed when
- * iteration finishes — a torn-down/ended session releases its queue, and
- * `stopAll` still terminates the underlying SDK generator. */
+/** Wrap a session's message iteration so the input stream is always closed AND any
+ * still-pending permission requests are fail-closed when iteration finishes — a
+ * torn-down/ended session releases its queues, and `stopAll` still terminates the
+ * underlying SDK generator. */
 async function* withInputClose(
   messages: AsyncIterable<EngineMessage>,
   input: InputStream,
+  broker: PermissionBroker,
 ): AsyncGenerator<EngineMessage> {
   try {
     yield* messages;
   } finally {
     input.close();
+    broker.denyAll();
   }
+}
+
+/**
+ * Build the SDK `Options` for one owned session: cwd, scrubbed env, and the role
+ * wired into the system prompt, plus the given permission broker's `canUseTool`.
+ * Deliberately sets NO `permissionMode` — the SDK default is NOT auto-approve.
+ */
+export function buildSessionOptions(
+  { cwd, role }: Pick<SpawnParams, 'cwd' | 'role'>,
+  broker: PermissionBroker,
+): Options {
+  return {
+    cwd,
+    // Scrubbed env — the subprocess gets an allowlist, never the server's full env.
+    env: buildSessionEnv(),
+    systemPrompt: { type: 'preset', preset: 'claude_code', append: roleAppend(role) },
+    canUseTool: broker.canUseTool,
+  };
 }
 
 /**
  * The real-SDK default engine: start a `query()` generator in streaming-input mode
  * with `cwd = project root` and the role wired into the system prompt. Returns the
  * SDK `Query` wrapped so its input queue closes on iteration end, plus `send()` to
- * push a steering message into the open stream.
+ * push a steering message into the open stream and the permission broker's relay.
  */
 export const defaultQuery: QueryFn = ({ cwd, role, prompt }): EngineSession => {
-  const options: Options = {
-    cwd,
-    // Scrubbed env — the subprocess gets an allowlist, never the server's full env.
-    env: buildSessionEnv(),
-    systemPrompt: { type: 'preset', preset: 'claude_code', append: roleAppend(role) },
-  };
+  const broker = createPermissionBroker();
+  const options = buildSessionOptions({ cwd, role }, broker);
   const input = createInputStream(prompt);
   const q = query({ prompt: input.stream, options });
-  return Object.assign(withInputClose(q, input), {
+  return Object.assign(withInputClose(q, input, broker), {
     interrupt: (): Promise<unknown> => q.interrupt(),
     send: async (text: string): Promise<void> => {
       input.push(text);
+    },
+    onPermissionRequest: (listener: (req: EnginePermissionRequest) => void): void => {
+      broker.onRequest(listener);
+    },
+    resolvePermission: (requestId: string, decision: PermissionDecision): void => {
+      broker.resolve(requestId, decision);
     },
   });
 };

@@ -3,11 +3,13 @@ import { describe, expect, it } from 'vitest';
 import {
   parseInboundMessage,
   MAX_STEER_TEXT_LENGTH,
+  MAX_REQUEST_ID_LENGTH,
   type BridgeInterruptMessage,
   type BridgeStartMessage,
   type DiscoverMessage,
   type GateApproveMessage,
   type GitStateMessage,
+  type PermissionDecisionMessage,
   type PinMessage,
   type SessionInputMessage,
   type SessionInterruptMessage,
@@ -447,6 +449,105 @@ describe('parseInboundMessage', () => {
       ).toBeNull();
       expect(
         parseInboundMessage(JSON.stringify({ type: 'gate-approve', path: 'rel/dir' })),
+      ).toBeNull();
+    });
+  });
+
+  describe('permission-decision frames', () => {
+    it('accepts a well-formed permission-decision with decision "allow", frozen', () => {
+      const result = parseInboundMessage(
+        JSON.stringify({
+          type: 'permission-decision',
+          sessionId: 'sess-1',
+          requestId: 'req-1',
+          decision: 'allow',
+        }),
+      );
+
+      expect(result).toEqual<PermissionDecisionMessage>({
+        type: 'permission-decision',
+        sessionId: 'sess-1',
+        requestId: 'req-1',
+        decision: 'allow',
+      });
+      expect(Object.isFrozen(result)).toBe(true);
+    });
+
+    it('accepts a well-formed permission-decision with decision "deny", frozen', () => {
+      const result = parseInboundMessage(
+        JSON.stringify({
+          type: 'permission-decision',
+          sessionId: 'sess-1',
+          requestId: 'req-1',
+          decision: 'deny',
+        }),
+      );
+
+      expect(result).toEqual<PermissionDecisionMessage>({
+        type: 'permission-decision',
+        sessionId: 'sess-1',
+        requestId: 'req-1',
+        decision: 'deny',
+      });
+      expect(Object.isFrozen(result)).toBe(true);
+    });
+
+    it('rejects a bad decision enum value', () => {
+      expect(
+        parseInboundMessage(
+          JSON.stringify({
+            type: 'permission-decision',
+            sessionId: 'sess-1',
+            requestId: 'req-1',
+            decision: 'maybe',
+          }),
+        ),
+      ).toBeNull();
+    });
+
+    it('rejects a missing or empty requestId', () => {
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'permission-decision', sessionId: 'sess-1', decision: 'allow' }),
+        ),
+      ).toBeNull();
+      expect(
+        parseInboundMessage(
+          JSON.stringify({
+            type: 'permission-decision',
+            sessionId: 'sess-1',
+            requestId: '',
+            decision: 'allow',
+          }),
+        ),
+      ).toBeNull();
+    });
+
+    it('rejects an oversized sessionId (> 128 chars)', () => {
+      const sessionId = 's'.repeat(129); // exceeds MAX_SESSION_ID_LENGTH (128)
+      expect(
+        parseInboundMessage(
+          JSON.stringify({
+            type: 'permission-decision',
+            sessionId,
+            requestId: 'req-1',
+            decision: 'allow',
+          }),
+        ),
+      ).toBeNull();
+    });
+
+    it('rejects an oversized requestId (> MAX_REQUEST_ID_LENGTH)', () => {
+      const requestId = 'r'.repeat(MAX_REQUEST_ID_LENGTH + 1);
+      expect(
+        parseInboundMessage(
+          JSON.stringify({
+            type: 'permission-decision',
+            sessionId: 'sess-1',
+            requestId,
+            decision: 'allow',
+          }),
+        ),
       ).toBeNull();
     });
   });
