@@ -239,6 +239,28 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
     }
   });
 
+  // Push every permission request raised by a live owned session to all OPEN
+  // clients so every tab's Team room can prompt for a decision (mirrors the
+  // onTranscript broadcast above). Access control: broadcast ONLY requests owned
+  // by a currently-pinned project — the same isPinnedPath gate the other
+  // broadcasts apply (fails closed).
+  options.sessionManager.onPermissionRequest((path, sessionId, req) => {
+    if (!isPinnedPath(path)) return;
+    const frame: OutboundMessage = {
+      type: 'permission-request',
+      path,
+      sessionId,
+      requestId: req.requestId,
+      toolUseId: req.toolUseId,
+      toolName: req.toolName,
+      title: req.title,
+      input: req.input,
+    };
+    for (const client of wss.clients) {
+      sendFrame(client, frame);
+    }
+  });
+
   // Push every Bridge run state change to all OPEN clients so every tab's Bridge
   // view stays in sync (mirrors the onState/onTranscript broadcasts above).
   // Access control: broadcast ONLY runs owned by a currently-pinned project — the
@@ -483,6 +505,23 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
           await options.sessionManager.interrupt(message.sessionId);
         } catch (err) {
           console.error('[ws] session-interrupt failed', err);
+        }
+        return;
+      }
+
+      // Permission decision: resolve an outstanding permission request on a live
+      // owned session. Same resolve → isPinnedPath fail-closed gate as
+      // session-input (an unknown/ended session or an unpinned project is a
+      // silent no-op). No flood-guard: this is a deliberate user action, like
+      // session-input.
+      if (message.type === 'permission-decision') {
+        const snap = options.sessionManager.get(message.sessionId);
+        if (snap === null) return;
+        if (!isPinnedPath(snap.projectPath)) return;
+        try {
+          options.sessionManager.resolvePermission(message.sessionId, message.requestId, message.decision);
+        } catch (err) {
+          console.error('[ws] permission-decision failed', err);
         }
         return;
       }
