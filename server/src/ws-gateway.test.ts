@@ -144,6 +144,10 @@ interface GatewayHarness {
     sessionId: string,
     events: readonly TranscriptEvent[],
   ) => void;
+  /** Every `sendInput(sessionId, text)` the gateway forwarded to the manager. */
+  readonly steerCalls: () => readonly { readonly sessionId: string; readonly text: string }[];
+  /** Every `interrupt(sessionId)` the gateway forwarded to the manager. */
+  readonly interruptCalls: () => readonly string[];
   readonly close: () => Promise<void>;
 }
 
@@ -188,6 +192,9 @@ async function startGateway(options: HarnessOptions = {}): Promise<GatewayHarnes
     },
   });
 
+  const steerCalls: { readonly sessionId: string; readonly text: string }[] = [];
+  const interruptCalls: string[] = [];
+
   const sessionManager: SessionManager = Object.freeze({
     spawn: () => Promise.reject(new Error('spawn not used in gateway transcript tests')),
     list: () => Object.values(sessions),
@@ -200,6 +207,13 @@ async function startGateway(options: HarnessOptions = {}): Promise<GatewayHarnes
       };
     },
     getTranscript: (id: string) => transcripts[id] ?? [],
+    sendInput: (id: string, text: string) => {
+      steerCalls.push({ sessionId: id, text });
+    },
+    interrupt: (id: string) => {
+      interruptCalls.push(id);
+      return Promise.resolve();
+    },
     stopAll: () => Promise.resolve(),
   });
 
@@ -234,6 +248,8 @@ async function startGateway(options: HarnessOptions = {}): Promise<GatewayHarnes
         listener(path, sessionId, events);
       }
     },
+    steerCalls: () => [...steerCalls],
+    interruptCalls: () => [...interruptCalls],
     close: async () => {
       await gateway.close();
       await new Promise<void>((resolve) => {
@@ -428,5 +444,62 @@ describe('ws-gateway transcript wiring', () => {
     await client.waitForTranscriptCount(1);
     await settle();
     expect(client.transcriptFrames()).toHaveLength(1);
+  });
+});
+
+describe('ws-gateway steer + interrupt routing', () => {
+  it('routes a session-input for a pinned session to sendInput(sessionId, text)', async () => {
+    const harness = await startGateway({
+      pinnedPaths: [PROJECT_PATH],
+      sessions: { [SESSION_ID]: liveSnapshot(SESSION_ID, PROJECT_PATH) },
+    });
+    const client = await openClient(harness.url);
+
+    client.send({ type: 'session-input', sessionId: SESSION_ID, text: 'refactor the parser' });
+
+    await settle();
+    expect(harness.steerCalls()).toEqual([{ sessionId: SESSION_ID, text: 'refactor the parser' }]);
+    expect(harness.interruptCalls()).toEqual([]);
+  });
+
+  it('routes a session-interrupt for a pinned session to interrupt(sessionId)', async () => {
+    const harness = await startGateway({
+      pinnedPaths: [PROJECT_PATH],
+      sessions: { [SESSION_ID]: liveSnapshot(SESSION_ID, PROJECT_PATH) },
+    });
+    const client = await openClient(harness.url);
+
+    client.send({ type: 'session-interrupt', sessionId: SESSION_ID });
+
+    await settle();
+    expect(harness.interruptCalls()).toEqual([SESSION_ID]);
+    expect(harness.steerCalls()).toEqual([]);
+  });
+
+  it('is a no-op for an unknown session (fails closed) — steer and interrupt', async () => {
+    const harness = await startGateway({ pinnedPaths: [PROJECT_PATH] }); // no live sessions
+    const client = await openClient(harness.url);
+
+    client.send({ type: 'session-input', sessionId: 'no-such-session', text: 'x' });
+    client.send({ type: 'session-interrupt', sessionId: 'no-such-session' });
+
+    await settle();
+    expect(harness.steerCalls()).toEqual([]);
+    expect(harness.interruptCalls()).toEqual([]);
+  });
+
+  it('is a no-op when the owning path is not pinned (fails closed) — steer and interrupt', async () => {
+    const harness = await startGateway({
+      pinnedPaths: [], // session exists, but its project is NOT pinned
+      sessions: { [SESSION_ID]: liveSnapshot(SESSION_ID, PROJECT_PATH) },
+    });
+    const client = await openClient(harness.url);
+
+    client.send({ type: 'session-input', sessionId: SESSION_ID, text: 'x' });
+    client.send({ type: 'session-interrupt', sessionId: SESSION_ID });
+
+    await settle();
+    expect(harness.steerCalls()).toEqual([]);
+    expect(harness.interruptCalls()).toEqual([]);
   });
 });
