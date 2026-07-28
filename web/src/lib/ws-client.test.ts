@@ -1116,6 +1116,21 @@ describe('ws-client session-transcript frames', () => {
     expect(received).toHaveLength(1); // no further delivery
   });
 
+  it('parses a user-text event (the human steer echo) and drops a non-string text', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { received, socket } = makeTranscriptClient();
+
+    socket.message(transcriptFrame([stamped({ kind: 'user-text', text: 'focus on auth' }, 0)]));
+    expect(received).toHaveLength(1);
+    expect(received[0]!.events[0]).toMatchObject({ kind: 'user-text', text: 'focus on auth' });
+    expect(Object.isFrozen(received[0]!.events[0])).toBe(true);
+
+    // A user-text event with a non-string text is malformed → whole frame dropped.
+    socket.message(transcriptFrame([stamped({ kind: 'user-text', text: 42 }, 1)]));
+    expect(received).toHaveLength(1);
+    expect(warn).toHaveBeenCalled();
+  });
+
   it('requestTranscript() sends a session-transcript-request frame once the socket is OPEN', () => {
     const { client, socket } = makeTranscriptClient();
 
@@ -1124,6 +1139,42 @@ describe('ws-client session-transcript frames', () => {
     expect(socket.sent).toEqual([
       JSON.stringify({ type: 'session-transcript-request', sessionId: 'sess-1' }),
     ]);
+  });
+
+  it('sendSessionInput() sends a session-input frame once the socket is OPEN', () => {
+    const { client, socket } = makeTranscriptClient();
+
+    client.sendSessionInput('sess-1', 'refactor the parser');
+
+    expect(socket.sent).toEqual([
+      JSON.stringify({ type: 'session-input', sessionId: 'sess-1', text: 'refactor the parser' }),
+    ]);
+  });
+
+  it('interruptSession() sends a session-interrupt frame once the socket is OPEN', () => {
+    const { client, socket } = makeTranscriptClient();
+
+    client.interruptSession('sess-1');
+
+    expect(socket.sent).toEqual([
+      JSON.stringify({ type: 'session-interrupt', sessionId: 'sess-1' }),
+    ]);
+  });
+
+  it('drops (and warns) when steer/interrupt senders are called before the socket is OPEN', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const client = createWsClient({
+      url: 'ws://localhost/ws',
+      createWebSocket: (url) => new FakeSocket(url),
+    });
+    const socket = FakeSocket.instances[0]!;
+    // NOTE: socket is still CONNECTING (readyState 0) — never opened.
+
+    client.sendSessionInput('sess-1', 'x');
+    client.interruptSession('sess-1');
+
+    expect(socket.sent).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(2);
   });
 
   it('drops (and warns) when requestTranscript() is called before the socket is OPEN', () => {

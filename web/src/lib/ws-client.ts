@@ -142,7 +142,8 @@ export type TranscriptEventBody =
       readonly inputTokens: number;
       readonly outputTokens: number;
       readonly isError: boolean;
-    };
+    }
+  | { readonly kind: 'user-text'; readonly text: string };
 
 /**
  * A transcript event body stamped with its session identity + ordering. Mirrors
@@ -275,6 +276,10 @@ export interface WsClient {
   readonly spawnSession: (path: string, role: string, workItemId?: string) => void;
   /** Request the buffered transcript of a live owned session; no-op (warns) when the socket is not open. */
   readonly requestTranscript: (sessionId: string) => void;
+  /** Steer a live owned session with mid-run user text; no-op (warns) when the socket is not open. */
+  readonly sendSessionInput: (sessionId: string, text: string) => void;
+  /** Interrupt a live owned session's current turn; no-op (warns) when the socket is not open. */
+  readonly interruptSession: (sessionId: string) => void;
   /** Start (or resume) a bridge run for a project path; no-op (warns) when the socket is not open. */
   readonly sendBridgeStart: (path: string, workItemId?: string) => void;
   /** Approve the current gate for a bridge run; no-op (warns) when the socket is not open. */
@@ -727,6 +732,12 @@ function parseTranscriptEvent(entry: unknown): TranscriptEvent | null {
     const { text } = record;
     if (typeof text !== 'string') return null;
     return Object.freeze<TranscriptEvent>({ kind: 'assistant-text', text, ...stamp });
+  }
+
+  if (kind === 'user-text') {
+    const { text } = record;
+    if (typeof text !== 'string') return null;
+    return Object.freeze<TranscriptEvent>({ kind: 'user-text', text, ...stamp });
   }
 
   if (kind === 'tool-use') {
@@ -1203,6 +1214,14 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     sendFrame({ type: 'session-transcript-request', sessionId });
   }
 
+  function sendSessionInput(sessionId: string, text: string): void {
+    sendFrame({ type: 'session-input', sessionId, text });
+  }
+
+  function interruptSession(sessionId: string): void {
+    sendFrame({ type: 'session-interrupt', sessionId });
+  }
+
   function sendBridgeStart(path: string, workItemId?: string): void {
     sendFrame({
       type: 'bridge-start',
@@ -1292,6 +1311,8 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     requestLifecycleSignals,
     spawnSession,
     requestTranscript,
+    sendSessionInput,
+    interruptSession,
     sendBridgeStart,
     sendGateApprove,
     sendBridgeInterrupt,
