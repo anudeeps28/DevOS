@@ -143,7 +143,13 @@ export type TranscriptEventBody =
       readonly outputTokens: number;
       readonly isError: boolean;
     }
-  | { readonly kind: 'user-text'; readonly text: string };
+  | { readonly kind: 'user-text'; readonly text: string }
+  | {
+      readonly kind: 'permission';
+      readonly requestId: string;
+      readonly toolName: string;
+      readonly decision: 'allow' | 'deny';
+    };
 
 /**
  * A transcript event body stamped with its session identity + ordering. Mirrors
@@ -179,6 +185,21 @@ export interface BridgeState {
   readonly gate: 'running' | 'awaiting-approval' | 'reworking' | 'escalated' | 'done';
   readonly sessionId: string | null;
   readonly inbox: readonly BridgeInboxItem[];
+}
+
+/**
+ * A validated permission request. Mirrors the server's PermissionRequestSnapshot
+ * (server/src/ws-protocol.ts) — duplicated typed contract, no shared package.
+ * Frozen — never mutated after construction.
+ */
+export interface PermissionRequest {
+  readonly path: string;
+  readonly sessionId: string;
+  readonly requestId: string;
+  readonly toolUseId: string | null;
+  readonly toolName: string;
+  readonly title: string | null;
+  readonly input: string;
 }
 
 /** The slice of the WebSocket API this client depends on (keeps fakes tiny). */
@@ -236,6 +257,7 @@ export type SessionTranscriptListener = (
   events: readonly TranscriptEvent[],
 ) => void;
 export type BridgeStateListener = (path: string, state: BridgeState) => void;
+export type PermissionRequestListener = (request: PermissionRequest) => void;
 
 /** Public, framework-agnostic client surface. */
 export interface WsClient {
@@ -260,6 +282,8 @@ export interface WsClient {
   readonly onSessionTranscript: (listener: SessionTranscriptListener) => () => void;
   /** Subscribe to validated bridge-state snapshots. */
   readonly onBridgeState: (listener: BridgeStateListener) => () => void;
+  /** Subscribe to validated permission requests. */
+  readonly onPermissionRequest: (listener: PermissionRequestListener) => () => void;
   /** Pin a project by absolute path; no-op (warns) when the socket is not open. */
   readonly pin: (path: string, opts?: { displayName?: string; uiPrefs?: unknown }) => void;
   /** Unpin a project by absolute path; no-op (warns) when the socket is not open. */
@@ -286,6 +310,12 @@ export interface WsClient {
   readonly sendGateApprove: (path: string) => void;
   /** Interrupt a running bridge with a reason; no-op (warns) when the socket is not open. */
   readonly sendBridgeInterrupt: (path: string, reason: string) => void;
+  /** Send an allow/deny decision for a pending permission request; no-op (warns) when the socket is not open. */
+  readonly sendPermissionDecision: (
+    sessionId: string,
+    requestId: string,
+    decision: 'allow' | 'deny',
+  ) => void;
   /** Tear down: cancels reconnects, closes the socket, drops subscribers. */
   readonly close: () => void;
 }
@@ -776,6 +806,20 @@ function parseTranscriptEvent(entry: unknown): TranscriptEvent | null {
     });
   }
 
+  if (kind === 'permission') {
+    const { requestId, toolName, decision } = record;
+    if (typeof requestId !== 'string' || requestId.length === 0) return null;
+    if (typeof toolName !== 'string') return null;
+    if (decision !== 'allow' && decision !== 'deny') return null;
+    return Object.freeze<TranscriptEvent>({
+      kind: 'permission',
+      requestId,
+      toolName,
+      decision,
+      ...stamp,
+    });
+  }
+
   return null; // unknown kind
 }
 
@@ -885,6 +929,40 @@ function parseBridgeState(data: unknown): BridgeState | null {
 }
 
 /**
+ * Validate a raw WS frame against the pinned permission-request contract:
+ * `{ type: 'permission-request', path: string, sessionId: string, requestId: string,
+ *    toolUseId: string|null, toolName: string, title: string|null, input: string }`.
+ * Returns a frozen PermissionRequest, or null for anything malformed.
+ */
+function parsePermissionRequest(data: unknown): PermissionRequest | null {
+  if (typeof data !== 'string') return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return null;
+  }
+
+  if (typeof parsed !== 'object' || parsed === null) return null;
+
+  const frame = parsed as Record<string, unknown>;
+  if (frame.type !== 'permission-request') return null;
+
+  const { path, sessionId, requestId, toolUseId, toolName, title, input } = frame;
+
+  if (typeof path !== 'string' || path.length === 0) return null;
+  if (typeof sessionId !== 'string' || sessionId.length === 0) return null;
+  if (typeof requestId !== 'string' || requestId.length === 0) return null;
+  if (toolUseId !== null && typeof toolUseId !== 'string') return null;
+  if (typeof toolName !== 'string' || toolName.length === 0) return null;
+  if (title !== null && typeof title !== 'string') return null;
+  if (typeof input !== 'string') return null;
+
+  return Object.freeze({ path, sessionId, requestId, toolUseId, toolName, title, input });
+}
+
+/**
  * Peek the `type` discriminant of a raw frame without full validation, so
  * handleMessage can route to the right parser. Returns null for anything that
  * is not a JSON object with a string `type`. Never throws.
@@ -925,6 +1003,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
   const sessionStateListeners = new Set<SessionStateListener>();
   const sessionTranscriptListeners = new Set<SessionTranscriptListener>();
   const bridgeStateListeners = new Set<BridgeStateListener>();
+  const permissionRequestListeners = new Set<PermissionRequestListener>();
 
   let state: ClientState = {
     status: 'connecting',
@@ -981,6 +1060,10 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
 
   function emitBridgeState(path: string, bridgeState: BridgeState): void {
     for (const listener of bridgeStateListeners) listener(path, bridgeState);
+  }
+
+  function emitPermissionRequest(request: PermissionRequest): void {
+    for (const listener of permissionRequestListeners) listener(request);
   }
 
   // Write a frame only when the socket is OPEN; otherwise drop + warn (never throw).
@@ -1093,6 +1176,16 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
       return;
     }
 
+    if (type === 'permission-request') {
+      const request = parsePermissionRequest(data);
+      if (request === null) {
+        console.warn('[ws-client] dropped malformed frame:', data);
+        return;
+      }
+      emitPermissionRequest(request);
+      return;
+    }
+
     // Never throw into the app — drop and warn.
     console.warn('[ws-client] dropped malformed frame:', data);
   }
@@ -1155,6 +1248,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     sessionStateListeners.clear();
     sessionTranscriptListeners.clear();
     bridgeStateListeners.clear();
+    permissionRequestListeners.clear();
 
     if (state.reconnectHandle !== null) {
       timers.clearTimeout(state.reconnectHandle);
@@ -1238,6 +1332,14 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     sendFrame({ type: 'bridge-interrupt', path, reason });
   }
 
+  function sendPermissionDecision(
+    sessionId: string,
+    requestId: string,
+    decision: 'allow' | 'deny',
+  ): void {
+    sendFrame({ type: 'permission-decision', sessionId, requestId, decision });
+  }
+
   connect();
 
   return {
@@ -1303,6 +1405,12 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
         bridgeStateListeners.delete(listener);
       };
     },
+    onPermissionRequest: (listener) => {
+      permissionRequestListeners.add(listener);
+      return () => {
+        permissionRequestListeners.delete(listener);
+      };
+    },
     pin,
     unpin,
     discover,
@@ -1316,6 +1424,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     sendBridgeStart,
     sendGateApprove,
     sendBridgeInterrupt,
+    sendPermissionDecision,
     close,
   };
 }
