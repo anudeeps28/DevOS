@@ -2,7 +2,7 @@ import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { NeedsYouInbox } from '@/components/NeedsYouInbox';
-import type { BridgeState } from '@/lib/ws-client';
+import type { BridgeState, PermissionRequest } from '@/lib/ws-client';
 
 function bridgeState(overrides: Partial<BridgeState> = {}): BridgeState {
   return {
@@ -51,5 +51,87 @@ describe('NeedsYouInbox', () => {
     fireEvent.click(screen.getByTestId('needs-you-approve-0'));
 
     expect(onApprove).toHaveBeenCalledWith('/abs/repo');
+  });
+
+  it('renders a pending permission request with its title', () => {
+    const permission: PermissionRequest = {
+      path: '/abs/repo',
+      sessionId: 's1',
+      requestId: 'req9',
+      toolUseId: 'tu-9',
+      toolName: 'Write',
+      title: 'Write to config.json',
+      input: '{"file":"config.json"}',
+    };
+    render(<NeedsYouInbox bridgeState={null} onApprove={() => {}} permissions={[permission]} />);
+
+    const item = screen.getByTestId('needs-you-permission-req9');
+    expect(item).toBeInTheDocument();
+    expect(item).toHaveTextContent('Write to config.json');
+  });
+
+  it('calls onPermissionDecision with "allow" when the Allow button is clicked', () => {
+    const onPermissionDecision = vi.fn();
+    const permission: PermissionRequest = {
+      path: '/abs/repo',
+      sessionId: 's1',
+      requestId: 'req9',
+      toolUseId: 'tu-9',
+      toolName: 'Write',
+      title: 'Write to config.json',
+      input: '{"file":"config.json"}',
+    };
+    render(
+      <NeedsYouInbox
+        bridgeState={null}
+        onApprove={() => {}}
+        permissions={[permission]}
+        onPermissionDecision={onPermissionDecision}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId('needs-you-permission-allow-req9'));
+
+    expect(onPermissionDecision).toHaveBeenCalledWith('s1', 'req9', 'allow');
+  });
+
+  it('calls onPermissionDecision with "deny" when the Deny button is clicked', () => {
+    const onPermissionDecision = vi.fn();
+    const permission: PermissionRequest = {
+      path: '/abs/repo',
+      sessionId: 's1',
+      requestId: 'req9',
+      toolUseId: 'tu-9',
+      toolName: 'Write',
+      title: 'Write to config.json',
+      input: '{"file":"config.json"}',
+    };
+    render(
+      <NeedsYouInbox
+        bridgeState={null}
+        onApprove={() => {}}
+        permissions={[permission]}
+        onPermissionDecision={onPermissionDecision}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId('needs-you-permission-deny-req9'));
+
+    expect(onPermissionDecision).toHaveBeenCalledWith('s1', 'req9', 'deny');
+  });
+
+  it('does not show the empty-state message when permissions are present but the inbox is empty', () => {
+    const permission: PermissionRequest = {
+      path: '/abs/repo',
+      sessionId: 's1',
+      requestId: 'req9',
+      toolUseId: null,
+      toolName: 'Write',
+      title: null,
+      input: '{}',
+    };
+    render(<NeedsYouInbox bridgeState={null} onApprove={() => {}} permissions={[permission]} />);
+
+    expect(screen.queryByTestId('needs-you-inbox-empty')).not.toBeInTheDocument();
   });
 });

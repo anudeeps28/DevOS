@@ -1,6 +1,6 @@
-import { AlertCircle, HelpCircle, MessageSquareWarning } from 'lucide-react';
+import { AlertCircle, HelpCircle, MessageSquareWarning, ShieldQuestion } from 'lucide-react';
 
-import type { BridgeInboxItem, BridgeState } from '@/lib/ws-client';
+import type { BridgeInboxItem, BridgeState, PermissionRequest } from '@/lib/ws-client';
 import { cn } from '@/lib/utils';
 
 /** Icon per parked-item kind. */
@@ -23,9 +23,13 @@ function InboxIcon({ kind }: { kind: BridgeInboxItem['kind'] }): JSX.Element {
 export function NeedsYouInbox({
   bridgeState,
   onApprove,
+  permissions = [],
+  onPermissionDecision = () => {},
 }: {
   bridgeState: BridgeState | null;
   onApprove: (path: string) => void;
+  permissions?: readonly PermissionRequest[];
+  onPermissionDecision?: (sessionId: string, requestId: string, decision: 'allow' | 'deny') => void;
 }): JSX.Element {
   const inbox = bridgeState?.inbox ?? [];
 
@@ -37,7 +41,7 @@ export function NeedsYouInbox({
       <span className="text-xs font-medium uppercase tracking-widest text-muted-foreground">
         Needs you
       </span>
-      {inbox.length === 0 ? (
+      {inbox.length === 0 && permissions.length === 0 ? (
         <p
           data-testid="needs-you-inbox-empty"
           className="rounded-md border border-dashed border-border px-3 py-4 text-center text-sm text-muted-foreground"
@@ -46,6 +50,43 @@ export function NeedsYouInbox({
         </p>
       ) : (
         <ul className="flex flex-col gap-2">
+          {permissions.map((request) => (
+            <li
+              key={request.requestId}
+              data-testid={`needs-you-permission-${request.requestId}`}
+              className="flex items-start justify-between gap-2 rounded-lg border border-border bg-card p-3"
+            >
+              <div className="flex min-w-0 items-start gap-2">
+                <ShieldQuestion aria-hidden className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
+                <div className="flex min-w-0 flex-col gap-0.5">
+                  <span className="text-xs font-medium uppercase tracking-widest text-muted-foreground">
+                    permission
+                  </span>
+                  <span className="text-sm text-foreground">
+                    {request.title ?? request.toolName}
+                  </span>
+                </div>
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                <button
+                  type="button"
+                  data-testid={`needs-you-permission-allow-${request.requestId}`}
+                  onClick={() => onPermissionDecision(request.sessionId, request.requestId, 'allow')}
+                  className="rounded-md border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-accent"
+                >
+                  Allow
+                </button>
+                <button
+                  type="button"
+                  data-testid={`needs-you-permission-deny-${request.requestId}`}
+                  onClick={() => onPermissionDecision(request.sessionId, request.requestId, 'deny')}
+                  className="rounded-md border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-accent"
+                >
+                  Deny
+                </button>
+              </div>
+            </li>
+          ))}
           {inbox.map((item, index) => (
             <li
               key={`${item.stage}-${item.ts}-${index}`}

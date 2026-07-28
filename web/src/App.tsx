@@ -1,5 +1,6 @@
 import { ConnectionIndicator } from '@/components/ConnectionIndicator';
 import { Heartbeat } from '@/components/Heartbeat';
+import { NeedsYouInbox } from '@/components/NeedsYouInbox';
 import { ProjectPin } from '@/components/ProjectPin';
 import { TeamRoom } from '@/components/TeamRoom';
 import { useHeartbeat } from '@/hooks/useHeartbeat';
@@ -29,6 +30,8 @@ function App() {
     transcripts,
     sendSessionInput,
     interruptSession,
+    pendingPermissions,
+    resolvePermission,
   } = useProjects();
 
   return (
@@ -56,6 +59,16 @@ function App() {
         transcripts={transcripts}
         sendSessionInput={sendSessionInput}
         interruptSession={interruptSession}
+        pendingPermissions={pendingPermissions}
+        resolvePermission={resolvePermission}
+      />
+      <NeedsYouInbox
+        bridgeState={null}
+        onApprove={() => {}}
+        permissions={Object.values(pendingPermissions).flat()}
+        onPermissionDecision={(sessionId, requestId, decision) =>
+          resolvePermission(sessionId, requestId, decision)
+        }
       />
     </main>
   );

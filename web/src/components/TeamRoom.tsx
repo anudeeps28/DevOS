@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { AlertCircle, Bot, CheckCircle2, Gauge, MessageSquare, Wrench } from 'lucide-react';
 
-import type { SessionState, TranscriptEvent } from '@/lib/ws-client';
+import type { PermissionRequest, SessionState, TranscriptEvent } from '@/lib/ws-client';
 import { cn } from '@/lib/utils';
 
 /** Cap on inline tool input / result content so a row never dominates the panel. */
@@ -10,6 +10,47 @@ const MAX_ROW_CHARS = 200;
 /** Truncate long tool payloads for display; the full text stays in state. */
 function truncate(text: string): string {
   return text.length > MAX_ROW_CHARS ? `${text.slice(0, MAX_ROW_CHARS)}…` : text;
+}
+
+/** One allow/deny permission card for a pending request on the live session. */
+function PermissionCard({
+  request,
+  onDecide,
+}: {
+  request: PermissionRequest;
+  onDecide: (decision: 'allow' | 'deny') => void;
+}): JSX.Element {
+  return (
+    <div
+      data-testid={`permission-card-${request.requestId}`}
+      className="flex flex-col gap-2 rounded-md border border-amber-500/50 bg-amber-500/10 p-2"
+    >
+      <span className="text-sm font-medium text-foreground">
+        {request.title ?? request.toolName}
+      </span>
+      <span className="break-all font-mono text-xs text-muted-foreground">
+        {truncate(request.input)}
+      </span>
+      <div className="flex items-center gap-2">
+        <button
+          data-testid={`permission-allow-${request.requestId}`}
+          type="button"
+          onClick={() => onDecide('allow')}
+          className="rounded-md border border-border bg-primary px-3 py-1 text-xs font-medium text-primary-foreground"
+        >
+          Allow
+        </button>
+        <button
+          data-testid={`permission-deny-${request.requestId}`}
+          type="button"
+          onClick={() => onDecide('deny')}
+          className="rounded-md border border-border px-3 py-1 text-xs font-medium text-muted-foreground hover:text-foreground"
+        >
+          Deny
+        </button>
+      </div>
+    </div>
+  );
 }
 
 /**
@@ -143,11 +184,15 @@ export function TeamRoom({
   transcripts,
   sendSessionInput,
   interruptSession,
+  pendingPermissions = {},
+  resolvePermission = () => {},
 }: {
   sessions: Record<string, readonly SessionState[]>;
   transcripts: Record<string, readonly TranscriptEvent[]>;
   sendSessionInput: (sessionId: string, text: string) => void;
   interruptSession: (sessionId: string) => void;
+  pendingPermissions?: Record<string, readonly PermissionRequest[]>;
+  resolvePermission?: (sessionId: string, requestId: string, decision: 'allow' | 'deny') => void;
 }): JSX.Element {
   const live = selectLiveSession(sessions);
   const [draft, setDraft] = useState('');
@@ -193,6 +238,17 @@ export function TeamRoom({
               <TranscriptRow key={event.seq} event={event} />
             ))}
           </ul>
+          {(pendingPermissions[live.id] ?? []).length > 0 && (
+            <div data-testid="team-room-permissions" className="flex flex-col gap-2">
+              {(pendingPermissions[live.id] ?? []).map((request) => (
+                <PermissionCard
+                  key={request.requestId}
+                  request={request}
+                  onDecide={(decision) => resolvePermission(live.id, request.requestId, decision)}
+                />
+              ))}
+            </div>
+          )}
           <div className="flex flex-col gap-2 border-t border-border pt-2">
             <textarea
               data-testid="team-room-input"
