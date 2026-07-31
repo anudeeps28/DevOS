@@ -201,9 +201,29 @@ describe('createPermissionBroker', () => {
 describe('buildSessionOptions — AC3 no-bypass regression', () => {
   it('returns Options with a canUseTool function and NO bypass permissionMode', () => {
     const broker = createPermissionBroker();
-    const options = buildSessionOptions({ cwd: '/tmp/proj', role: 'shipwright' }, broker);
+    const options = buildSessionOptions(
+      { cwd: '/tmp/proj', role: 'builder', model: 'claude-opus-5[1m]', effort: 'medium' },
+      broker,
+    );
 
     expect(typeof options.canUseTool).toBe('function');
     expect(options.permissionMode).toBeUndefined();
+  });
+});
+
+describe('buildSessionOptions — AC2a model/effort pass-through', () => {
+  it('carries the roster-declared model and effort onto Options, alongside cwd/env/systemPrompt/canUseTool', () => {
+    const broker = createPermissionBroker();
+    const options = buildSessionOptions(
+      { cwd: '/tmp/proj', role: 'builder', model: 'claude-opus-5[1m]', effort: 'medium' },
+      broker,
+    );
+
+    expect(options.model).toBe('claude-opus-5[1m]');
+    expect(options.effort).toBe('medium');
+    expect(options.cwd).toBe('/tmp/proj');
+    expect(options.env).toBeDefined();
+    expect(options.systemPrompt).toBeDefined();
+    expect(typeof options.canUseTool).toBe('function');
   });
 });

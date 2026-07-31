@@ -28,70 +28,79 @@ afterEach(() => {
 });
 
 const VALID_ROSTER = JSON.stringify({
-  schemaVersion: 1,
-  pipeline: ['navigator', 'shipwright', 'lookout', 'warden', 'harbormaster'],
+  schemaVersion: 2,
+  pipeline: ['builder', 'reviewer'],
   roles: {
-    navigator: {
-      displayName: 'Navigator',
-      stages: ['decide', 'define'],
-      skills: ['grill-me'],
-      agent: 'navigator',
-      producesArtifacts: ['grill-summary.md'],
+    builder: {
+      displayName: 'Builder',
+      skills: ['implement', 'run-tasks'],
+      agent: 'builder',
+      phases: [
+        { id: 'planning', displayName: 'Navigator' },
+        { id: 'coding', displayName: 'Shipwright' },
+        { id: 'testing', displayName: 'Lookout' },
+        { id: 'shipping', displayName: 'Harbormaster' },
+      ],
+      model: 'claude-opus-5[1m]',
+      effort: 'medium',
+      producesArtifacts: [
+        'tasks/stories/<id>/plan.md',
+        'tasks/stories/<id>/phase.md',
+        'code + unit tests',
+        'pushed branch + drafted PR body',
+      ],
     },
-    shipwright: {
-      displayName: 'Shipwright',
-      stages: ['build'],
-      skills: ['implement'],
-      agent: 'shipwright',
-      producesArtifacts: ['code + unit tests'],
-    },
-    lookout: {
-      displayName: 'Lookout',
-      stages: ['test'],
-      skills: ['tdd'],
-      agent: 'lookout',
-      producesArtifacts: ['test results'],
-    },
-    warden: {
-      displayName: 'Warden',
-      stages: ['review'],
+    reviewer: {
+      displayName: 'Reviewer',
       skills: ['evaluate'],
-      agent: 'warden',
-      producesArtifacts: ['tasks/stories/<id>/evaluation.md'],
-    },
-    harbormaster: {
-      displayName: 'Harbormaster',
-      stages: ['ship'],
-      skills: ['deploy'],
-      agent: 'harbormaster',
-      producesArtifacts: ['PR'],
+      agent: 'reviewer',
+      phases: [{ id: 'reviewing', displayName: 'Warden' }],
+      model: 'claude-opus-5[1m]',
+      effort: 'high',
+      producesArtifacts: [
+        'tasks/stories/<id>/phase.md',
+        'tasks/stories/<id>/evaluation.md',
+        'tasks/stories/<id>/acceptance.md',
+        'tasks/stories/<id>/architecture-review.md',
+        'tasks/stories/<id>/security-review.md',
+      ],
     },
   },
 });
 
 describe('readRoster', () => {
-  it('parses the real repo roster to the expected 5-role pipeline', () => {
+  it('parses the real repo roster to the expected 2-role pipeline', () => {
     const roster = readRoster(REPO_ROOT);
     expect(roster).not.toBeNull();
-    expect(roster?.schemaVersion).toBe(1);
-    expect(roster?.pipeline).toEqual([
-      'navigator',
-      'shipwright',
-      'lookout',
-      'warden',
-      'harbormaster',
+    expect(roster?.schemaVersion).toBe(2);
+    expect(roster?.pipeline).toEqual(['builder', 'reviewer']);
+    expect(Object.keys(roster?.roles ?? {})).toEqual(['builder', 'reviewer']);
+    expect(roster?.roles.builder.displayName).toBe('Builder');
+    expect(roster?.roles.builder.model).toBe('claude-opus-5[1m]');
+    expect(roster?.roles.builder.effort).toBe('medium');
+    expect(roster?.roles.builder.phases).toEqual([
+      { id: 'planning', displayName: 'Navigator' },
+      { id: 'coding', displayName: 'Shipwright' },
+      { id: 'testing', displayName: 'Lookout' },
+      { id: 'shipping', displayName: 'Harbormaster' },
     ]);
-    expect(Object.keys(roster?.roles ?? {})).toEqual([
-      'navigator',
-      'shipwright',
-      'lookout',
-      'warden',
-      'harbormaster',
-    ]);
-    expect(roster?.roles.navigator.displayName).toBe('Navigator');
+    expect(roster?.roles.reviewer.model).toBe('claude-opus-5[1m]');
+    expect(roster?.roles.reviewer.effort).toBe('high');
+    expect(roster?.roles.reviewer.phases).toEqual([{ id: 'reviewing', displayName: 'Warden' }]);
     expect(Object.isFrozen(roster)).toBe(true);
     expect(Object.isFrozen(roster?.pipeline)).toBe(true);
     expect(Object.isFrozen(roster?.roles)).toBe(true);
+    expect(Object.isFrozen(roster?.roles.builder)).toBe(true);
+  });
+
+  it('parses a valid v2 roster fixture to a frozen Roster', () => {
+    const dir = makeProjectWithRoster(VALID_ROSTER);
+    const roster = readRoster(dir);
+    expect(roster).not.toBeNull();
+    expect(roster?.schemaVersion).toBe(2);
+    expect(roster?.pipeline).toEqual(['builder', 'reviewer']);
+    expect(Object.isFrozen(roster)).toBe(true);
+    expect(Object.isFrozen(roster?.roles.builder)).toBe(true);
   });
 
   it('returns null when the roster file is missing', () => {
@@ -107,22 +116,70 @@ describe('readRoster', () => {
 
   it('returns null when the pipeline contains an unknown role', () => {
     const raw = JSON.parse(VALID_ROSTER) as { pipeline: string[] };
-    const malformed = { ...raw, pipeline: [...raw.pipeline, 'captain'] };
+    const malformed = { ...raw, pipeline: [...raw.pipeline, 'shipwright'] };
     const dir = makeProjectWithRoster(JSON.stringify(malformed));
     expect(readRoster(dir)).toBeNull();
   });
 
-  it('returns null when schemaVersion does not match', () => {
+  it('returns null when schemaVersion is 1 (old roster)', () => {
     const raw = JSON.parse(VALID_ROSTER) as Record<string, unknown>;
-    const malformed = { ...raw, schemaVersion: 2 };
+    const malformed = { ...raw, schemaVersion: 1 };
     const dir = makeProjectWithRoster(JSON.stringify(malformed));
     expect(readRoster(dir)).toBeNull();
   });
 
   it('returns null when a pipeline role is missing from roles', () => {
     const raw = JSON.parse(VALID_ROSTER) as { roles: Record<string, unknown> };
-    const { harbormaster: _harbormaster, ...rest } = raw.roles;
+    const { reviewer: _reviewer, ...rest } = raw.roles;
     const malformed = { ...JSON.parse(VALID_ROSTER), roles: rest };
+    const dir = makeProjectWithRoster(JSON.stringify(malformed));
+    expect(readRoster(dir)).toBeNull();
+  });
+
+  it('returns null when a role-def is missing model', () => {
+    const raw = JSON.parse(VALID_ROSTER) as { roles: { builder: Record<string, unknown> } };
+    const { model: _model, ...rest } = raw.roles.builder;
+    const malformed = {
+      ...raw,
+      roles: { ...raw.roles, builder: rest },
+    };
+    const dir = makeProjectWithRoster(JSON.stringify(malformed));
+    expect(readRoster(dir)).toBeNull();
+  });
+
+  it('returns null when a role-def is missing effort', () => {
+    const raw = JSON.parse(VALID_ROSTER) as { roles: { builder: Record<string, unknown> } };
+    const { effort: _effort, ...rest } = raw.roles.builder;
+    const malformed = {
+      ...raw,
+      roles: { ...raw.roles, builder: rest },
+    };
+    const dir = makeProjectWithRoster(JSON.stringify(malformed));
+    expect(readRoster(dir)).toBeNull();
+  });
+
+  it('returns null when a role-def has a malformed phases entry', () => {
+    const raw = JSON.parse(VALID_ROSTER) as { roles: Record<string, Record<string, unknown>> };
+    const malformed = {
+      ...raw,
+      roles: {
+        ...raw.roles,
+        builder: { ...raw.roles.builder, phases: [{ id: 'planning' }] },
+      },
+    };
+    const dir = makeProjectWithRoster(JSON.stringify(malformed));
+    expect(readRoster(dir)).toBeNull();
+  });
+
+  it('returns null when a role-def has a bad effort value', () => {
+    const raw = JSON.parse(VALID_ROSTER) as { roles: Record<string, Record<string, unknown>> };
+    const malformed = {
+      ...raw,
+      roles: {
+        ...raw.roles,
+        builder: { ...raw.roles.builder, effort: 'ultra' },
+      },
+    };
     const dir = makeProjectWithRoster(JSON.stringify(malformed));
     expect(readRoster(dir)).toBeNull();
   });

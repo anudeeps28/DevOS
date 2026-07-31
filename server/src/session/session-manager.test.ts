@@ -162,17 +162,17 @@ describe('SessionManager', () => {
     const emissions: SessionSnapshot[] = [];
     mgr.onState((s) => emissions.push(s));
 
-    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'shipwright' });
+    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'builder' });
 
     // Engine invoked with cwd = project root and the requested role.
     expect(calls).toHaveLength(1);
     expect(calls[0]?.cwd).toBe(PROJECT);
-    expect(calls[0]?.role).toBe('shipwright');
+    expect(calls[0]?.role).toBe('builder');
 
     // Reports running + a persisted row carrying the role.
     expect(snap.status).toBe('running');
     const row = store.get(snap.id);
-    expect(row?.role).toBe('shipwright');
+    expect(row?.role).toBe('builder');
     expect(row?.status).toBe('running');
     expect(emissions.some((e) => e.id === snap.id && e.status === 'running')).toBe(true);
 
@@ -196,8 +196,8 @@ describe('SessionManager', () => {
     const query: QueryFn = () => sessions[i++] as EngineSession;
     const mgr = createSessionManager({ store, query });
 
-    const snapA = await mgr.spawn({ projectPath: PROJECT, role: 'navigator' });
-    const snapB = await mgr.spawn({ projectPath: PROJECT, role: 'lookout' });
+    const snapA = await mgr.spawn({ projectPath: PROJECT, role: 'builder' });
+    const snapB = await mgr.spawn({ projectPath: PROJECT, role: 'reviewer' });
 
     expect(snapA.id).not.toBe(snapB.id);
     const listed = mgr.list();
@@ -222,8 +222,8 @@ describe('SessionManager', () => {
     const emissions: SessionSnapshot[] = [];
     mgr.onState((s) => emissions.push(s));
 
-    const badSnap = await mgr.spawn({ projectPath: PROJECT, role: 'warden' });
-    const goodSnap = await mgr.spawn({ projectPath: PROJECT, role: 'harbormaster' });
+    const badSnap = await mgr.spawn({ projectPath: PROJECT, role: 'reviewer' });
+    const goodSnap = await mgr.spawn({ projectPath: PROJECT, role: 'reviewer' });
 
     // The bad session's generator throws — spawn already returned, must not crash.
     bad.throwError(new Error('boom'));
@@ -245,6 +245,33 @@ describe('SessionManager', () => {
     // Constructing with no query must not throw (defaults to defaultQuery).
     expect(() => createSessionManager({ store })).not.toThrow();
   });
+
+  it('AC2b — passes model/effort through to query(), defaulting when absent', async () => {
+    const store = freshStore();
+    const calls: SpawnParams[] = [];
+    const fake = makeSession();
+    const other = makeSession();
+    const sessions = [fake.session, other.session];
+    let i = 0;
+    const query: QueryFn = (params) => {
+      calls.push(params);
+      return sessions[i++] as EngineSession;
+    };
+    const mgr = createSessionManager({ store, query });
+
+    await mgr.spawn({
+      projectPath: PROJECT,
+      role: 'builder',
+      model: 'claude-opus-5[1m]',
+      effort: 'high',
+    });
+    expect(calls[0]?.model).toBe('claude-opus-5[1m]');
+    expect(calls[0]?.effort).toBe('high');
+
+    await mgr.spawn({ projectPath: PROJECT, role: 'reviewer' });
+    expect(calls[1]?.model).toBe('inherit');
+    expect(calls[1]?.effort).toBe('medium');
+  });
 });
 
 describe('SessionManager steer + interrupt', () => {
@@ -255,7 +282,7 @@ describe('SessionManager steer + interrupt', () => {
     const received: TranscriptEvent[] = [];
     mgr.onTranscript((_path, _id, events) => received.push(...events));
 
-    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'shipwright' });
+    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'builder' });
     mgr.sendInput(snap.id, 'focus on the auth module');
     await waitUntil(() => received.some((e) => e.kind === 'user-text'));
 
@@ -280,7 +307,7 @@ describe('SessionManager steer + interrupt', () => {
     const received: TranscriptEvent[] = [];
     mgr.onTranscript((_path, _id, events) => received.push(...events));
 
-    await mgr.spawn({ projectPath: PROJECT, role: 'shipwright' });
+    await mgr.spawn({ projectPath: PROJECT, role: 'builder' });
     expect(() => mgr.sendInput('does-not-exist', 'hello')).not.toThrow();
     expect(fake.sent()).toEqual([]);
     expect(received).toHaveLength(0);
@@ -297,8 +324,8 @@ describe('SessionManager steer + interrupt', () => {
     let i = 0;
     const mgr = createSessionManager({ store, query: () => sessions[i++] as EngineSession });
 
-    const badSnap = await mgr.spawn({ projectPath: PROJECT, role: 'warden' });
-    const goodSnap = await mgr.spawn({ projectPath: PROJECT, role: 'harbormaster' });
+    const badSnap = await mgr.spawn({ projectPath: PROJECT, role: 'reviewer' });
+    const goodSnap = await mgr.spawn({ projectPath: PROJECT, role: 'reviewer' });
 
     // Swap in a send that rejects — sendInput must swallow it (per-session isolation).
     (bad.session as unknown as { send: (t: string) => Promise<void> }).send = async () => {
@@ -320,7 +347,7 @@ describe('SessionManager steer + interrupt', () => {
     const fake = makeSession({ endsOnInterrupt: false });
     const mgr = createSessionManager({ store, query: () => fake.session });
 
-    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'shipwright' });
+    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'builder' });
     await mgr.interrupt(snap.id);
 
     expect(fake.interruptCount()).toBe(1);
@@ -336,7 +363,7 @@ describe('SessionManager steer + interrupt', () => {
     const fake = makeSession();
     const mgr = createSessionManager({ store, query: () => fake.session });
 
-    await mgr.spawn({ projectPath: PROJECT, role: 'shipwright' });
+    await mgr.spawn({ projectPath: PROJECT, role: 'builder' });
     await expect(mgr.interrupt('nope')).resolves.toBeUndefined();
     expect(fake.interruptCount()).toBe(0);
 
@@ -383,7 +410,7 @@ describe('SessionManager transcript', () => {
       expect(events.every((e) => e.sessionId === sessionId)).toBe(true);
     });
 
-    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'shipwright' });
+    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'builder' });
 
     fake.emitInit('sdk-t-1');
     fake.emit({
@@ -445,7 +472,7 @@ describe('SessionManager transcript', () => {
       seen += events.length;
     });
 
-    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'lookout' });
+    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'reviewer' });
     const total = 510;
     for (let n = 0; n < total; n += 1) fake.emit(assistantText(`msg-${n}`));
     await waitUntil(() => seen >= total);
@@ -472,7 +499,7 @@ describe('SessionManager transcript', () => {
       seen += events.length;
     });
 
-    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'navigator' });
+    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'builder' });
     fake.emitInit('sdk-t-2');
     fake.emit(assistantText('still here'));
     await waitUntil(() => seen >= 2);
@@ -508,8 +535,8 @@ describe('SessionManager transcript', () => {
       received.push(...events);
     });
 
-    const victimSnap = await mgr.spawn({ projectPath: PROJECT, role: 'warden' });
-    const siblingSnap = await mgr.spawn({ projectPath: PROJECT, role: 'harbormaster' });
+    const victimSnap = await mgr.spawn({ projectPath: PROJECT, role: 'reviewer' });
+    const siblingSnap = await mgr.spawn({ projectPath: PROJECT, role: 'reviewer' });
 
     // A poisoned message whose content access throws mid-normalization. (`type`
     // itself stays readable — the status-derivation path reads it too.)
@@ -561,7 +588,7 @@ describe('SessionManager transcript', () => {
       seen += events.length;
     });
 
-    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'shipwright' });
+    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'builder' });
     fake.emitInit('sdk-t-3');
     fake.emit(assistantText('TRANSCRIPT-MARKER-TEXT'));
     fake.finish();
@@ -587,7 +614,7 @@ describe('SessionManager permission relay', () => {
       received.push({ projectPath, sessionId, req });
     });
 
-    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'shipwright' });
+    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'builder' });
 
     const request: EnginePermissionRequest = {
       requestId: 'req-1',
@@ -612,7 +639,7 @@ describe('SessionManager permission relay', () => {
     const received: TranscriptEvent[] = [];
     mgr.onTranscript((_path, _id, events) => received.push(...events));
 
-    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'shipwright' });
+    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'builder' });
     fake.emitPermissionRequest({
       requestId: 'req-2',
       toolUseId: 'tu-2',
@@ -643,7 +670,7 @@ describe('SessionManager permission relay', () => {
     const fake = makeSession();
     const mgr = createSessionManager({ store, query: () => fake.session });
 
-    await mgr.spawn({ projectPath: PROJECT, role: 'shipwright' });
+    await mgr.spawn({ projectPath: PROJECT, role: 'builder' });
     expect(() => mgr.resolvePermission('does-not-exist', 'req-x', 'allow')).not.toThrow();
     expect(fake.resolvePermissionCalls()).toEqual([]);
 
@@ -658,7 +685,7 @@ describe('SessionManager permission relay', () => {
     const received: TranscriptEvent[] = [];
     mgr.onTranscript((_path, _id, events) => received.push(...events));
 
-    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'shipwright' });
+    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'builder' });
     // No request was ever raised for 'ghost-req' — a forged/stale decision must NOT reach
     // the engine and must NOT inject a phantom permission audit event.
     mgr.resolvePermission(snap.id, 'ghost-req', 'allow');
@@ -677,7 +704,7 @@ describe('SessionManager permission relay', () => {
     const received: TranscriptEvent[] = [];
     mgr.onTranscript((_path, _id, events) => received.push(...events));
 
-    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'shipwright' });
+    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'builder' });
     fake.emitPermissionRequest({
       requestId: 'req-dup',
       toolUseId: 'tu-dup',

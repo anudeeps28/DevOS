@@ -12,6 +12,7 @@
 
 import { isAbsolute } from 'node:path';
 import { isValidRole } from './session/roles.js';
+import type { Phase } from './lifecycle/story-state-reader.js';
 
 // Boundary size limits (defense-in-depth for the first client-writable surface).
 // The transport also enforces MAX_WS_PAYLOAD_BYTES via the WebSocketServer, but
@@ -156,6 +157,8 @@ export interface LifecycleSignals {
   readonly hasDefineDocs: boolean;
   /** A genuinely started tasks/stories/<id>/ (executor-state w/ Progress) (→ Build). */
   readonly hasStartedStory: boolean;
+  /** The started story's live phase.md marker (rules/phase-markers.md), or null. */
+  readonly phase: Phase | null;
   /** On a non-default branch that resolves to at least one commit (→ Build). */
   readonly hasFeatureBranchCommits: boolean;
   /** At least one release tag (→ Ship). codePlatform:none, so tags are the honest floor. */

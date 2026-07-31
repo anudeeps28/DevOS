@@ -4,11 +4,11 @@
 // `query` engine (never live Claude), pins a project carrying a real
 // `.claude/harness-roles.json` roster, opens a real `ws` client, sends
 // `{type:'bridge-start', path}`, and asserts the observable contract:
-//   AC1 — bridge-start spawns the FIRST pipeline role (navigator) and reports
+//   AC1 — bridge-start spawns the FIRST pipeline role (builder) and reports
 //         `bridge-state` with `gate:'awaiting-approval'` after it ends cleanly, with
 //         only ONE spawn/query call so far (the next role is NOT auto-spawned since
 //         auto_advance defaults OFF); `gate-approve` then advances to the SECOND
-//         pipeline role (shipwright), producing a second spawn/query call.
+//         pipeline role (reviewer), producing a second spawn/query call.
 //   AC-access — a `bridge-start` for an UNPINNED / out-of-roots path yields no spawn
 //         and the socket stays open for a valid subsequent flow (fails closed).
 //
@@ -35,18 +35,31 @@ import type { EngineMessage, EngineSession, QueryFn, SpawnParams } from '../../s
 // Self-provision a minimal valid roster fixture rather than copy the repo's
 // real `.claude/harness-roles.json` — a machine/CI-independent path (the repo
 // checks out at a different absolute path on the CI runner). Mirrors the shape
-// `readRoster` validates: schemaVersion 1, a pipeline whose every entry has a
-// matching `roles.<name>` def. The test only depends on the navigator → shipwright
-// ordering, but the full pipeline keeps the fixture faithful to production.
+// `readRoster` validates: schemaVersion 2, a pipeline whose every entry has a
+// matching `roles.<name>` def (v2 shape: phases[]/model/effort, no stages). The
+// test only depends on the builder → reviewer ordering.
 const TEST_ROSTER = {
-  schemaVersion: 1,
-  pipeline: ['navigator', 'shipwright', 'lookout', 'warden', 'harbormaster'],
+  schemaVersion: 2,
+  pipeline: ['builder', 'reviewer'],
   roles: {
-    navigator: { displayName: 'Navigator', stages: ['decide'], skills: [], agent: 'navigator', producesArtifacts: [] },
-    shipwright: { displayName: 'Shipwright', stages: ['build'], skills: [], agent: 'shipwright', producesArtifacts: [] },
-    lookout: { displayName: 'Lookout', stages: ['test'], skills: [], agent: 'lookout', producesArtifacts: [] },
-    warden: { displayName: 'Warden', stages: ['review'], skills: [], agent: 'warden', producesArtifacts: [] },
-    harbormaster: { displayName: 'Harbormaster', stages: ['ship'], skills: [], agent: 'harbormaster', producesArtifacts: [] },
+    builder: {
+      displayName: 'Builder',
+      phases: [{ id: 'coding', displayName: 'Shipwright' }],
+      skills: [],
+      agent: 'builder',
+      model: 'claude-opus-5[1m]',
+      effort: 'medium',
+      producesArtifacts: [],
+    },
+    reviewer: {
+      displayName: 'Reviewer',
+      phases: [{ id: 'reviewing', displayName: 'Warden' }],
+      skills: [],
+      agent: 'reviewer',
+      model: 'claude-opus-5[1m]',
+      effort: 'high',
+      producesArtifacts: [],
+    },
   },
 } as const;
 
@@ -246,7 +259,7 @@ afterEach(async () => {
 });
 
 describe('Bridge pipeline over the live WS transport', () => {
-  it('AC1 — bridge-start spawns navigator only, then gate-approve spawns shipwright', async () => {
+  it('AC1 — bridge-start spawns builder only, then gate-approve spawns reviewer', async () => {
     const project = makeProjectDir();
     const engine = makeFakeEngine();
     const server = await startServer(makeTmpDbPath(), engine.query);
@@ -260,23 +273,23 @@ describe('Bridge pipeline over the live WS transport', () => {
     client.send({ type: 'bridge-start', path: project });
     await awaitingApproval;
 
-    // Only the first pipeline role (navigator) was spawned so far — the next role
+    // Only the first pipeline role (builder) was spawned so far — the next role
     // must NOT be auto-spawned while auto_advance is off.
     expect(engine.calls).toHaveLength(1);
     expect(engine.calls[0]?.cwd).toBe(project);
-    expect(engine.calls[0]?.role).toBe('navigator');
+    expect(engine.calls[0]?.role).toBe('builder');
 
-    const shipwrightSpawned = client.waitForBridgeState(
-      (f) => f.path === project && f.stage === 'shipwright',
+    const reviewerSpawned = client.waitForBridgeState(
+      (f) => f.path === project && f.stage === 'reviewer',
       5000,
     );
     client.send({ type: 'gate-approve', path: project });
-    await shipwrightSpawned;
+    await reviewerSpawned;
 
-    // gate-approve advanced the pipeline to the SECOND role (shipwright).
+    // gate-approve advanced the pipeline to the SECOND role (reviewer).
     expect(engine.calls).toHaveLength(2);
     expect(engine.calls[1]?.cwd).toBe(project);
-    expect(engine.calls[1]?.role).toBe('shipwright');
+    expect(engine.calls[1]?.role).toBe('reviewer');
   }, 15000);
 
   it('AC-access — an unpinned/out-of-roots bridge-start is dropped; the socket stays up', async () => {
@@ -303,6 +316,6 @@ describe('Bridge pipeline over the live WS transport', () => {
     // The foreign bridge-start never reached the engine — only the pinned one did.
     expect(engine.calls).toHaveLength(1);
     expect(engine.calls[0]?.cwd).toBe(pinned);
-    expect(engine.calls[0]?.role).toBe('navigator');
+    expect(engine.calls[0]?.role).toBe('builder');
   }, 15000);
 });

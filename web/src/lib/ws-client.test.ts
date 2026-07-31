@@ -863,7 +863,7 @@ function sampleSessionState(id: string, path: string): SessionState {
   return {
     id,
     projectPath: path,
-    role: 'shipwright',
+    role: 'builder',
     status: 'running',
     sdkSessionId: null,
   };
@@ -940,10 +940,10 @@ describe('ws-client session-state frames', () => {
     const socket = FakeSocket.instances[0]!;
     socket.open();
 
-    client.spawnSession('/abs/repo', 'lookout', 'WI-9');
+    client.spawnSession('/abs/repo', 'reviewer', 'WI-9');
 
     expect(socket.sent).toEqual([
-      JSON.stringify({ type: 'session-spawn', path: '/abs/repo', role: 'lookout', workItemId: 'WI-9' }),
+      JSON.stringify({ type: 'session-spawn', path: '/abs/repo', role: 'reviewer', workItemId: 'WI-9' }),
     ]);
   });
 });

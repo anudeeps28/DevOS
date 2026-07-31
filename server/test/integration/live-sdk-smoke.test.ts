@@ -29,7 +29,9 @@ describe.skipIf(!LIVE)('live Agent-SDK spawn (subscription auth)', () => {
     try {
       const session = defaultQuery({
         cwd,
-        role: 'shipwright',
+        role: 'builder',
+        model: 'claude-opus-5[1m]',
+        effort: 'medium',
         prompt: 'Reply with the single word: ready.',
       });
 
@@ -70,7 +72,9 @@ describe.skipIf(!LIVE)('live Agent-SDK spawn (subscription auth)', () => {
     try {
       const session = defaultQuery({
         cwd,
-        role: 'shipwright',
+        role: 'builder',
+        model: 'claude-opus-5[1m]',
+        effort: 'medium',
         prompt: 'Wait for my next instruction; do not act until I send it.',
       });
 

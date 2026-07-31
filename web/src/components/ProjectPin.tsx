@@ -6,7 +6,7 @@ import type { GitState, LifecycleSignals, SessionState, TrackerState } from '@/l
 import { cn } from '@/lib/utils';
 
 /** Default role used by the card's one-click spawn (full role selection is a later task). */
-const DEFAULT_SPAWN_ROLE = 'shipwright';
+const DEFAULT_SPAWN_ROLE = 'builder';
 
 /** Stringify a nullable numeric field for a `data-*` attribute. */
 function attrNum(value: number | null): string {

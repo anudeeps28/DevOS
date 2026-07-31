@@ -8,12 +8,12 @@ describe('isValidRole', () => {
     for (const role of VALID_ROLES) {
       expect(isValidRole(role)).toBe(true);
     }
-    expect(VALID_ROLES).toEqual(['navigator', 'shipwright', 'lookout', 'warden', 'harbormaster']);
+    expect(VALID_ROLES).toEqual(['builder', 'reviewer']);
   });
 
   it('rejects unknown strings', () => {
-    expect(isValidRole('captain')).toBe(false);
-    expect(isValidRole('Navigator')).toBe(false); // case-sensitive
+    expect(isValidRole('shipwright')).toBe(false);
+    expect(isValidRole('Builder')).toBe(false); // case-sensitive
     expect(isValidRole('')).toBe(false);
   });
 
@@ -21,6 +21,6 @@ describe('isValidRole', () => {
     expect(isValidRole(undefined)).toBe(false);
     expect(isValidRole(null)).toBe(false);
     expect(isValidRole(42)).toBe(false);
-    expect(isValidRole({ role: 'navigator' })).toBe(false);
+    expect(isValidRole({ role: 'builder' })).toBe(false);
   });
 });

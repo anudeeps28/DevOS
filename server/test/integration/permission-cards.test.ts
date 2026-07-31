@@ -458,7 +458,7 @@ describe('permission cards over the live WS transport', () => {
     server.instance.registry.pin(project);
 
     const client = await connect(server.url);
-    const sessionId = await spawnSession(client, project, 'shipwright');
+    const sessionId = await spawnSession(client, project, 'builder');
     const broker = engine.spawns[0]?.broker;
     if (broker === undefined) throw new Error('expected a spawned session broker');
 
@@ -501,7 +501,7 @@ describe('permission cards over the live WS transport', () => {
     server.instance.registry.pin(project);
 
     const client = await connect(server.url);
-    const sessionId = await spawnSession(client, project, 'shipwright');
+    const sessionId = await spawnSession(client, project, 'builder');
     const broker = engine.spawns[0]?.broker;
     if (broker === undefined) throw new Error('expected a spawned session broker');
 
@@ -574,7 +574,7 @@ describe('permission cards over the live WS transport', () => {
     server.instance.registry.pin(project);
 
     const client = await connect(server.url);
-    const sessionId = await spawnSession(client, project, 'shipwright');
+    const sessionId = await spawnSession(client, project, 'builder');
     const broker = engine.spawns[0]?.broker;
     if (broker === undefined) throw new Error('expected a spawned session broker');
 

@@ -16,6 +16,7 @@ import { join } from 'node:path';
 
 import type { Registry } from '../registry/registry.js';
 import type { BridgeGate, BridgeInboxItem, BridgeStateSnapshot } from '../ws-protocol.js';
+import { defaultOpenPr, type OpenPrAdapter } from './pr-adapter.js';
 import type { Role } from './roles.js';
 import { readRoster, type Roster } from './roster-reader.js';
 import type { SessionManager, SessionSnapshot } from './session-manager.js';
@@ -41,12 +42,55 @@ export interface BridgeDeps {
   readonly resolveRoster?: (projectPath: string) => Roster | null;
   /** Read a stage's failure report (rework input) — defaults to a simple file read. */
   readonly readFailureReport?: (projectPath: string, stage: string) => string | null;
-  /** Max consecutive reworks before escalating instead of looping. Defaults to 2. */
+  /** Max consecutive reworks before escalating instead of looping. Defaults to 3. */
   readonly reworkLoopCap?: number;
+  /** Read the reviewer's verdict artifact — defaults to a best-effort file read; null when absent. */
+  readonly readReviewVerdict?: (
+    projectPath: string,
+    workItemId?: string,
+  ) => 'BLOCK' | 'CLEAR' | null;
+  /** Read the reviewer's findings report (BLOCK rework work order) — defaults to a file read. */
+  readonly readReviewReport?: (projectPath: string, workItemId?: string) => string | null;
+  /** Draft the PR body from the CLEAR verdict — defaults to a file read. */
+  readonly draftPrBody?: (
+    projectPath: string,
+    workItemId?: string,
+  ) => { title: string; body: string; verdicts: readonly string[]; advisories: readonly string[] } | null;
+  /** Mechanical open-PR seam invoked on a CLEAR verdict — defaults to `defaultOpenPr`. */
+  readonly openPr?: OpenPrAdapter;
 }
 
-const DEFAULT_REWORK_LOOP_CAP = 2;
+const DEFAULT_REWORK_LOOP_CAP = 3;
 const FAILURE_REPORT_REL_DIR = join('.claude', 'failure-reports');
+// The two-session handoff contract (SPEC §3.1, .claude/agents/{builder,reviewer}.md):
+// every artifact the sessions exchange lives in `tasks/stories/<id>/`, NOT in a
+// `.claude/review/` sidecar. The reviewer writes its findings + verdict into
+// `evaluation.md` (verdict token: APPROVE / CHANGES REQUIRED); the builder drafts the
+// PR body into `pr-body.md`. The Bridge reads from exactly those paths.
+const STORIES_REL_DIR = join('tasks', 'stories');
+const EVALUATION_FILE = 'evaluation.md';
+const PR_BODY_FILE = 'pr-body.md';
+
+// Cap on how much of a story artifact we read before giving up — mirrors the
+// story-state-reader byte cap; defends against a pathological repo-local file.
+const MAX_REVIEW_BYTES = 256 * 1024; // 256 KiB
+
+/** Best-effort bounded read of a `tasks/stories/<id>/<file>`. Returns null (never
+ * throws) on a missing workItemId, missing file, or any read error; caps the parsed
+ * content at MAX_REVIEW_BYTES. */
+function readStoryArtifact(
+  projectPath: string,
+  workItemId: string | undefined,
+  file: string,
+): string | null {
+  if (workItemId === undefined) return null;
+  try {
+    const raw = readFileSync(join(projectPath, STORIES_REL_DIR, workItemId, file), 'utf8');
+    return raw.slice(0, MAX_REVIEW_BYTES);
+  } catch {
+    return null;
+  }
+}
 
 /** Default `readFailureReport`: read `<projectPath>/.claude/failure-reports/<stage>.md`. */
 function defaultReadFailureReport(projectPath: string, stage: string): string | null {
@@ -57,10 +101,53 @@ function defaultReadFailureReport(projectPath: string, stage: string): string | 
   }
 }
 
+/** Default `readReviewVerdict`: parse the reviewer's verdict from
+ * `tasks/stories/<id>/evaluation.md`. The reviewer states its verdict as APPROVE
+ * (→ CLEAR) or CHANGES REQUIRED (→ BLOCK); CHANGES REQUIRED is matched first so the
+ * word "approve" appearing elsewhere in the prose can't mask a blocking verdict.
+ * Absent file / no recognizable verdict → null (defer to a human). Never throws. */
+export function defaultReadReviewVerdict(
+  projectPath: string,
+  workItemId?: string,
+): 'BLOCK' | 'CLEAR' | null {
+  const content = readStoryArtifact(projectPath, workItemId, EVALUATION_FILE);
+  if (content === null) return null;
+  if (/changes\s+required/i.test(content)) return 'BLOCK';
+  if (/\bapprove(d|s)?\b/i.test(content)) return 'CLEAR';
+  return null;
+}
+
+/** Default `readReviewReport`: the reviewer's findings in
+ * `tasks/stories/<id>/evaluation.md` — the BLOCK rework work order. Never throws. */
+export function defaultReadReviewReport(projectPath: string, workItemId?: string): string | null {
+  return readStoryArtifact(projectPath, workItemId, EVALUATION_FILE);
+}
+
+/** Default `draftPrBody`: read the builder-drafted PR body from
+ * `tasks/stories/<id>/pr-body.md` (first non-empty line, leading `#`s stripped, is
+ * the title; the whole file is the body). Only runs on a CLEAR verdict, so `verdicts`
+ * carries `CLEAR`; richer verdict/advisory extraction is left to an injected dep.
+ * Absent/titleless file → null (Bridge escalates rather than opening a blank PR).
+ * Never throws. */
+export function defaultDraftPrBody(
+  projectPath: string,
+  workItemId?: string,
+): { title: string; body: string; verdicts: readonly string[]; advisories: readonly string[] } | null {
+  const content = readStoryArtifact(projectPath, workItemId, PR_BODY_FILE);
+  if (content === null) return null;
+  const titleLine = content.split(/\r?\n/).find((l) => l.trim().length > 0) ?? '';
+  const title = titleLine.replace(/^#+\s*/, '').trim();
+  if (title.length === 0) return null;
+  return { title, body: content, verdicts: ['CLEAR'], advisories: [] };
+}
+
 /** One project's in-memory Bridge run state — the thin anchor. Never persisted. */
 interface BridgeRun {
   readonly projectPath: string;
   readonly pipeline: readonly Role[];
+  /** The roster's per-role defs — the source of each spawn's declared model + effort. */
+  readonly roles: Roster['roles'];
+  readonly workItemId?: string;
   index: number;
   currentSessionId: string | null;
   gate: BridgeGate;
@@ -81,6 +168,10 @@ export function createBridge(deps: BridgeDeps): Bridge {
   const resolveRoster = deps.resolveRoster ?? readRoster;
   const readFailureReport = deps.readFailureReport ?? defaultReadFailureReport;
   const reworkLoopCap = deps.reworkLoopCap ?? DEFAULT_REWORK_LOOP_CAP;
+  const readReviewVerdict = deps.readReviewVerdict ?? defaultReadReviewVerdict;
+  const readReviewReport = deps.readReviewReport ?? defaultReadReviewReport;
+  const draftPrBody = deps.draftPrBody ?? defaultDraftPrBody;
+  const openPr = deps.openPr ?? defaultOpenPr;
 
   const runs = new Map<string, BridgeRun>();
   const listeners = new Set<(snap: BridgeStateSnapshot) => void>();
@@ -126,14 +217,20 @@ export function createBridge(deps: BridgeDeps): Bridge {
     run: BridgeRun,
     role: Role,
     stage: string,
-    opts?: { readonly workItemId?: string; readonly prompt?: string },
+    opts?: { readonly prompt?: string },
   ): Promise<void> => {
     try {
+      // Source the declared model + effort and the work-item id from the run itself —
+      // the single choke point where every spawn (first build, reviewer advance, and
+      // every rework respawn) picks up the roster-declared model/effort and stamps
+      // the durable session row with its work item.
+      const roleDef = run.roles[role];
       const snap: SessionSnapshot = await sessionManager.spawn({
         projectPath: run.projectPath,
         role,
         currentStage: stage,
-        ...(opts?.workItemId !== undefined ? { workItemId: opts.workItemId } : {}),
+        ...(run.workItemId !== undefined ? { workItemId: run.workItemId } : {}),
+        ...(roleDef !== undefined ? { model: roleDef.model, effort: roleDef.effort } : {}),
         ...(opts?.prompt !== undefined ? { prompt: opts.prompt } : {}),
       });
       run.currentSessionId = snap.id;
@@ -159,18 +256,94 @@ export function createBridge(deps: BridgeDeps): Bridge {
     await spawnAndEmit(run, nextRole, nextRole);
   };
 
-  const handleEnded = async (run: BridgeRun): Promise<void> => {
-    const isLast = run.index >= run.pipeline.length - 1;
-    if (isLast) {
-      run.gate = 'done';
+  // The reviewer (the pipeline's last role) ended: branch on its BLOCK/CLEAR
+  // verdict rather than simply marking the run done.
+  const handleReviewVerdict = async (run: BridgeRun): Promise<void> => {
+    const verdict = readReviewVerdict(run.projectPath, run.workItemId);
+    if (verdict === 'BLOCK') {
+      const report = readReviewReport(run.projectPath, run.workItemId);
+      const buildRole = stageAt(run.pipeline, 0);
+      if (report !== null && run.reworkCount < reworkLoopCap && buildRole !== null) {
+        run.reworkCount += 1;
+        run.gate = 'reworking';
+        run.index = 0;
+        await spawnAndEmit(run, buildRole, buildRole, { prompt: report });
+        return;
+      }
+      run.gate = 'escalated';
+      run.inbox.push(
+        Object.freeze<BridgeInboxItem>({
+          stage: stageAt(run.pipeline, run.index) ?? '',
+          kind: 'escalation',
+          reason: report ?? 'Reviewer verdict BLOCK could not be recovered.',
+          ts: Date.now(),
+        }),
+      );
       emit(run);
       return;
     }
+    if (verdict === 'CLEAR') {
+      const draft = draftPrBody(run.projectPath, run.workItemId);
+      if (draft === null) {
+        run.gate = 'escalated';
+        run.inbox.push(
+          Object.freeze<BridgeInboxItem>({
+            stage: stageAt(run.pipeline, run.index) ?? '',
+            kind: 'escalation',
+            reason: 'Reviewer verdict CLEAR but no PR body could be drafted.',
+            ts: Date.now(),
+          }),
+        );
+        emit(run);
+        return;
+      }
+      let result: Awaited<ReturnType<OpenPrAdapter>>;
+      try {
+        result = await openPr({
+          projectPath: run.projectPath,
+          title: draft.title,
+          body: draft.body,
+          verdicts: draft.verdicts,
+          advisories: draft.advisories,
+          ...(run.workItemId !== undefined ? { workItemId: run.workItemId } : {}),
+        });
+      } catch (err) {
+        console.error(`[bridge] openPr adapter threw for ${run.projectPath}`, err);
+        result = { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+      if (result.ok) {
+        run.gate = 'done';
+        emit(run);
+      } else {
+        run.gate = 'escalated';
+        run.inbox.push(
+          Object.freeze<BridgeInboxItem>({
+            stage: stageAt(run.pipeline, run.index) ?? '',
+            kind: 'escalation',
+            reason: result.error,
+            ts: Date.now(),
+          }),
+        );
+        emit(run);
+      }
+      return;
+    }
+    // Null verdict: defer to a human.
+    run.gate = 'awaiting-approval';
+    emit(run);
+  };
+
+  const handleEnded = async (run: BridgeRun): Promise<void> => {
+    const isLast = run.index >= run.pipeline.length - 1;
     // An interrupt during this stage pins the run at awaiting-approval regardless
     // of auto_advance — the next `ended` must not sneak past it (AC3).
     if (run.paused) {
       run.gate = 'awaiting-approval';
       emit(run);
+      return;
+    }
+    if (isLast) {
+      await handleReviewVerdict(run);
       return;
     }
     if (readAutoAdvance(run.projectPath)) {
@@ -193,10 +366,12 @@ export function createBridge(deps: BridgeDeps): Bridge {
       return;
     }
     const report = readFailureReport(run.projectPath, stage);
-    if (report !== null && run.reworkCount < reworkLoopCap) {
+    const buildRole = stageAt(run.pipeline, 0);
+    if (report !== null && run.reworkCount < reworkLoopCap && buildRole !== null) {
       run.reworkCount += 1;
       run.gate = 'reworking';
-      await spawnAndEmit(run, 'shipwright', 'build', { prompt: report });
+      run.index = 0;
+      await spawnAndEmit(run, buildRole, buildRole, { prompt: report });
       return;
     }
     run.gate = 'escalated';
@@ -230,6 +405,8 @@ export function createBridge(deps: BridgeDeps): Bridge {
     const run: BridgeRun = {
       projectPath,
       pipeline: roster.pipeline,
+      roles: roster.roles,
+      ...(workItemId !== undefined ? { workItemId } : {}),
       index: 0,
       currentSessionId: null,
       gate: 'running',
@@ -239,9 +416,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
     };
     runs.set(projectPath, run);
 
-    void spawnAndEmit(run, firstRole, firstRole, {
-      ...(workItemId !== undefined ? { workItemId } : {}),
-    });
+    void spawnAndEmit(run, firstRole, firstRole);
   };
 
   const approveGate = (projectPath: string): void => {

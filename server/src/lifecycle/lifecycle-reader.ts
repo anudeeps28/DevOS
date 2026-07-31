@@ -59,6 +59,7 @@ function emptySignals(): LifecycleSignals {
     hasDecideDocs: false,
     hasDefineDocs: false,
     hasStartedStory: false,
+    phase: null,
     hasFeatureBranchCommits: false,
     hasReleaseTags: false,
   });
@@ -141,6 +142,7 @@ export async function readLifecycleSignals(projectPath: string): Promise<Lifecyc
       hasDecideDocs,
       hasDefineDocs,
       hasStartedStory: story.hasStartedStory,
+      phase: story.phase,
       hasFeatureBranchCommits: featureBranch,
       hasReleaseTags: releaseTags,
     });

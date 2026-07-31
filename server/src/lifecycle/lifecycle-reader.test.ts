@@ -86,6 +86,7 @@ describe('readLifecycleSignals — local-file + story signals', () => {
       hasDecideDocs: false,
       hasDefineDocs: false,
       hasStartedStory: false,
+      phase: null,
       hasFeatureBranchCommits: false,
       hasReleaseTags: false,
     });

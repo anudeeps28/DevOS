@@ -29,13 +29,13 @@ describe('SessionStore', () => {
     const row = store.insert({
       id: 'sess-1',
       projectPath: PROJECT,
-      role: 'shipwright',
+      role: 'builder',
       status: 'running',
       workItemId: 'WI-42',
       currentStage: 'build',
     });
     expect(row.id).toBe('sess-1');
-    expect(row.role).toBe('shipwright');
+    expect(row.role).toBe('builder');
     expect(row.status).toBe('running');
     expect(row.projectPath).toBe(PROJECT);
     expect(row.workItemId).toBe('WI-42');
@@ -45,7 +45,7 @@ describe('SessionStore', () => {
 
     const all = store.list();
     expect(all).toHaveLength(1);
-    expect(all[0]?.role).toBe('shipwright');
+    expect(all[0]?.role).toBe('builder');
   });
 
   it('optional fields default to null when absent', () => {
@@ -53,7 +53,7 @@ describe('SessionStore', () => {
     const row = store.insert({
       id: 'sess-min',
       projectPath: PROJECT,
-      role: 'lookout',
+      role: 'reviewer',
       status: 'running',
     });
     expect(row.workItemId).toBeNull();
@@ -63,7 +63,7 @@ describe('SessionStore', () => {
 
   it('updateStatus transitions status and captures the sdk session id', () => {
     const { store } = freshStore();
-    store.insert({ id: 'sess-2', projectPath: PROJECT, role: 'navigator', status: 'running' });
+    store.insert({ id: 'sess-2', projectPath: PROJECT, role: 'builder', status: 'running' });
 
     store.updateStatus('sess-2', 'running', 'sdk-abc-123');
     expect(store.get('sess-2')?.sdkSessionId).toBe('sdk-abc-123');
@@ -82,7 +82,7 @@ describe('SessionStore', () => {
 
   it('rejects an empty required field', () => {
     const { store } = freshStore();
-    expect(() => store.insert({ id: '', projectPath: PROJECT, role: 'warden', status: 'running' })).toThrow(
+    expect(() => store.insert({ id: '', projectPath: PROJECT, role: 'builder', status: 'running' })).toThrow(
       /session id/,
     );
     expect(() => store.insert({ id: 'x', projectPath: PROJECT, role: '', status: 'running' })).toThrow(
