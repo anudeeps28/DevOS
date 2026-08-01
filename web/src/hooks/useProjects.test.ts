@@ -52,6 +52,7 @@ function makeFakeClient() {
   const requestTrackerState = vi.fn();
   const requestLifecycleSignals = vi.fn();
   const requestSessionPersonas = vi.fn();
+  const requestWorkItemSessions = vi.fn();
   const spawnSession = vi.fn();
   const requestTranscript = vi.fn();
   const sendSessionInput = vi.fn();
@@ -114,6 +115,7 @@ function makeFakeClient() {
         sessionPersonasListener = null;
       };
     },
+    onWorkItemSessions: () => () => {},
     onSessionTranscript: (listener) => {
       sessionTranscriptListener = listener;
       return () => {
@@ -142,6 +144,7 @@ function makeFakeClient() {
     requestTrackerState,
     requestLifecycleSignals,
     requestSessionPersonas,
+    requestWorkItemSessions,
     spawnSession,
     requestTranscript,
     sendSessionInput,
@@ -162,6 +165,7 @@ function makeFakeClient() {
     requestTrackerState,
     requestLifecycleSignals,
     requestSessionPersonas,
+    requestWorkItemSessions,
     spawnSession,
     requestTranscript,
     sendSessionInput,

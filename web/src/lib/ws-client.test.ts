@@ -1091,6 +1091,8 @@ function sampleTranscriptEvents(): Record<string, unknown>[] {
         totalCostUsd: 0.05,
         inputTokens: 100,
         outputTokens: 40,
+        cacheReadInputTokens: 0,
+        cacheCreationInputTokens: 0,
         isError: false,
       },
       4,

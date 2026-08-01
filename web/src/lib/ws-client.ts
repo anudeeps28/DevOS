@@ -131,6 +131,20 @@ export interface SessionPersona {
 }
 
 /**
+ * One work item's owned session anchor. Mirrors the server's WorkItemSessionAnchor
+ * (server/src/ws-protocol.ts) — duplicated typed contract, no shared package.
+ * Frozen — never mutated after construction.
+ */
+export interface WorkItemSessionAnchor {
+  readonly id: string;
+  readonly role: string | null;
+  readonly status: string | null;
+  readonly sdkSessionId: string | null;
+  readonly currentStage: string | null;
+  readonly createdAt: number;
+}
+
+/**
  * One normalized transcript event body — the payload of a live session's SDK
  * message stream. Mirrors the server's TranscriptEventBody
  * (server/src/ws-protocol.ts, the source of truth) — duplicated typed contract,
@@ -158,6 +172,8 @@ export type TranscriptEventBody =
       readonly totalCostUsd: number;
       readonly inputTokens: number;
       readonly outputTokens: number;
+      readonly cacheReadInputTokens: number;
+      readonly cacheCreationInputTokens: number;
       readonly isError: boolean;
     }
   | { readonly kind: 'user-text'; readonly text: string }
@@ -308,6 +324,11 @@ export type SessionPersonasListener = (
   path: string,
   personas: readonly SessionPersona[],
 ) => void;
+export type WorkItemSessionsListener = (
+  path: string,
+  workItemId: string,
+  sessions: readonly WorkItemSessionAnchor[],
+) => void;
 export type SessionTranscriptListener = (
   path: string,
   sessionId: string,
@@ -340,6 +361,8 @@ export interface WsClient {
   readonly onSessionState: (listener: SessionStateListener) => () => void;
   /** Subscribe to validated session-personas snapshots. */
   readonly onSessionPersonas: (listener: SessionPersonasListener) => () => void;
+  /** Subscribe to validated work-item-sessions snapshots. */
+  readonly onWorkItemSessions: (listener: WorkItemSessionsListener) => () => void;
   /** Subscribe to validated owned-session transcript batches. */
   readonly onSessionTranscript: (listener: SessionTranscriptListener) => () => void;
   /** Subscribe to validated bridge-state snapshots. */
@@ -366,6 +389,8 @@ export interface WsClient {
   readonly requestLifecycleSignals: (path: string) => void;
   /** Request the current session-personas join for a project path; no-op (warns) when the socket is not open. */
   readonly requestSessionPersonas: (path: string) => void;
+  /** Request the current owned-session anchors for a work item; no-op (warns) when the socket is not open. */
+  readonly requestWorkItemSessions: (path: string, workItemId: string) => void;
   /** Spawn an owned session for a pinned project + role; no-op (warns) when the socket is not open. */
   readonly spawnSession: (path: string, role: string, workItemId?: string) => void;
   /** Request the buffered transcript of a live owned session; no-op (warns) when the socket is not open. */
@@ -836,6 +861,67 @@ function parseSessionPersonasSnapshot(
 }
 
 /**
+ * Validate a single raw entry against the WorkItemSessionAnchor contract:
+ * `{ id: string, role: string|null, status: string|null, sdkSessionId: string|null,
+ *    currentStage: string|null, createdAt: <finite number> }`.
+ * Returns a frozen WorkItemSessionAnchor, or null for anything malformed.
+ */
+function parseWorkItemSessionAnchor(entry: unknown): WorkItemSessionAnchor | null {
+  if (typeof entry !== 'object' || entry === null) return null;
+
+  const record = entry as Record<string, unknown>;
+  const { id, role, status, sdkSessionId, currentStage, createdAt } = record;
+
+  if (typeof id !== 'string' || id.length === 0) return null;
+  if (role !== null && typeof role !== 'string') return null;
+  if (status !== null && typeof status !== 'string') return null;
+  if (sdkSessionId !== null && typeof sdkSessionId !== 'string') return null;
+  if (currentStage !== null && typeof currentStage !== 'string') return null;
+  if (typeof createdAt !== 'number' || !Number.isFinite(createdAt)) return null;
+
+  return Object.freeze({ id, role, status, sdkSessionId, currentStage, createdAt });
+}
+
+/**
+ * Validate a raw WS frame against the pinned work-item-sessions contract:
+ * `{ type: 'work-item-sessions', path: string, workItemId: string, sessions: WorkItemSessionAnchor[] }`.
+ * Returns a frozen `{ path, workItemId, sessions }`, or null for anything malformed.
+ */
+function parseWorkItemSessionsSnapshot(
+  data: unknown,
+): { path: string; workItemId: string; sessions: readonly WorkItemSessionAnchor[] } | null {
+  if (typeof data !== 'string') return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return null;
+  }
+
+  if (typeof parsed !== 'object' || parsed === null) return null;
+
+  const frame = parsed as Record<string, unknown>;
+  if (frame.type !== 'work-item-sessions') return null;
+  if (typeof frame.path !== 'string' || frame.path.length === 0) return null;
+  if (typeof frame.workItemId !== 'string' || frame.workItemId.length === 0) return null;
+  if (!Array.isArray(frame.sessions)) return null;
+
+  const sessions: WorkItemSessionAnchor[] = [];
+  for (const entry of frame.sessions) {
+    const session = parseWorkItemSessionAnchor(entry);
+    if (session === null) return null;
+    sessions.push(session);
+  }
+
+  return Object.freeze({
+    path: frame.path,
+    workItemId: frame.workItemId,
+    sessions: Object.freeze(sessions),
+  });
+}
+
+/**
  * Validate a raw WS frame against the pinned session-state contract:
  * `{ type: 'session-state', path: string, session: SessionState }`.
  * Returns a frozen `{ path, session }`, or null for anything malformed.
@@ -915,13 +1001,24 @@ function parseTranscriptEvent(entry: unknown): TranscriptEvent | null {
   }
 
   if (kind === 'result') {
-    const { durationMs, numTurns, totalCostUsd, inputTokens, outputTokens, isError } = record;
+    const {
+      durationMs,
+      numTurns,
+      totalCostUsd,
+      inputTokens,
+      outputTokens,
+      cacheReadInputTokens,
+      cacheCreationInputTokens,
+      isError,
+    } = record;
     if (typeof durationMs !== 'number' || !Number.isFinite(durationMs)) return null;
     if (typeof numTurns !== 'number' || !Number.isFinite(numTurns)) return null;
     if (typeof totalCostUsd !== 'number' || !Number.isFinite(totalCostUsd)) return null;
     if (typeof inputTokens !== 'number' || !Number.isFinite(inputTokens)) return null;
     if (typeof outputTokens !== 'number' || !Number.isFinite(outputTokens)) return null;
     if (typeof isError !== 'boolean') return null;
+    // Cache-token fields are newer than the rest of the result shape — coerce
+    // absent/non-finite values to 0 rather than rejecting the whole frame.
     return Object.freeze<TranscriptEvent>({
       kind: 'result',
       durationMs,
@@ -929,6 +1026,14 @@ function parseTranscriptEvent(entry: unknown): TranscriptEvent | null {
       totalCostUsd,
       inputTokens,
       outputTokens,
+      cacheReadInputTokens:
+        typeof cacheReadInputTokens === 'number' && Number.isFinite(cacheReadInputTokens)
+          ? cacheReadInputTokens
+          : 0,
+      cacheCreationInputTokens:
+        typeof cacheCreationInputTokens === 'number' && Number.isFinite(cacheCreationInputTokens)
+          ? cacheCreationInputTokens
+          : 0,
       isError,
       ...stamp,
     });
@@ -1230,6 +1335,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
   const lifecycleSignalsListeners = new Set<LifecycleSignalsListener>();
   const sessionStateListeners = new Set<SessionStateListener>();
   const sessionPersonasListeners = new Set<SessionPersonasListener>();
+  const workItemSessionsListeners = new Set<WorkItemSessionsListener>();
   const sessionTranscriptListeners = new Set<SessionTranscriptListener>();
   const bridgeStateListeners = new Set<BridgeStateListener>();
   const permissionRequestListeners = new Set<PermissionRequestListener>();
@@ -1284,6 +1390,14 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
 
   function emitSessionPersonas(path: string, personas: readonly SessionPersona[]): void {
     for (const listener of sessionPersonasListeners) listener(path, personas);
+  }
+
+  function emitWorkItemSessions(
+    path: string,
+    workItemId: string,
+    sessions: readonly WorkItemSessionAnchor[],
+  ): void {
+    for (const listener of workItemSessionsListeners) listener(path, workItemId, sessions);
   }
 
   function emitSessionTranscript(
@@ -1414,6 +1528,16 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
       return;
     }
 
+    if (type === 'work-item-sessions') {
+      const snapshot = parseWorkItemSessionsSnapshot(data);
+      if (snapshot === null) {
+        console.warn('[ws-client] dropped malformed frame:', data);
+        return;
+      }
+      emitWorkItemSessions(snapshot.path, snapshot.workItemId, snapshot.sessions);
+      return;
+    }
+
     if (type === 'session-transcript') {
       const snapshot = parseSessionTranscriptSnapshot(data);
       if (snapshot === null) {
@@ -1535,6 +1659,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     lifecycleSignalsListeners.clear();
     sessionStateListeners.clear();
     sessionPersonasListeners.clear();
+    workItemSessionsListeners.clear();
     sessionTranscriptListeners.clear();
     bridgeStateListeners.clear();
     permissionRequestListeners.clear();
@@ -1589,6 +1714,10 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
 
   function requestSessionPersonas(path: string): void {
     sendFrame({ type: 'session-personas', path });
+  }
+
+  function requestWorkItemSessions(path: string, workItemId: string): void {
+    sendFrame({ type: 'work-item-sessions-request', path, workItemId });
   }
 
   function spawnSession(path: string, role: string, workItemId?: string): void {
@@ -1695,6 +1824,12 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
         sessionPersonasListeners.delete(listener);
       };
     },
+    onWorkItemSessions: (listener) => {
+      workItemSessionsListeners.add(listener);
+      return () => {
+        workItemSessionsListeners.delete(listener);
+      };
+    },
     onSessionTranscript: (listener) => {
       sessionTranscriptListeners.add(listener);
       return () => {
@@ -1738,6 +1873,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     requestTrackerState,
     requestLifecycleSignals,
     requestSessionPersonas,
+    requestWorkItemSessions,
     spawnSession,
     requestTranscript,
     sendSessionInput,

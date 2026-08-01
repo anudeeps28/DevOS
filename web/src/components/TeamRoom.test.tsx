@@ -1,8 +1,13 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
-import { TeamRoom } from '@/components/TeamRoom';
-import type { PermissionRequest, SessionState, TranscriptEvent } from '@/lib/ws-client';
+import { selectLiveSession, TeamRoom } from '@/components/TeamRoom';
+import type {
+  PermissionRequest,
+  SessionState,
+  TranscriptEvent,
+  WorkItemSessionAnchor,
+} from '@/lib/ws-client';
 
 /** Render TeamRoom, defaulting the two sender props so tests opt in only when needed. */
 function renderRoom(
@@ -13,6 +18,7 @@ function renderRoom(
     interruptSession?: (sessionId: string) => void;
     pendingPermissions?: Record<string, readonly PermissionRequest[]>;
     resolvePermission?: (sessionId: string, requestId: string, decision: 'allow' | 'deny') => void;
+    workItemSessions?: Record<string, readonly WorkItemSessionAnchor[]>;
   } = {},
 ): void {
   render(
@@ -27,19 +33,33 @@ function renderRoom(
       {...(senders.resolvePermission !== undefined
         ? { resolvePermission: senders.resolvePermission }
         : {})}
+      {...(senders.workItemSessions !== undefined
+        ? { workItemSessions: senders.workItemSessions }
+        : {})}
     />,
   );
 }
 
-function runningSession(id: string, path = '/abs/one'): SessionState {
+function runningSession(id: string, path = '/abs/one', workItemId: string | null = null): SessionState {
   return {
     id,
     projectPath: path,
     role: 'builder',
     status: 'running',
     sdkSessionId: null,
-    workItemId: null,
+    workItemId,
     rateLimited: false,
+  };
+}
+
+function workItemAnchor(id: string): WorkItemSessionAnchor {
+  return {
+    id,
+    role: 'builder',
+    status: 'ended',
+    sdkSessionId: null,
+    currentStage: null,
+    createdAt: 1700000000000,
   };
 }
 
@@ -61,6 +81,8 @@ function fixtureEvents(): readonly TranscriptEvent[] {
       totalCostUsd: 0.0521,
       inputTokens: 100,
       outputTokens: 42,
+      cacheReadInputTokens: 0,
+      cacheCreationInputTokens: 0,
       isError: false,
       ...stamp(4),
     },
@@ -261,5 +283,102 @@ describe('TeamRoom', () => {
     renderRoom({ '/abs/one': [runningSession('sess-1')] }, {}, { pendingPermissions: {} });
 
     expect(screen.queryByTestId(/^permission-card-/)).not.toBeInTheDocument();
+  });
+
+  it('selectLiveSession scopes to the bound work item even when a different-item session is the global last-running', () => {
+    const sessions = {
+      '/abs/one': [
+        runningSession('sess-1', '/abs/one', 'wi-42'),
+        runningSession('sess-2', '/abs/one', 'wi-other'),
+      ],
+    };
+
+    expect(selectLiveSession(sessions, 'wi-42')?.id).toBe('sess-1');
+  });
+
+  it('AC2: selecting a work item scopes the room to that item, even when a different work item is the global last-running', () => {
+    renderRoom({
+      '/abs/one': [
+        runningSession('sess-1', '/abs/one', 'wi-42'),
+        runningSession('sess-2', '/abs/one', 'wi-other'),
+      ],
+    }, {});
+
+    // Default (no selection yet) falls back to the global last-running session.
+    expect(screen.getByTestId('team-room-session-sess-2')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('team-room-work-item-wi-42'));
+
+    expect(screen.getByTestId('team-room-session-sess-1')).toBeInTheDocument();
+    expect(screen.queryByTestId('team-room-session-sess-2')).not.toBeInTheDocument();
+  });
+
+  it('with no bound work item, behavior is unchanged (most recent running session wins)', () => {
+    expect(
+      selectLiveSession({
+        '/abs/one': [
+          runningSession('sess-1', '/abs/one', 'wi-42'),
+          runningSession('sess-2', '/abs/one', 'wi-other'),
+        ],
+      })?.id,
+    ).toBe('sess-2');
+  });
+
+  it('shows the recycled continuity line when the selected work item has no live session but has past sessions', () => {
+    renderRoom(
+      { '/abs/one': [runningSession('sess-1', '/abs/one', 'wi-other')] },
+      {},
+      {
+        workItemSessions: { 'wi-42': [workItemAnchor('sess-a'), workItemAnchor('sess-b')] },
+      },
+    );
+
+    fireEvent.click(screen.getByTestId('team-room-work-item-wi-42'));
+
+    expect(screen.queryByTestId('team-room-empty')).not.toBeInTheDocument();
+    const recycled = screen.getByTestId('team-room-recycled');
+    expect(recycled).toBeInTheDocument();
+    expect(recycled).toHaveTextContent('recycled — 2 sessions served this item');
+  });
+
+  it('shows the blank empty state when the selected work item has no live session and no past sessions', () => {
+    renderRoom({}, {}, { workItemSessions: { 'wi-42': [] } });
+
+    fireEvent.click(screen.getByTestId('team-room-work-item-wi-42'));
+
+    expect(screen.getByTestId('team-room-empty')).toBeInTheDocument();
+    expect(screen.queryByTestId('team-room-recycled')).not.toBeInTheDocument();
+  });
+
+  it('AC3: after the selected work item\'s running session ends, the continuity line renders from real (sticky) selection state, not an injected boundWorkItemId prop', () => {
+    const { rerender } = render(
+      <TeamRoom
+        sessions={{ '/abs/one': [runningSession('sess-1', '/abs/one', 'wi-42')] }}
+        transcripts={{}}
+        sendSessionInput={() => {}}
+        interruptSession={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId('team-room-work-item-wi-42'));
+    expect(screen.getByTestId('team-room-session-sess-1')).toBeInTheDocument();
+
+    // The selected work item's session ends (recycled/reopened) — the sticky
+    // selection must survive this re-render since it lives in component state.
+    const ended: SessionState = { ...runningSession('sess-1', '/abs/one', 'wi-42'), status: 'ended' };
+    rerender(
+      <TeamRoom
+        sessions={{ '/abs/one': [ended] }}
+        transcripts={{}}
+        sendSessionInput={() => {}}
+        interruptSession={() => {}}
+        workItemSessions={{ 'wi-42': [workItemAnchor('sess-a'), workItemAnchor('sess-b')] }}
+      />,
+    );
+
+    expect(screen.queryByTestId('team-room-session-sess-1')).not.toBeInTheDocument();
+    const recycled = screen.getByTestId('team-room-recycled');
+    expect(recycled).toBeInTheDocument();
+    expect(recycled).toHaveTextContent('recycled — 2 sessions served this item');
   });
 });

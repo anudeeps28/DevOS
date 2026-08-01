@@ -108,6 +108,10 @@ function makeControllableSession(): { session: EngineSession; emit: (message: En
     send: async (): Promise<void> => {},
     onPermissionRequest: (): void => {},
     resolvePermission: (): void => {},
+    end: (): void => {
+      done = true;
+      wake();
+    },
   });
 
   return {

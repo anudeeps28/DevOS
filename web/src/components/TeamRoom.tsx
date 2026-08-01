@@ -1,7 +1,12 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { AlertCircle, Bot, CheckCircle2, Gauge, MessageSquare, Wrench } from 'lucide-react';
 
-import type { PermissionRequest, SessionState, TranscriptEvent } from '@/lib/ws-client';
+import type {
+  PermissionRequest,
+  SessionState,
+  TranscriptEvent,
+  WorkItemSessionAnchor,
+} from '@/lib/ws-client';
 import { cn } from '@/lib/utils';
 
 /** Cap on inline tool input / result content so a row never dominates the panel. */
@@ -54,19 +59,42 @@ function PermissionCard({
 }
 
 /**
- * Pick the session the room shows: the most recent running session across all
- * projects (last-arrived wins, matching the hook's append-on-upsert ordering).
+ * Pick the session the room shows. With no `boundWorkItemId`, this is the most
+ * recent running session across all projects (last-arrived wins, matching the
+ * hook's append-on-upsert ordering) — the original, project-scoped behavior.
+ * With a `boundWorkItemId`, the room is work-item-scoped: only the most recent
+ * running session whose `workItemId` matches is eligible.
  */
-function selectLiveSession(
+export function selectLiveSession(
   sessions: Record<string, readonly SessionState[]>,
+  boundWorkItemId?: string | null,
 ): SessionState | null {
   let selected: SessionState | null = null;
   for (const sessionList of Object.values(sessions)) {
     for (const session of sessionList) {
-      if (session.status === 'running') selected = session;
+      if (session.status !== 'running') continue;
+      if (boundWorkItemId != null && session.workItemId !== boundWorkItemId) continue;
+      selected = session;
     }
   }
   return selected;
+}
+
+/**
+ * Map every known work item to the projectPath of a session that has surfaced
+ * it. Used to remember a work item's owning project even after its live
+ * session ends, so a recycled-reopen request can still be issued for it.
+ */
+function collectWorkItemProjectPaths(
+  sessions: Record<string, readonly SessionState[]>,
+): Record<string, string> {
+  const paths: Record<string, string> = {};
+  for (const sessionList of Object.values(sessions)) {
+    for (const session of sessionList) {
+      if (session.workItemId !== null) paths[session.workItemId] = session.projectPath;
+    }
+  }
+  return paths;
 }
 
 /** One transcript row, rendered per event kind. Render-only. */
@@ -175,9 +203,14 @@ function TranscriptRow({ event }: { event: TranscriptEvent }): JSX.Element | nul
 }
 
 /**
- * Team room — a live window into the selected (most recent running) owned
- * session's transcript. Render-only: state lives in useProjects; the parent
- * feeds `sessions` + `transcripts` as props. Empty state when no live session.
+ * Team room — a live window into the selected owned session's transcript.
+ * Render-only for `sessions` + `transcripts` (state lives in useProjects), but
+ * owns one piece of local state itself: which work item the user has stickily
+ * selected. That selection is independent of whether the item currently has a
+ * running session — it stays bound to a recycled/reopened work item so the
+ * "recycled — N sessions served this item" continuity line is reachable
+ * through real user interaction, not just directly-injected props. With no
+ * selection, the room falls back to the most-recent-running-session default.
  */
 export function TeamRoom({
   sessions,
@@ -186,6 +219,9 @@ export function TeamRoom({
   interruptSession,
   pendingPermissions = {},
   resolvePermission = () => {},
+  workItemSessions = {},
+  requestWorkItemSessions,
+  connected,
 }: {
   sessions: Record<string, readonly SessionState[]>;
   transcripts: Record<string, readonly TranscriptEvent[]>;
@@ -193,9 +229,53 @@ export function TeamRoom({
   interruptSession: (sessionId: string) => void;
   pendingPermissions?: Record<string, readonly PermissionRequest[]>;
   resolvePermission?: (sessionId: string, requestId: string, decision: 'allow' | 'deny') => void;
+  workItemSessions?: Record<string, readonly WorkItemSessionAnchor[]>;
+  requestWorkItemSessions?: (path: string, workItemId: string) => void;
+  connected?: boolean;
 }): JSX.Element {
-  const live = selectLiveSession(sessions);
+  const [selectedWorkItemId, setSelectedWorkItemId] = useState<string | null>(null);
+  const [knownWorkItemPaths, setKnownWorkItemPaths] = useState<Record<string, string>>({});
   const [draft, setDraft] = useState('');
+
+  // Remember every work item's owning projectPath as sessions surface it, so
+  // the path is still known once its live session ends (recycled-reopen).
+  useEffect(() => {
+    const observed = collectWorkItemProjectPaths(sessions);
+    setKnownWorkItemPaths((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const [workItemId, path] of Object.entries(observed)) {
+        if (next[workItemId] !== path) {
+          next[workItemId] = path;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [sessions]);
+
+  const boundWorkItemId = selectedWorkItemId ?? selectLiveSession(sessions)?.workItemId ?? null;
+  const boundProjectPath =
+    selectLiveSession(sessions, boundWorkItemId)?.projectPath ??
+    (boundWorkItemId !== null ? knownWorkItemPaths[boundWorkItemId] : undefined) ??
+    null;
+
+  // (Re)request the bound work item's owned-session anchors whenever the
+  // binding changes or the socket (re)connects — including when it currently
+  // has no running session, which is exactly the recycled-reopen request.
+  useEffect(() => {
+    if (requestWorkItemSessions === undefined) return;
+    if (boundWorkItemId === null || boundProjectPath === null) return;
+    if (connected === false) return;
+    requestWorkItemSessions(boundProjectPath, boundWorkItemId);
+  }, [boundWorkItemId, boundProjectPath, connected, requestWorkItemSessions]);
+
+  const knownWorkItemIds = Array.from(
+    new Set([...Object.keys(knownWorkItemPaths), ...Object.keys(workItemSessions)]),
+  ).sort();
+
+  const live = selectLiveSession(sessions, boundWorkItemId);
+  const boundWorkItemSessions = boundWorkItemId !== null ? workItemSessions[boundWorkItemId] ?? [] : [];
 
   // Steer the live session with the trimmed draft, then clear the field. Guarded so
   // an empty draft or a vanished session is a no-op.
@@ -214,13 +294,43 @@ export function TeamRoom({
       <span className="text-xs font-medium uppercase tracking-widest text-muted-foreground">
         Team room
       </span>
+      {knownWorkItemIds.length > 0 && (
+        <div data-testid="team-room-work-items" className="flex flex-wrap gap-1.5">
+          {knownWorkItemIds.map((workItemId) => (
+            <button
+              key={workItemId}
+              type="button"
+              data-testid={`team-room-work-item-${workItemId}`}
+              onClick={() => setSelectedWorkItemId(workItemId)}
+              aria-pressed={boundWorkItemId === workItemId}
+              className={cn(
+                'rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-widest',
+                boundWorkItemId === workItemId
+                  ? 'border-primary bg-primary/10 text-primary'
+                  : 'border-border text-muted-foreground hover:text-foreground',
+              )}
+            >
+              {workItemId}
+            </button>
+          ))}
+        </div>
+      )}
       {live === null ? (
-        <p
-          data-testid="team-room-empty"
-          className="rounded-md border border-dashed border-border px-3 py-4 text-center text-sm text-muted-foreground"
-        >
-          No live session — spawn one from a pinned project.
-        </p>
+        boundWorkItemId !== null && boundWorkItemSessions.length > 0 ? (
+          <p
+            data-testid="team-room-recycled"
+            className="rounded-md border border-dashed border-border px-3 py-4 text-center text-sm text-muted-foreground"
+          >
+            recycled — {boundWorkItemSessions.length} sessions served this item
+          </p>
+        ) : (
+          <p
+            data-testid="team-room-empty"
+            className="rounded-md border border-dashed border-border px-3 py-4 text-center text-sm text-muted-foreground"
+          >
+            No live session — spawn one from a pinned project.
+          </p>
+        )
       ) : (
         <div
           data-testid={`team-room-session-${live.id}`}

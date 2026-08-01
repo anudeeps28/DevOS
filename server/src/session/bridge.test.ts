@@ -28,14 +28,17 @@ const PROJECT = '/tmp/devos-bridge-project';
 /** A controllable fake EngineSession: push any message, end, or throw on demand. */
 function makeSession(): {
   session: EngineSession;
+  emit: (message: EngineMessage) => void;
   emitInit: (sessionId: string) => void;
   finish: () => void;
   throwError: (err: unknown) => void;
+  ended: () => boolean;
 } {
   const buffer: EngineMessage[] = [];
   let resolveNext: (() => void) | null = null;
   let done = false;
   let error: unknown = null;
+  let endCalled = false;
 
   const wake = (): void => {
     if (resolveNext !== null) {
@@ -69,10 +72,19 @@ function makeSession(): {
     send: async (): Promise<void> => {},
     onPermissionRequest: (): void => {},
     resolvePermission: (): void => {},
+    end: (): void => {
+      endCalled = true;
+      done = true;
+      wake();
+    },
   });
 
   return {
     session,
+    emit: (message) => {
+      buffer.push(message);
+      wake();
+    },
     emitInit: (sessionId) => {
       buffer.push({ type: 'system', subtype: 'init', session_id: sessionId });
       wake();
@@ -85,6 +97,19 @@ function makeSession(): {
       error = err;
       wake();
     },
+    ended: () => endCalled,
+  };
+}
+
+/** A `result` engine message carrying the given cost/usage metrics. */
+function resultMessage(inputTokens: number): EngineMessage {
+  return {
+    type: 'result',
+    duration_ms: 100,
+    num_turns: 1,
+    total_cost_usd: 0.05,
+    usage: { input_tokens: inputTokens, output_tokens: 20 },
+    is_error: false,
   };
 }
 
@@ -515,6 +540,113 @@ describe('Bridge', () => {
     expect(queryFactory.calls[1]?.role).toBe('reviewer');
     expect(queryFactory.calls[1]?.model).toBe('claude-opus-5[1m]');
     expect(queryFactory.calls[1]?.effort).toBe('high');
+  });
+});
+
+// A roster whose builder carries the big-window model, so a single result crossing
+// 850_000 input tokens crosses the 80% context-usage threshold (context-watcher.ts).
+const BIG_MODEL = 'claude-opus-4-8[1m]';
+const ROSTER_BIG_WINDOW: Roster = Object.freeze({
+  schemaVersion: 2,
+  pipeline: Object.freeze(['builder', 'reviewer'] as const) as readonly Role[],
+  roles: Object.freeze({
+    builder: { ...ROLE_DEF('builder'), model: BIG_MODEL },
+    reviewer: ROLE_DEF('reviewer'),
+  }),
+} as Roster);
+
+describe('Bridge context-recycle respawn', () => {
+  it('under the cap: respawns the same-stage session with a resume prompt, ends the old session, and moves currentSessionId', async () => {
+    const { sessionManager, registry, queryFactory } = freshEnv();
+    const bridge = createBridge({ sessionManager, registry, resolveRoster: () => ROSTER_BIG_WINDOW });
+
+    bridge.start(PROJECT, 'WORK-CTX');
+    await waitUntil(() => queryFactory.calls.length === 1);
+    expect(queryFactory.calls[0]?.role).toBe('builder');
+
+    const builder = queryFactory.sessionAt(0);
+    builder.emitInit('sdk-builder-ctx-1');
+    const firstSessionId = bridge.getState(PROJECT)?.sessionId;
+    expect(firstSessionId).toBeTruthy();
+
+    // Crosses 80% of the 1M-token window (850_000 / 1_000_000 = 0.85).
+    builder.emit(resultMessage(850_000));
+
+    await waitUntil(() => queryFactory.calls.length === 2);
+    expect(queryFactory.calls[1]?.role).toBe('builder');
+    expect(queryFactory.calls[1]?.prompt).toContain('context-recycle RESUME');
+
+    const newSessionId = bridge.getState(PROJECT)?.sessionId;
+    expect(newSessionId).not.toBe(firstSessionId);
+    await waitUntil(() => builder.ended());
+    expect(builder.ended()).toBe(true);
+
+    // Release the respawned session's slot so it doesn't linger held for other tests.
+    queryFactory.sessionAt(1).finish();
+  });
+
+  it('at/after the cap: the next crossing escalates instead of respawning again', async () => {
+    const { sessionManager, registry, queryFactory } = freshEnv();
+    const bridge = createBridge({
+      sessionManager,
+      registry,
+      resolveRoster: () => ROSTER_BIG_WINDOW,
+      contextRespawnCap: 1,
+    });
+
+    bridge.start(PROJECT, 'WORK-CTX-CAP');
+    await waitUntil(() => queryFactory.calls.length === 1);
+
+    const first = queryFactory.sessionAt(0);
+    first.emitInit('sdk-builder-cap-1');
+    first.emit(resultMessage(850_000));
+
+    // First crossing respawns (contextRespawnCount 0 -> 1, under cap 1).
+    await waitUntil(() => queryFactory.calls.length === 2);
+    expect(queryFactory.calls[1]?.role).toBe('builder');
+
+    const second = queryFactory.sessionAt(1);
+    second.emitInit('sdk-builder-cap-2');
+    second.emit(resultMessage(900_000));
+
+    // Second crossing: contextRespawnCount (1) is no longer < cap (1) — escalate.
+    await waitUntil(() => bridge.getState(PROJECT)?.gate === 'escalated');
+    expect(queryFactory.calls).toHaveLength(2); // no third spawn
+    expect(bridge.getInbox(PROJECT)).toHaveLength(1);
+    expect(bridge.getInbox(PROJECT)[0]).toMatchObject({
+      kind: 'escalation',
+      reason: 'task too big — split it',
+    });
+
+    // Release the second session's slot so it doesn't linger held for other tests.
+    second.finish();
+  });
+
+  it("the recycled (old) session's ended does not advance the pipeline index", async () => {
+    const { sessionManager, registry, queryFactory } = freshEnv();
+    const bridge = createBridge({ sessionManager, registry, resolveRoster: () => ROSTER_BIG_WINDOW });
+
+    bridge.start(PROJECT, 'WORK-CTX-RECYCLE');
+    await waitUntil(() => queryFactory.calls.length === 1);
+
+    const oldSession = queryFactory.sessionAt(0);
+    oldSession.emitInit('sdk-builder-recycle-1');
+    oldSession.emit(resultMessage(850_000));
+
+    await waitUntil(() => queryFactory.calls.length === 2);
+    expect(bridge.getState(PROJECT)?.stage).toBe('builder');
+    const stateBeforeOldEnd = bridge.getState(PROJECT);
+
+    // The OLD session's stream now finishes naturally (endAtBoundary already closed it).
+    // Its 'ended' state no longer correlates to the run's currentSessionId, so it must
+    // not trigger any pipeline advance.
+    await waitUntil(() => oldSession.ended());
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(queryFactory.calls).toHaveLength(2); // no further spawn (e.g. reviewer)
+    expect(bridge.getState(PROJECT)?.stage).toBe('builder');
+    expect(bridge.getState(PROJECT)?.sessionId).toBe(stateBeforeOldEnd?.sessionId);
+    expect(bridge.getState(PROJECT)?.gate).not.toBe('done');
   });
 });
 

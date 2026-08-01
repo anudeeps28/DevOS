@@ -89,6 +89,33 @@ describe('SessionStore', () => {
       /role/,
     );
   });
+
+  it('listByWorkItem returns rows for one work item in created_at order', () => {
+    const { store } = freshStore();
+    store.insert({ id: 'sess-a', projectPath: PROJECT, role: 'builder', status: 'running', workItemId: 'WI-1' });
+    store.insert({ id: 'sess-b', projectPath: PROJECT, role: 'reviewer', status: 'running', workItemId: 'WI-1' });
+    store.insert({ id: 'sess-c', projectPath: PROJECT, role: 'builder', status: 'running', workItemId: 'WI-2' });
+
+    const rows = store.listByWorkItem('WI-1', PROJECT);
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.id)).toEqual(['sess-a', 'sess-b']);
+  });
+
+  it('listByWorkItem returns an empty array for an unknown work item', () => {
+    const { store } = freshStore();
+    store.insert({ id: 'sess-d', projectPath: PROJECT, role: 'builder', status: 'running', workItemId: 'WI-1' });
+    expect(store.listByWorkItem('WI-unknown', PROJECT)).toEqual([]);
+  });
+
+  it('listByWorkItem scopes to the project — same work-item id in another project is not returned', () => {
+    const { store, db } = freshStore();
+    const OTHER = '/tmp/devos-store-other';
+    createRegistry(db).pin(OTHER); // seed the second project anchor so its FK is satisfied
+    store.insert({ id: 'sess-here', projectPath: PROJECT, role: 'builder', status: 'running', workItemId: 'WI-42' });
+    store.insert({ id: 'sess-there', projectPath: OTHER, role: 'builder', status: 'running', workItemId: 'WI-42' });
+    const rows = store.listByWorkItem('WI-42', PROJECT);
+    expect(rows.map((r) => r.id)).toEqual(['sess-here']);
+  });
 });
 
 describe('additive migration (sessions.role)', () => {

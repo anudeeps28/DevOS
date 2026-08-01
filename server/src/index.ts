@@ -99,6 +99,7 @@ export function createServer(options?: CreateServerOptions): DevOsServer {
   const gateway = attachWsGateway(server, {
     registry,
     sessionManager,
+    sessionStore,
     bridge,
     hookBus,
     costLedger,

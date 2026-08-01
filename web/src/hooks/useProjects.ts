@@ -14,6 +14,7 @@ import {
   type SessionState,
   type TrackerState,
   type TranscriptEvent,
+  type WorkItemSessionAnchor,
   type WsClient,
   type WsClientOptions,
 } from '@/lib/ws-client';
@@ -99,6 +100,10 @@ export interface UseProjectsResult {
   readonly sessionPersonas: Record<string, readonly SessionPersona[]>;
   /** Request a fresh session-personas join for a project path; delegates to the live client. */
   readonly requestSessionPersonas: (path: string) => void;
+  /** Latest owned-session anchors keyed by work item id; empty until the first snapshot arrives. */
+  readonly workItemSessions: Record<string, readonly WorkItemSessionAnchor[]>;
+  /** Request the current owned-session anchors for a work item; delegates to the live client. */
+  readonly requestWorkItemSessions: (path: string, workItemId: string) => void;
   /** Latest bridge-state snapshots keyed by absolute project path; empty until the first arrives. */
   readonly bridgeStates: Record<string, BridgeState>;
   /** Spawn an owned session for a pinned project + role; delegates to the live client. */
@@ -146,6 +151,9 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
   const [sessions, setSessions] = useState<Record<string, readonly SessionState[]>>({});
   const [sessionPersonas, setSessionPersonas] = useState<
     Record<string, readonly SessionPersona[]>
+  >({});
+  const [workItemSessions, setWorkItemSessions] = useState<
+    Record<string, readonly WorkItemSessionAnchor[]>
   >({});
   const [bridgeStates, setBridgeStates] = useState<Record<string, BridgeState>>({});
   const [transcripts, setTranscripts] = useState<Record<string, readonly TranscriptEvent[]>>({});
@@ -231,6 +239,11 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     const offSessionPersonas = client.onSessionPersonas((path, personas) =>
       setSessionPersonas((prev) => foldPersonas(prev, path, personas)),
     );
+    // Immutable fold: a work-item-sessions snapshot replaces the entry for that
+    // work item id with a new object.
+    const offWorkItemSessions = client.onWorkItemSessions((_path, workItemId, sessions) =>
+      setWorkItemSessions((prev) => ({ ...prev, [workItemId]: sessions })),
+    );
     // Immutable fold: a bridge-state snapshot replaces the map with a new object.
     const offBridgeState = client.onBridgeState((path, bridgeState) =>
       setBridgeStates((prev) => ({ ...prev, [path]: bridgeState })),
@@ -303,6 +316,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
       offLifecycleSignals();
       offSessionState();
       offSessionPersonas();
+      offWorkItemSessions();
       offBridgeState();
       offSessionTranscript();
       offPermissionRequest();
@@ -357,6 +371,10 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     clientRef.current?.requestSessionPersonas(path);
   }
 
+  function requestWorkItemSessions(path: string, workItemId: string): void {
+    clientRef.current?.requestWorkItemSessions(path, workItemId);
+  }
+
   function spawnSession(path: string, role: string, workItemId?: string): void {
     // Forward only the args given — don't pass an explicit `undefined` workItemId.
     if (workItemId !== undefined) {
@@ -406,6 +424,8 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     sessions,
     sessionPersonas,
     requestSessionPersonas,
+    workItemSessions,
+    requestWorkItemSessions,
     bridgeStates,
     spawnSession,
     transcripts,

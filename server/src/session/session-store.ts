@@ -40,6 +40,7 @@ export interface SessionStore {
   readonly updateStatus: (id: string, status: string, sdkSessionId?: string) => void;
   readonly list: () => SessionRow[];
   readonly get: (id: string) => SessionRow | null;
+  readonly listByWorkItem: (workItemId: string, projectPath: string) => SessionRow[];
 }
 
 /** Raw shape of a `sessions` row as returned by better-sqlite3. */
@@ -63,6 +64,8 @@ VALUES(@id, @project_path, @work_item_id, @sdk_session_id, @role, @status, @curr
 const SQL_SELECT_ALL = `SELECT ${COLUMNS} FROM sessions ORDER BY created_at ASC, id ASC`;
 
 const SQL_SELECT_ONE = `SELECT ${COLUMNS} FROM sessions WHERE id = ?`;
+
+const SQL_SELECT_BY_WORK_ITEM = `SELECT ${COLUMNS} FROM sessions WHERE work_item_id = ? AND project_path = ? ORDER BY created_at ASC, id ASC`;
 
 // Update the last-known status and, when supplied, the sdk_session_id captured
 // from the stream's `system/init`. COALESCE keeps the existing sdk_session_id
@@ -98,6 +101,7 @@ export function createSessionStore(db: DatabaseHandle): SessionStore {
   const insertStmt = db.raw.prepare(SQL_INSERT);
   const selectAllStmt = db.raw.prepare(SQL_SELECT_ALL);
   const selectOneStmt = db.raw.prepare(SQL_SELECT_ONE);
+  const selectByWorkItemStmt = db.raw.prepare(SQL_SELECT_BY_WORK_ITEM);
   const updateStatusStmt = db.raw.prepare(SQL_UPDATE_STATUS);
 
   const readOne = (id: string): SessionRow | null => {
@@ -158,5 +162,19 @@ export function createSessionStore(db: DatabaseHandle): SessionStore {
     return readOne(id);
   };
 
-  return Object.freeze<SessionStore>({ insert, updateStatus, list, get });
+  const listByWorkItem = (workItemId: string, projectPath: string): SessionRow[] => {
+    assertNonEmpty(workItemId, 'work item id', 'listByWorkItem');
+    assertNonEmpty(projectPath, 'project path', 'listByWorkItem');
+    try {
+      const rows = selectByWorkItemStmt.all(workItemId, projectPath) as SessionDbRow[];
+      return rows.map(toRow);
+    } catch (error) {
+      const cause = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `SessionStore.listByWorkItem: failed to read sessions for work item "${workItemId}": ${cause}`,
+      );
+    }
+  };
+
+  return Object.freeze<SessionStore>({ insert, updateStatus, list, get, listByWorkItem });
 }

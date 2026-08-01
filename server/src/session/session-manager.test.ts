@@ -88,6 +88,10 @@ function makeSession(opts: { endsOnInterrupt?: boolean } = {}): {
     resolvePermission: (requestId: string, decision: PermissionDecision): void => {
       resolvePermissionCalls.push({ requestId, decision });
     },
+    end: (): void => {
+      done = true;
+      wake();
+    },
   });
 
   return {
@@ -616,6 +620,7 @@ describe('SessionManager transcript', () => {
       },
       list: () => inner.list(),
       get: (id) => inner.get(id),
+      listByWorkItem: (workItemId, projectPath) => inner.listByWorkItem(workItemId, projectPath),
     };
     const fake = makeSession();
     const mgr = createSessionManager({ store, query: () => fake.session });
@@ -848,6 +853,65 @@ describe('SessionManager cost usage', () => {
 
     expect(inserts).toHaveLength(0);
     expect(usages).toHaveLength(0);
+    expect(store.get(snap.id)?.status).toBe('ended');
+
+    await mgr.stopAll();
+  });
+});
+
+describe('SessionManager context usage', () => {
+  const BIG_MODEL = 'claude-opus-4-8[1m]';
+
+  it('fires onContextUsage exactly once when a result crosses 80% of the model window; not below threshold', async () => {
+    const store = freshStore();
+    const fake = makeSession();
+    const mgr = createSessionManager({ store, query: () => fake.session });
+    const signals: Parameters<Parameters<typeof mgr.onContextUsage>[0]>[0][] = [];
+    mgr.onContextUsage((signal) => signals.push(signal));
+
+    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'builder', model: BIG_MODEL });
+
+    // Below threshold (100_000 / 1_000_000 = 0.1) — must not fire.
+    fake.emit(resultMessage(0.01, 100_000, 20));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(signals).toHaveLength(0);
+
+    // Crosses threshold (850_000 / 1_000_000 = 0.85).
+    fake.emit(resultMessage(0.02, 850_000, 20));
+    await waitUntil(() => signals.length >= 1);
+
+    expect(signals).toHaveLength(1);
+    expect(signals[0]).toMatchObject({
+      sessionId: snap.id,
+      model: BIG_MODEL,
+    });
+    expect(signals[0]?.fraction).toBeGreaterThanOrEqual(0.8);
+
+    // A second over-threshold result on the SAME session must NOT fire again (latch).
+    fake.emit(resultMessage(0.02, 900_000, 20));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(signals).toHaveLength(1);
+
+    fake.finish();
+    await mgr.stopAll();
+  });
+
+  it('endAtBoundary calls the engine end(); an unknown id is a guarded no-op', async () => {
+    const store = freshStore();
+    const fake = makeSession();
+    const mgr = createSessionManager({ store, query: () => fake.session });
+    const emissions: SessionSnapshot[] = [];
+    mgr.onState((s) => emissions.push(s));
+
+    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'builder' });
+
+    // Unknown id — guarded no-op, no throw.
+    expect(() => mgr.endAtBoundary('does-not-exist')).not.toThrow();
+
+    // Known id — calls through to the fake engine's end(), which closes the stream and
+    // the consume loop then settles the session to 'ended'.
+    mgr.endAtBoundary(snap.id);
+    await waitFor(emissions, (e) => e.id === snap.id && e.status === 'ended');
     expect(store.get(snap.id)?.status).toBe('ended');
 
     await mgr.stopAll();

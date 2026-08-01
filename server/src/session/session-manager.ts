@@ -16,6 +16,7 @@ import { randomUUID } from 'node:crypto';
 import type { TranscriptEvent, TranscriptEventBody } from '../ws-protocol.js';
 import type { Role } from './roles.js';
 import type { Effort } from './roster-reader.js';
+import { contextOccupancy, contextTotalFromResult, crossesThreshold } from './context-watcher.js';
 import {
   defaultQuery,
   type EngineMessage,
@@ -62,6 +63,20 @@ export type StateListener = (snapshot: SessionSnapshot) => void;
 /** Fired with the latest cost/usage aggregate whenever a `result` message is recorded. */
 export type CostUsageListener = (usage: CostUsageAggregate) => void;
 
+/** Context-window occupancy snapshot fired once a session's settled token total crosses the warn threshold. */
+export interface ContextUsageSignal {
+  readonly sessionId: string;
+  readonly projectPath: string;
+  readonly workItemId: string | null;
+  readonly model: string;
+  readonly occupiedTokens: number;
+  readonly windowTokens: number;
+  readonly fraction: number;
+}
+
+/** Fired AT MOST ONCE per session, when its context window occupancy crosses the threshold. */
+export type ContextUsageListener = (signal: ContextUsageSignal) => void;
+
 /** Fired with each frozen batch of transcript events captured from a live session. */
 export type TranscriptListener = (
   projectPath: string,
@@ -88,6 +103,8 @@ export interface SessionManager {
   readonly onPermissionRequest: (listener: PermissionRequestListener) => () => void;
   /** Register a listener fired with the latest cost/usage aggregate. Returns an unsubscribe fn. */
   readonly onCostUsage: (listener: CostUsageListener) => () => void;
+  /** Register a listener fired once per session when context-window occupancy crosses the threshold. */
+  readonly onContextUsage: (listener: ContextUsageListener) => () => void;
   /** The live session's buffered transcript (frozen copy), or `[]` if absent/ended. */
   readonly getTranscript: (id: string) => readonly TranscriptEvent[];
   /**
@@ -107,6 +124,12 @@ export interface SessionManager {
    * an unknown/ended session.
    */
   readonly resolvePermission: (id: string, requestId: string, decision: PermissionDecision) => void;
+  /**
+   * End a live session at a clean turn boundary: closes its input stream so the current
+   * turn finishes and the consume loop then sees the generator end naturally. Guarded;
+   * a no-op for an unknown/ended session.
+   */
+  readonly endAtBoundary: (id: string) => void;
   /** Interrupt every live session (guarded). Called on server shutdown. */
   readonly stopAll: () => Promise<void>;
 }
@@ -135,6 +158,8 @@ interface LiveSession {
   readonly projectPath: string;
   readonly role: Role;
   readonly workItemId: string | null;
+  /** The roster-declared model id this session was spawned with (defaults to DEFAULT_MODEL). */
+  readonly model: string;
   status: SessionStatus;
   sdkSessionId: string | null;
   /** Monotonic per-session transcript sequence counter. */
@@ -144,6 +169,8 @@ interface LiveSession {
   readonly engine: EngineSession;
   /** requestId → toolName, populated as permission requests are raised (for the audit event). */
   readonly permissionToolNames: Map<string, string>;
+  /** Latch: true once `onContextUsage` has fired for this session — fires AT MOST ONCE. */
+  contextFired: boolean;
 }
 
 function isInitMessage(message: EngineMessage): boolean {
@@ -158,6 +185,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   const transcriptListeners = new Set<TranscriptListener>();
   const permissionRequestListeners = new Set<PermissionRequestListener>();
   const costUsageListeners = new Set<CostUsageListener>();
+  const contextUsageListeners = new Set<ContextUsageListener>();
   // Track detached consume loops so stopAll can await their completion (so the final
   // 'ended'/'errored' status persists before the DB is closed on shutdown).
   const consuming = new Set<Promise<void>>();
@@ -215,6 +243,16 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     }
   };
 
+  const emitContextUsage = (signal: ContextUsageSignal): void => {
+    for (const listener of contextUsageListeners) {
+      try {
+        listener(signal);
+      } catch (err) {
+        console.error('[session] context usage listener threw', err);
+      }
+    }
+  };
+
   // Stamp one body with this session's identity + ordering, push it onto the bounded
   // ring buffer (oldest dropped), and return the frozen event. Shared by transcript
   // capture (from the engine stream) and the user-text echo (from sendInput).
@@ -264,6 +302,33 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     }
   };
 
+  // Fire `onContextUsage` AT MOST ONCE per session, when the settled token total from the
+  // latest `result` crosses the warn threshold for this session's model. Guarded: isolated
+  // per-session (a throw here is logged, never flips status or affects siblings).
+  const checkContextUsage = (
+    s: LiveSession,
+    body: Extract<TranscriptEventBody, { kind: 'result' }>,
+  ): void => {
+    if (s.contextFired) return;
+    try {
+      const total = contextTotalFromResult(body);
+      if (!crossesThreshold(total, s.model)) return;
+      s.contextFired = true;
+      const { occupiedTokens, windowTokens, fraction } = contextOccupancy(total, s.model);
+      emitContextUsage({
+        sessionId: s.id,
+        projectPath: s.projectPath,
+        workItemId: s.workItemId,
+        model: s.model,
+        occupiedTokens,
+        windowTokens,
+        fraction,
+      });
+    } catch (err) {
+      console.error(`[session] context usage check for ${s.id} threw`, err);
+    }
+  };
+
   // Normalize one engine message into stamped transcript events, push them onto the
   // session's bounded ring buffer, and fan the frozen batch out to listeners.
   const captureTranscript = (s: LiveSession, message: EngineMessage): void => {
@@ -272,7 +337,10 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     const batch: TranscriptEvent[] = bodies.map((body) => pushEvent(s, body));
     emitTranscript(s, Object.freeze(batch));
     for (const body of bodies) {
-      if (body.kind === 'result') recordCost(s, body);
+      if (body.kind === 'result') {
+        recordCost(s, body);
+        checkContextUsage(s, body);
+      }
     }
   };
 
@@ -344,6 +412,8 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       throw err;
     }
 
+    const model = input.model ?? DEFAULT_MODEL;
+
     // Start the engine. A synchronous failure here must release the slot.
     let engine: EngineSession;
     try {
@@ -351,7 +421,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         cwd: projectPath,
         role,
         prompt: input.prompt ?? DEFAULT_PROMPT,
-        model: input.model ?? DEFAULT_MODEL,
+        model,
         effort: input.effort ?? DEFAULT_EFFORT,
       });
     } catch (err) {
@@ -365,12 +435,14 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       projectPath,
       role,
       workItemId: input.workItemId ?? null,
+      model,
       status: 'running',
       sdkSessionId: null,
       seq: 0,
       transcript: [],
       engine,
       permissionToolNames: new Map(),
+      contextFired: false,
     };
     live.set(id, session);
     emit(session); // running
@@ -416,6 +488,11 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   const onCostUsage = (listener: CostUsageListener): (() => void) => {
     costUsageListeners.add(listener);
     return () => costUsageListeners.delete(listener);
+  };
+
+  const onContextUsage = (listener: ContextUsageListener): (() => void) => {
+    contextUsageListeners.add(listener);
+    return () => contextUsageListeners.delete(listener);
   };
 
   const getTranscript = (id: string): readonly TranscriptEvent[] => {
@@ -465,6 +542,22 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       await s.engine.interrupt();
     } catch (err) {
       console.error(`[session] interrupt failed for ${id}`, err);
+    }
+  };
+
+  const endAtBoundary = (id: string): void => {
+    const s = live.get(id);
+    if (s === undefined) {
+      // Unknown/ended session — guarded no-op.
+      console.error(`[session] endAtBoundary: no live session ${id}`);
+      return;
+    }
+    // Close the input stream so the current turn finishes and the generator then ends
+    // naturally — the consume loop's own `setStatus(s, 'ended')` handles the transition.
+    try {
+      s.engine.end();
+    } catch (err) {
+      console.error(`[session] endAtBoundary: engine.end threw for ${id}`, err);
     }
   };
 
@@ -533,10 +626,12 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     onTranscript,
     onPermissionRequest,
     onCostUsage,
+    onContextUsage,
     getTranscript,
     sendInput,
     interrupt,
     resolvePermission,
+    endAtBoundary,
     stopAll,
   });
 }

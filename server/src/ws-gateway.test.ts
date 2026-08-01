@@ -27,7 +27,13 @@ import type {
   StateListener,
   TranscriptListener,
 } from './session/session-manager.js';
-import type { ProjectAnchor, SessionPersona, TranscriptEvent } from './ws-protocol.js';
+import type { SessionRow, SessionStore } from './session/session-store.js';
+import type {
+  ProjectAnchor,
+  SessionPersona,
+  TranscriptEvent,
+  WorkItemSessionAnchor,
+} from './ws-protocol.js';
 import { attachWsGateway, FLOOD_GUARD_MAX_KEYS, pruneFloodGuard, type WsGateway } from './ws-gateway.js';
 
 const WINDOW_MS = 200;
@@ -134,6 +140,20 @@ function liveSnapshot(id: string, projectPath: string): SessionSnapshot {
   });
 }
 
+/** A persisted session row fixture for the fake session store. */
+function sessionRow(id: string, workItemId: string): SessionRow {
+  return Object.freeze({
+    id,
+    projectPath: PROJECT_PATH,
+    workItemId,
+    sdkSessionId: null,
+    role: 'builder',
+    status: 'running',
+    currentStage: 'coding',
+    createdAt: 0,
+  });
+}
+
 /** A minimal assistant-text transcript event fixture. */
 function textEvent(sessionId: string, seq: number): TranscriptEvent {
   return Object.freeze({ kind: 'assistant-text' as const, text: `event-${seq}`, sessionId, seq, ts: 1_000 + seq });
@@ -158,11 +178,19 @@ interface SessionPersonasFrame {
   readonly personas: readonly SessionPersona[];
 }
 
+interface WorkItemSessionsFrame {
+  readonly type: 'work-item-sessions';
+  readonly path: string;
+  readonly workItemId: string;
+  readonly sessions: readonly WorkItemSessionAnchor[];
+}
+
 interface HarnessOptions {
   readonly pinnedPaths?: readonly string[];
   readonly sessions?: Readonly<Record<string, SessionSnapshot>>;
   readonly transcripts?: Readonly<Record<string, readonly TranscriptEvent[]>>;
   readonly costUsage?: CostUsageAggregate;
+  readonly sessionRowsByWorkItem?: Readonly<Record<string, readonly SessionRow[]>>;
 }
 
 interface CostUsageFrame {
@@ -220,6 +248,10 @@ interface TestClient {
   readonly personasFrames: () => readonly SessionPersonasFrame[];
   /** Resolve once at least `count` session-personas frames arrived; reject on timeout. */
   readonly waitForPersonasCount: (count: number, timeoutMs?: number) => Promise<void>;
+  /** Every `work-item-sessions` frame seen so far. */
+  readonly workItemSessionsFrames: () => readonly WorkItemSessionsFrame[];
+  /** Resolve once at least `count` work-item-sessions frames arrived; reject on timeout. */
+  readonly waitForWorkItemSessionsCount: (count: number, timeoutMs?: number) => Promise<void>;
   /** Every `cost-usage` frame seen so far. */
   readonly costUsageFrames: () => readonly CostUsageFrame[];
   /** Resolve once at least `count` cost-usage frames arrived; reject on timeout. */
@@ -247,6 +279,7 @@ async function startGateway(options: HarnessOptions = {}): Promise<GatewayHarnes
   const costUsage: CostUsageAggregate =
     options.costUsage ??
     Object.freeze({ costTodayUsd: 0, inputTokensToday: 0, outputTokensToday: 0, sinceEpochMs: 0 });
+  const sessionRowsByWorkItem = options.sessionRowsByWorkItem ?? {};
   const transcriptListeners = new Set<TranscriptListener>();
   const stateListeners = new Set<StateListener>();
   const costUsageListeners = new Set<CostUsageListener>();
@@ -316,6 +349,8 @@ async function startGateway(options: HarnessOptions = {}): Promise<GatewayHarnes
       interruptCalls.push(id);
       return Promise.resolve();
     },
+    onContextUsage: () => () => {},
+    endAtBoundary: () => {},
     stopAll: () => Promise.resolve(),
   });
 
@@ -333,11 +368,29 @@ async function startGateway(options: HarnessOptions = {}): Promise<GatewayHarnes
     costToday: () => costUsage,
   });
 
+  const sessionStore: SessionStore = Object.freeze({
+    insert: () => {
+      throw new Error('insert not used in gateway transcript tests');
+    },
+    updateStatus: () => {
+      throw new Error('updateStatus not used in gateway transcript tests');
+    },
+    list: () => {
+      throw new Error('list not used in gateway transcript tests');
+    },
+    get: () => {
+      throw new Error('get not used in gateway transcript tests');
+    },
+    listByWorkItem: (workItemId: string, projectPath: string) =>
+      [...(sessionRowsByWorkItem[workItemId] ?? [])].filter((r) => r.projectPath === projectPath),
+  });
+
   const server: Server = createServer();
   const gateway: WsGateway = attachWsGateway(server, {
     intervalMs: 60_000, // keep heartbeat noise out of short-lived tests
     registry,
     sessionManager,
+    sessionStore,
     bridge,
     hookBus: createHookBus(),
     costLedger,
@@ -394,6 +447,7 @@ function openClient(url: string, openTimeoutMs = 3000): Promise<TestClient> {
     const permissionFrames: Record<string, unknown>[] = [];
     const stateFrames: SessionStateFrame[] = [];
     const personasFrames: SessionPersonasFrame[] = [];
+    const workItemSessionsFrames: WorkItemSessionsFrame[] = [];
     const costUsageFrames: CostUsageFrame[] = [];
     let opened = false;
 
@@ -465,6 +519,12 @@ function openClient(url: string, openTimeoutMs = 3000): Promise<TestClient> {
       } else if (
         typeof parsed === 'object' &&
         parsed !== null &&
+        (parsed as { type?: unknown }).type === 'work-item-sessions'
+      ) {
+        workItemSessionsFrames.push(parsed as WorkItemSessionsFrame);
+      } else if (
+        typeof parsed === 'object' &&
+        parsed !== null &&
         (parsed as { type?: unknown }).type === 'cost-usage'
       ) {
         costUsageFrames.push(parsed as CostUsageFrame);
@@ -506,6 +566,9 @@ function openClient(url: string, openTimeoutMs = 3000): Promise<TestClient> {
         personasFrames: () => [...personasFrames],
         waitForPersonasCount: (count: number, timeoutMs = 3000) =>
           waitForCount(() => personasFrames.length, 'session-personas', count, timeoutMs),
+        workItemSessionsFrames: () => [...workItemSessionsFrames],
+        waitForWorkItemSessionsCount: (count: number, timeoutMs = 3000) =>
+          waitForCount(() => workItemSessionsFrames.length, 'work-item-sessions', count, timeoutMs),
         costUsageFrames: () => [...costUsageFrames],
         waitForCostUsageCount: (count: number, timeoutMs = 3000) =>
           waitForCount(() => costUsageFrames.length, 'cost-usage', count, timeoutMs),
@@ -832,6 +895,52 @@ describe('ws-gateway session-personas routing', () => {
 
     await settle();
     expect(client.personasFrames()).toHaveLength(0);
+  });
+});
+
+const WORK_ITEM_ID = 'WI-1';
+
+describe('ws-gateway work-item-sessions routing', () => {
+  it('replies with the persisted anchors for a pinned path', async () => {
+    const row = sessionRow(SESSION_ID, WORK_ITEM_ID);
+    const harness = await startGateway({
+      pinnedPaths: [PROJECT_PATH],
+      sessionRowsByWorkItem: { [WORK_ITEM_ID]: [row] },
+    });
+    const requester = await openClient(harness.url);
+    const bystander = await openClient(harness.url);
+
+    requester.send({ type: 'work-item-sessions-request', path: PROJECT_PATH, workItemId: WORK_ITEM_ID });
+
+    await requester.waitForWorkItemSessionsCount(1);
+    const frame = requester.workItemSessionsFrames()[0];
+    expect(frame).toEqual({
+      type: 'work-item-sessions',
+      path: PROJECT_PATH,
+      workItemId: WORK_ITEM_ID,
+      sessions: [
+        {
+          id: row.id,
+          role: row.role,
+          status: row.status,
+          sdkSessionId: row.sdkSessionId,
+          currentStage: row.currentStage,
+          createdAt: row.createdAt,
+        },
+      ],
+    });
+    await settle();
+    expect(bystander.workItemSessionsFrames()).toHaveLength(0);
+  });
+
+  it('sends no frame when the requested path is not pinned (fails closed)', async () => {
+    const harness = await startGateway({ pinnedPaths: [] }); // path NOT pinned
+    const client = await openClient(harness.url);
+
+    client.send({ type: 'work-item-sessions-request', path: PROJECT_PATH, workItemId: WORK_ITEM_ID });
+
+    await settle();
+    expect(client.workItemSessionsFrames()).toHaveLength(0);
   });
 });
 
