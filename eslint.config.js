@@ -40,4 +40,15 @@ export default tseslint.config(
       ],
     },
   },
+  {
+    // Standalone Node ESM scripts (e.g. the hook-event-bus forwarder) — run by
+    // Node directly, not part of the TS build, so they need Node globals.
+    files: ['scripts/**/*.mjs'],
+    languageOptions: {
+      sourceType: 'module',
+      globals: {
+        ...globals.node,
+      },
+    },
+  },
 );

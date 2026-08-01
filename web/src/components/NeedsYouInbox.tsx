@@ -1,6 +1,6 @@
-import { AlertCircle, HelpCircle, MessageSquareWarning, ShieldQuestion } from 'lucide-react';
+import { AlertCircle, HelpCircle, MessageSquareWarning, Radio, ShieldQuestion } from 'lucide-react';
 
-import type { BridgeInboxItem, BridgeState, PermissionRequest } from '@/lib/ws-client';
+import type { BridgeInboxItem, BridgeState, ForeignNeedsYou, PermissionRequest } from '@/lib/ws-client';
 import { cn } from '@/lib/utils';
 
 /** Icon per parked-item kind. */
@@ -25,11 +25,13 @@ export function NeedsYouInbox({
   onApprove,
   permissions = [],
   onPermissionDecision = () => {},
+  foreignItems = [],
 }: {
   bridgeState: BridgeState | null;
   onApprove: (path: string) => void;
   permissions?: readonly PermissionRequest[];
   onPermissionDecision?: (sessionId: string, requestId: string, decision: 'allow' | 'deny') => void;
+  foreignItems?: readonly ForeignNeedsYou[];
 }): JSX.Element {
   const inbox = bridgeState?.inbox ?? [];
 
@@ -41,7 +43,7 @@ export function NeedsYouInbox({
       <span className="text-xs font-medium uppercase tracking-widest text-muted-foreground">
         Needs you
       </span>
-      {inbox.length === 0 && permissions.length === 0 ? (
+      {inbox.length === 0 && permissions.length === 0 && foreignItems.length === 0 ? (
         <p
           data-testid="needs-you-inbox-empty"
           className="rounded-md border border-dashed border-border px-3 py-4 text-center text-sm text-muted-foreground"
@@ -111,6 +113,24 @@ export function NeedsYouInbox({
               >
                 Approve
               </button>
+            </li>
+          ))}
+          {foreignItems.map((item) => (
+            <li
+              key={item.sessionId}
+              data-testid={`needs-you-foreign-${item.sessionId}`}
+              data-kind={item.kind}
+              className="flex items-start justify-between gap-2 rounded-lg border border-border bg-card p-3"
+            >
+              <div className="flex min-w-0 items-start gap-2">
+                <Radio aria-hidden className="mt-0.5 h-3.5 w-3.5 shrink-0 text-sky-500" />
+                <div className="flex min-w-0 flex-col gap-0.5">
+                  <span className="text-xs font-medium uppercase tracking-widest text-muted-foreground">
+                    foreign session
+                  </span>
+                  <span className="text-sm text-foreground">{item.reason || item.kind}</span>
+                </div>
+              </div>
             </li>
           ))}
         </ul>
