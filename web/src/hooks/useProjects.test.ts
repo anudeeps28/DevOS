@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { useProjects } from '@/hooks/useProjects';
 import type {
+  BridgeState,
+  BridgeStateListener,
   CandidateListener,
   ConnectionStatus,
   GitState,
@@ -12,6 +14,8 @@ import type {
   RegistryCandidate,
   RegistryListener,
   RegistryProject,
+  SessionPersona,
+  SessionPersonasListener,
   SessionState,
   SessionStateListener,
   SessionTranscriptListener,
@@ -35,6 +39,8 @@ function makeFakeClient() {
   let trackerStateListener: TrackerStateListener | null = null;
   let lifecycleSignalsListener: LifecycleSignalsListener | null = null;
   let sessionStateListener: SessionStateListener | null = null;
+  let sessionPersonasListener: SessionPersonasListener | null = null;
+  let bridgeStateListener: BridgeStateListener | null = null;
   let sessionTranscriptListener: SessionTranscriptListener | null = null;
   const pin = vi.fn();
   const unpin = vi.fn();
@@ -42,6 +48,7 @@ function makeFakeClient() {
   const requestGitState = vi.fn();
   const requestTrackerState = vi.fn();
   const requestLifecycleSignals = vi.fn();
+  const requestSessionPersonas = vi.fn();
   const spawnSession = vi.fn();
   const requestTranscript = vi.fn();
   const sendSessionInput = vi.fn();
@@ -98,13 +105,24 @@ function makeFakeClient() {
         sessionStateListener = null;
       };
     },
+    onSessionPersonas: (listener) => {
+      sessionPersonasListener = listener;
+      return () => {
+        sessionPersonasListener = null;
+      };
+    },
     onSessionTranscript: (listener) => {
       sessionTranscriptListener = listener;
       return () => {
         sessionTranscriptListener = null;
       };
     },
-    onBridgeState: () => () => {},
+    onBridgeState: (listener) => {
+      bridgeStateListener = listener;
+      return () => {
+        bridgeStateListener = null;
+      };
+    },
     onPermissionRequest: () => () => {},
     onForeignNeedsYou: () => () => {},
     onHookBusLiveness: () => () => {},
@@ -114,6 +132,7 @@ function makeFakeClient() {
     requestGitState,
     requestTrackerState,
     requestLifecycleSignals,
+    requestSessionPersonas,
     spawnSession,
     requestTranscript,
     sendSessionInput,
@@ -133,6 +152,7 @@ function makeFakeClient() {
     requestGitState,
     requestTrackerState,
     requestLifecycleSignals,
+    requestSessionPersonas,
     spawnSession,
     requestTranscript,
     sendSessionInput,
@@ -155,6 +175,10 @@ function makeFakeClient() {
       lifecycleSignalsListener?.(path, signals),
     emitSessionState: (path: string, session: SessionState) =>
       sessionStateListener?.(path, session),
+    emitSessionPersonas: (path: string, personas: readonly SessionPersona[]) =>
+      sessionPersonasListener?.(path, personas),
+    emitBridgeState: (path: string, state: BridgeState) =>
+      bridgeStateListener?.(path, state),
     emitSessionTranscript: (
       path: string,
       sessionId: string,
@@ -181,6 +205,29 @@ function runningSession(id: string, path = '/abs/one'): SessionState {
     role: 'builder',
     status: 'running',
     sdkSessionId: null,
+    workItemId: null,
+    rateLimited: false,
+  };
+}
+
+function samplePersona(sessionId: string, overrides: Partial<SessionPersona> = {}): SessionPersona {
+  return {
+    sessionId,
+    workItemId: 'WI-9',
+    role: 'builder',
+    phase: 'coding',
+    persona: 'Shipwright',
+    ...overrides,
+  };
+}
+
+function sampleBridgeState(path: string): BridgeState {
+  return {
+    path,
+    stage: 'coding',
+    gate: 'running',
+    sessionId: 'sess-1',
+    inbox: [],
   };
 }
 
@@ -354,6 +401,8 @@ describe('useProjects', () => {
       role: 'builder',
       status: 'running',
       sdkSessionId: null,
+      workItemId: null,
+      rateLimited: false,
     };
     act(() => fake.emitSessionState('/abs/one', running));
     expect(result.current.sessions['/abs/one']).toEqual([running]);
@@ -704,6 +753,103 @@ describe('useProjects', () => {
     act(() => result.current.interruptSession('sess-9'));
 
     expect(fake.interruptSession).toHaveBeenCalledWith('sess-9');
+  });
+
+  it('starts with an empty sessionPersonas map', () => {
+    const fake = makeFakeClient();
+    const { result } = renderHook(() =>
+      useProjects({ createClient: () => fake.client }),
+    );
+
+    expect(result.current.sessionPersonas).toEqual({});
+  });
+
+  it('folds session-personas snapshots keyed by path, upserting by sessionId', () => {
+    const fake = makeFakeClient();
+    const { result } = renderHook(() =>
+      useProjects({ createClient: () => fake.client }),
+    );
+
+    const first = [samplePersona('sess-1')];
+    act(() => fake.emitSessionPersonas('/abs/one', first));
+    expect(result.current.sessionPersonas['/abs/one']).toEqual(first);
+
+    const second = [samplePersona('sess-1', { phase: 'reviewing' })];
+    act(() => fake.emitSessionPersonas('/abs/one', second));
+    expect(result.current.sessionPersonas['/abs/one']).toEqual(second);
+  });
+
+  it('retains a previously non-null persona/phase when a later snapshot sends null', () => {
+    const fake = makeFakeClient();
+    const { result } = renderHook(() =>
+      useProjects({ createClient: () => fake.client }),
+    );
+
+    act(() => fake.emitSessionPersonas('/abs/one', [samplePersona('sess-1')]));
+    expect(result.current.sessionPersonas['/abs/one']![0]!.persona).toBe('Shipwright');
+    expect(result.current.sessionPersonas['/abs/one']![0]!.phase).toBe('coding');
+
+    // A later snapshot with null persona/phase (e.g. a not-yet-joined session)
+    // must not blank out the previously known values.
+    const nulled = samplePersona('sess-1', { persona: null, phase: null });
+    act(() => fake.emitSessionPersonas('/abs/one', [nulled]));
+
+    expect(result.current.sessionPersonas['/abs/one']![0]!.persona).toBe('Shipwright');
+    expect(result.current.sessionPersonas['/abs/one']![0]!.phase).toBe('coding');
+  });
+
+  it('delegates requestSessionPersonas to the underlying client', () => {
+    const fake = makeFakeClient();
+    const { result } = renderHook(() =>
+      useProjects({ createClient: () => fake.client }),
+    );
+
+    act(() => result.current.requestSessionPersonas('/abs/path'));
+
+    expect(fake.requestSessionPersonas).toHaveBeenCalledWith('/abs/path');
+  });
+
+  it('re-requests session-personas for known projects on connect', () => {
+    const fake = makeFakeClient();
+    renderHook(() => useProjects({ createClient: () => fake.client }));
+
+    act(() =>
+      fake.emitRegistry([sampleProject('/abs/one'), sampleProject('/abs/two')]),
+    );
+    fake.requestSessionPersonas.mockClear();
+
+    act(() => fake.emitStatus('connected'));
+
+    expect(fake.requestSessionPersonas).toHaveBeenCalledWith('/abs/one');
+    expect(fake.requestSessionPersonas).toHaveBeenCalledWith('/abs/two');
+    expect(fake.requestSessionPersonas).toHaveBeenCalledTimes(2);
+  });
+
+  it('starts with an empty bridgeStates map', () => {
+    const fake = makeFakeClient();
+    const { result } = renderHook(() =>
+      useProjects({ createClient: () => fake.client }),
+    );
+
+    expect(result.current.bridgeStates).toEqual({});
+  });
+
+  it('folds an emitted bridge-state into bridgeStates keyed by path', () => {
+    const fake = makeFakeClient();
+    const { result } = renderHook(() =>
+      useProjects({ createClient: () => fake.client }),
+    );
+
+    const stateOne = sampleBridgeState('/abs/one');
+    act(() => fake.emitBridgeState('/abs/one', stateOne));
+    expect(result.current.bridgeStates).toEqual({ '/abs/one': stateOne });
+
+    const stateTwo = sampleBridgeState('/abs/two');
+    act(() => fake.emitBridgeState('/abs/two', stateTwo));
+    expect(result.current.bridgeStates).toEqual({
+      '/abs/one': stateOne,
+      '/abs/two': stateTwo,
+    });
   });
 
   it('closes the client on unmount', () => {
