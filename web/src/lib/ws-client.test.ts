@@ -4,8 +4,10 @@ import {
   createWsClient,
   type BridgeState,
   type ConnectionStatus,
+  type ForeignNeedsYou,
   type GitState,
   type Heartbeat,
+  type HookBusLiveness,
   type LifecycleSignals,
   type RegistryCandidate,
   type RegistryProject,
@@ -1260,5 +1262,130 @@ describe('ws-client session-transcript frames', () => {
       JSON.stringify({ type: 'gate-approve', path: '/abs/repo' }),
       JSON.stringify({ type: 'bridge-interrupt', path: '/abs/repo', reason: 'stop please' }),
     ]);
+  });
+});
+
+/** A well-formed foreign-session needs-you frame body. */
+function sampleForeignNeedsYou(): ForeignNeedsYou {
+  return {
+    path: '/abs/other',
+    sessionId: 'foreign-1',
+    kind: 'idle_prompt',
+    reason: 'Waiting for input',
+    ts: 1700000000000,
+    cleared: false,
+  };
+}
+
+function foreignNeedsYouFrame(overrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({ type: 'foreign-session-needs-you', ...sampleForeignNeedsYou(), ...overrides });
+}
+
+describe('ws-client foreign-session-needs-you frames', () => {
+  beforeEach(() => {
+    FakeSocket.instances = [];
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function makeForeignNeedsYouClient() {
+    const received: ForeignNeedsYou[] = [];
+    const client = createWsClient({
+      url: 'ws://localhost/ws',
+      createWebSocket: (url) => new FakeSocket(url),
+    });
+    const off = client.onForeignNeedsYou((item) => received.push(item));
+    const socket = FakeSocket.instances[0]!;
+    socket.open();
+    return { client, received, off, socket };
+  }
+
+  it('delivers a valid foreign-session-needs-you frame as a frozen item, including cleared', () => {
+    const { received, socket } = makeForeignNeedsYouClient();
+    const item = sampleForeignNeedsYou();
+
+    socket.message(foreignNeedsYouFrame());
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toEqual(item);
+    expect(received[0]!.cleared).toBe(false);
+    expect(Object.isFrozen(received[0])).toBe(true);
+  });
+
+  it('drops malformed foreign-session-needs-you frames without emitting to listeners', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { received, socket } = makeForeignNeedsYouClient();
+
+    expect(() => socket.message(foreignNeedsYouFrame({ sessionId: '' }))).not.toThrow();
+    expect(() => socket.message(foreignNeedsYouFrame({ kind: 'not-a-kind' }))).not.toThrow();
+    expect(() => socket.message(foreignNeedsYouFrame({ cleared: 'nope' }))).not.toThrow();
+    expect(() => socket.message(foreignNeedsYouFrame({ ts: 'not-a-number' }))).not.toThrow();
+
+    expect(received).toEqual([]);
+    expect(warn).toHaveBeenCalled();
+  });
+});
+
+/** A well-formed hook-bus-liveness frame body. */
+function sampleHookBusLiveness(): HookBusLiveness {
+  return { connected: true, lastReceivedAt: 1700000000000 };
+}
+
+function hookBusLivenessFrame(overrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({ type: 'hook-bus-liveness', ...sampleHookBusLiveness(), ...overrides });
+}
+
+describe('ws-client hook-bus-liveness frames', () => {
+  beforeEach(() => {
+    FakeSocket.instances = [];
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function makeHookBusLivenessClient() {
+    const received: HookBusLiveness[] = [];
+    const client = createWsClient({
+      url: 'ws://localhost/ws',
+      createWebSocket: (url) => new FakeSocket(url),
+    });
+    const off = client.onHookBusLiveness((state) => received.push(state));
+    const socket = FakeSocket.instances[0]!;
+    socket.open();
+    return { client, received, off, socket };
+  }
+
+  it('delivers a valid hook-bus-liveness frame with connected and lastReceivedAt', () => {
+    const { received, socket } = makeHookBusLivenessClient();
+
+    socket.message(hookBusLivenessFrame());
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toEqual({ connected: true, lastReceivedAt: 1700000000000 });
+    expect(Object.isFrozen(received[0])).toBe(true);
+  });
+
+  it('round-trips a disconnected snapshot with a null lastReceivedAt', () => {
+    const { received, socket } = makeHookBusLivenessClient();
+
+    socket.message(hookBusLivenessFrame({ connected: false, lastReceivedAt: null }));
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toEqual({ connected: false, lastReceivedAt: null });
+  });
+
+  it('drops malformed hook-bus-liveness frames without emitting to listeners', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { received, socket } = makeHookBusLivenessClient();
+
+    expect(() => socket.message(hookBusLivenessFrame({ connected: 'yes' }))).not.toThrow();
+    expect(() => socket.message(hookBusLivenessFrame({ lastReceivedAt: 'nope' }))).not.toThrow();
+    expect(() => socket.message(JSON.stringify({ type: 'hook-bus-liveness', lastReceivedAt: 1 }))).not.toThrow();
+
+    expect(received).toEqual([]);
+    expect(warn).toHaveBeenCalled();
   });
 });

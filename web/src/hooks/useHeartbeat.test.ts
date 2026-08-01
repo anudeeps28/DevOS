@@ -44,6 +44,8 @@ function makeFakeClient() {
     onSessionTranscript: () => () => {},
     onBridgeState: () => () => {},
     onPermissionRequest: () => () => {},
+    onForeignNeedsYou: () => () => {},
+    onHookBusLiveness: () => () => {},
     pin: () => {},
     unpin: () => {},
     discover: () => {},

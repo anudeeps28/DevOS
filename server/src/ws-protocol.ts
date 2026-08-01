@@ -340,6 +340,30 @@ export interface BridgeStateSnapshot {
   readonly inbox: readonly BridgeInboxItem[];
 }
 
+/**
+ * Outbound: a foreign (not owned by this server instance) session that needs
+ * human attention — a permission prompt, an idle prompt, or an agent asking
+ * for input — surfaced from a gated cwd's hook activity. `path` is the gated
+ * cwd; `cleared: true` means the UI removes the item (emitted on SessionEnd
+ * for that sessionId).
+ */
+export interface ForeignSessionNeedsYouSnapshot {
+  readonly type: 'foreign-session-needs-you';
+  readonly path: string;
+  readonly sessionId: string;
+  readonly kind: 'permission_prompt' | 'idle_prompt' | 'agent_needs_input';
+  readonly reason: string;
+  readonly ts: number;
+  readonly cleared: boolean;
+}
+
+/** Outbound: liveness of the HTTP-fed hook bus that feeds foreign-session signals. */
+export interface HookBusLivenessSnapshot {
+  readonly type: 'hook-bus-liveness';
+  readonly connected: boolean;
+  readonly lastReceivedAt: number | null;
+}
+
 /** Every message the server accepts from a client. */
 export type InboundMessage =
   | PinMessage
@@ -368,7 +392,9 @@ export type OutboundMessage =
   | SessionStateSnapshot
   | SessionTranscriptSnapshot
   | PermissionRequestSnapshot
-  | BridgeStateSnapshot;
+  | BridgeStateSnapshot
+  | ForeignSessionNeedsYouSnapshot
+  | HookBusLivenessSnapshot;
 
 /**
  * Validate a raw WS frame against the inbound contract. Branches on `type` first:

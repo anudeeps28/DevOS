@@ -1,5 +1,6 @@
 import { ConnectionIndicator } from '@/components/ConnectionIndicator';
 import { Heartbeat } from '@/components/Heartbeat';
+import { HookBusIndicator } from '@/components/HookBusIndicator';
 import { NeedsYouInbox } from '@/components/NeedsYouInbox';
 import { ProjectPin } from '@/components/ProjectPin';
 import { TeamRoom } from '@/components/TeamRoom';
@@ -32,12 +33,15 @@ function App() {
     interruptSession,
     pendingPermissions,
     resolvePermission,
+    foreignNeedsYou,
+    hookBusConnected,
   } = useProjects();
 
   return (
     <main className="flex min-h-screen flex-col items-center justify-center gap-8 bg-background text-foreground">
       <h1 className="text-4xl font-bold tracking-tight">DevOS</h1>
       <ConnectionIndicator status={status} />
+      <HookBusIndicator connected={hookBusConnected} />
       <Heartbeat heartbeat={heartbeat} />
       <ProjectPin
         projects={projects}
@@ -69,6 +73,7 @@ function App() {
         onPermissionDecision={(sessionId, requestId, decision) =>
           resolvePermission(sessionId, requestId, decision)
         }
+        foreignItems={foreignNeedsYou}
       />
     </main>
   );

@@ -13,6 +13,7 @@ import { HEARTBEAT_INTERVAL_MS, WS_PATH } from './config.js';
 import { scanCandidates } from './discovery/scanner.js';
 import { readGitState } from './git/git-state-reader.js';
 import { createHeartbeat, type HeartbeatMessage } from './heartbeat.js';
+import type { HookBus } from './hooks/hook-bus.js';
 import { readLifecycleSignals } from './lifecycle/lifecycle-reader.js';
 import type { Registry } from './registry/registry.js';
 import type { Bridge } from './session/bridge.js';
@@ -132,6 +133,7 @@ export interface WsGatewayOptions {
   readonly registry: Registry;
   readonly sessionManager: SessionManager;
   readonly bridge: Bridge;
+  readonly hookBus: HookBus;
   readonly projectRoots: readonly string[];
   readonly authToken: string;
   readonly requireToken: boolean;
@@ -272,6 +274,67 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
     }
   });
 
+  // Push every foreign-session hook event to all OPEN clients so any tab can
+  // surface a needs-you signal for a session this server does not own. Access
+  // control: broadcast ONLY for a cwd that is BOTH currently pinned AND resolves
+  // within a configured project root — a hook payload's cwd is client-controlled
+  // (posted over HTTP by a hook forwarder), so this mirrors the two-layer
+  // spawn/bridge-start gate above and fails closed on either check.
+  options.hookBus.onEvent(async (e) => {
+    // A `needs-you` event injects UI state, so it passes the full two-layer
+    // gate (pinned AND realpath-within-roots). A `clear` only REMOVES existing
+    // UI state and carries no new path exposure, so it is gated on the cheap
+    // sync isPinnedPath check alone — skipping the realpath check that would
+    // throw (and leak a stuck inbox item) if the session's dir was deleted
+    // between its Notification and its SessionEnd.
+    if (!isPinnedPath(e.cwd)) {
+      console.warn('[ws] dropped foreign hook — cwd not pinned');
+      return;
+    }
+    if (e.kind === 'needs-you' && !(await isWithinProjectRoots(e.cwd, options.projectRoots))) {
+      console.warn('[ws] dropped foreign hook — cwd not within roots');
+      return;
+    }
+    const frame: OutboundMessage =
+      e.kind === 'needs-you'
+        ? {
+            type: 'foreign-session-needs-you',
+            path: e.cwd,
+            sessionId: e.sessionId,
+            kind: e.notifKind,
+            reason: e.reason,
+            ts: e.ts,
+            cleared: false,
+          }
+        : {
+            type: 'foreign-session-needs-you',
+            path: e.cwd,
+            sessionId: e.sessionId,
+            kind: 'permission_prompt',
+            reason: '',
+            ts: e.ts,
+            cleared: true,
+          };
+    for (const client of wss.clients) {
+      sendFrame(client, frame);
+    }
+  });
+
+  // Push every hook-bus liveness flip to all OPEN clients so every tab's
+  // connection indicator stays in sync (mirrors the other broadcasts above).
+  options.hookBus.onLiveness((connected, lastReceivedAt) => {
+    const frame: OutboundMessage = { type: 'hook-bus-liveness', connected, lastReceivedAt };
+    for (const client of wss.clients) {
+      sendFrame(client, frame);
+    }
+  });
+
+  // Drive hook-bus staleness sweeps on a single gateway-level interval (not
+  // per-socket) — cleared in close().
+  const hookStaleInterval = setInterval(() => {
+    options.hookBus.checkStale(Date.now());
+  }, intervalMs);
+
   wss.on('connection', (socket: WebSocket) => {
     console.log('[ws] client connected');
 
@@ -317,6 +380,7 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
     } catch (err) {
       console.error('[ws] failed to send initial registry snapshot', err);
     }
+    sendFrame(socket, { type: 'hook-bus-liveness', ...options.hookBus.getLiveness(Date.now()) });
 
     socket.on('message', async (data) => {
       // Boundary: validate every inbound frame; malformed input is dropped, never thrown.
@@ -606,6 +670,7 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
 
   const close = (): Promise<void> =>
     new Promise((resolve) => {
+      clearInterval(hookStaleInterval);
       for (const client of wss.clients) {
         try {
           client.terminate();
