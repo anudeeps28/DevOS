@@ -106,6 +106,8 @@ function makeFakeClient() {
     },
     onBridgeState: () => () => {},
     onPermissionRequest: () => () => {},
+    onForeignNeedsYou: () => () => {},
+    onHookBusLiveness: () => () => {},
     pin,
     unpin,
     discover,

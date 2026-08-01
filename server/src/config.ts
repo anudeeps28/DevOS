@@ -109,6 +109,16 @@ export const HEARTBEAT_INTERVAL_MS = 1000;
 // WebSocket upgrade path — identical in dev (Vite proxies it) and prod.
 export const WS_PATH = '/ws';
 
+// Claude Code hook-forwarder HTTP path — identical in dev and prod.
+export const HOOK_PATH = '/hooks';
+
+// Boundary size limit for a single hook POST body (defense-in-depth, mirrors
+// MAX_WS_PAYLOAD_BYTES in ws-protocol.ts).
+export const MAX_HOOK_PAYLOAD_BYTES = 64 * 1024; // 64 KiB per request
+
+// A session with no hook received in this window is considered stale/disconnected.
+export const HOOK_STALE_MS = 60_000;
+
 // In prod the Node process also serves the built web/dist over HTTP; in dev,
 // Vite serves the app and this server handles /ws only.
 export const PROD: boolean = process.env.NODE_ENV === 'production';

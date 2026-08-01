@@ -202,6 +202,30 @@ export interface PermissionRequest {
   readonly input: string;
 }
 
+/**
+ * A validated foreign-session needs-you signal. Mirrors the server's
+ * ForeignSessionNeedsYouSnapshot (server/src/ws-protocol.ts) — duplicated
+ * typed contract, no shared package. Frozen — never mutated after construction.
+ */
+export interface ForeignNeedsYou {
+  readonly path: string;
+  readonly sessionId: string;
+  readonly kind: 'permission_prompt' | 'idle_prompt' | 'agent_needs_input';
+  readonly reason: string;
+  readonly ts: number;
+  readonly cleared: boolean;
+}
+
+/**
+ * A validated hook-bus liveness snapshot. Mirrors the server's
+ * HookBusLivenessSnapshot (server/src/ws-protocol.ts) — duplicated typed
+ * contract, no shared package. Frozen — never mutated after construction.
+ */
+export interface HookBusLiveness {
+  readonly connected: boolean;
+  readonly lastReceivedAt: number | null;
+}
+
 /** The slice of the WebSocket API this client depends on (keeps fakes tiny). */
 export interface WebSocketLike {
   readonly readyState: number;
@@ -258,6 +282,8 @@ export type SessionTranscriptListener = (
 ) => void;
 export type BridgeStateListener = (path: string, state: BridgeState) => void;
 export type PermissionRequestListener = (request: PermissionRequest) => void;
+export type ForeignNeedsYouListener = (item: ForeignNeedsYou) => void;
+export type HookBusLivenessListener = (state: HookBusLiveness) => void;
 
 /** Public, framework-agnostic client surface. */
 export interface WsClient {
@@ -284,6 +310,10 @@ export interface WsClient {
   readonly onBridgeState: (listener: BridgeStateListener) => () => void;
   /** Subscribe to validated permission requests. */
   readonly onPermissionRequest: (listener: PermissionRequestListener) => () => void;
+  /** Subscribe to validated foreign-session needs-you signals. */
+  readonly onForeignNeedsYou: (listener: ForeignNeedsYouListener) => () => void;
+  /** Subscribe to validated hook-bus liveness snapshots. */
+  readonly onHookBusLiveness: (listener: HookBusLivenessListener) => () => void;
   /** Pin a project by absolute path; no-op (warns) when the socket is not open. */
   readonly pin: (path: string, opts?: { displayName?: string; uiPrefs?: unknown }) => void;
   /** Unpin a project by absolute path; no-op (warns) when the socket is not open. */
@@ -963,6 +993,75 @@ function parsePermissionRequest(data: unknown): PermissionRequest | null {
 }
 
 /**
+ * Validate a raw WS frame against the pinned foreign-session needs-you contract:
+ * `{ type: 'foreign-session-needs-you', path: string, sessionId: string,
+ *    kind: 'permission_prompt'|'idle_prompt'|'agent_needs_input', reason: string,
+ *    ts: <finite number>, cleared: boolean }`.
+ * Returns a frozen ForeignNeedsYou, or null for anything malformed.
+ */
+function parseForeignNeedsYou(data: unknown): ForeignNeedsYou | null {
+  if (typeof data !== 'string') return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return null;
+  }
+
+  if (typeof parsed !== 'object' || parsed === null) return null;
+
+  const frame = parsed as Record<string, unknown>;
+  if (frame.type !== 'foreign-session-needs-you') return null;
+
+  const { path, sessionId, kind, reason, ts, cleared } = frame;
+
+  if (typeof path !== 'string' || path.length === 0) return null;
+  if (typeof sessionId !== 'string' || sessionId.length === 0) return null;
+  if (kind !== 'permission_prompt' && kind !== 'idle_prompt' && kind !== 'agent_needs_input') {
+    return null;
+  }
+  if (typeof reason !== 'string') return null;
+  if (typeof ts !== 'number' || !Number.isFinite(ts)) return null;
+  if (typeof cleared !== 'boolean') return null;
+
+  return Object.freeze({ path, sessionId, kind, reason, ts, cleared });
+}
+
+/**
+ * Validate a raw WS frame against the pinned hook-bus liveness contract:
+ * `{ type: 'hook-bus-liveness', connected: boolean, lastReceivedAt: <finite number>|null }`.
+ * Returns a frozen HookBusLiveness, or null for anything malformed.
+ */
+function parseHookBusLiveness(data: unknown): HookBusLiveness | null {
+  if (typeof data !== 'string') return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return null;
+  }
+
+  if (typeof parsed !== 'object' || parsed === null) return null;
+
+  const frame = parsed as Record<string, unknown>;
+  if (frame.type !== 'hook-bus-liveness') return null;
+
+  const { connected, lastReceivedAt } = frame;
+
+  if (typeof connected !== 'boolean') return null;
+  if (
+    lastReceivedAt !== null &&
+    (typeof lastReceivedAt !== 'number' || !Number.isFinite(lastReceivedAt))
+  ) {
+    return null;
+  }
+
+  return Object.freeze({ connected, lastReceivedAt });
+}
+
+/**
  * Peek the `type` discriminant of a raw frame without full validation, so
  * handleMessage can route to the right parser. Returns null for anything that
  * is not a JSON object with a string `type`. Never throws.
@@ -1004,6 +1103,8 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
   const sessionTranscriptListeners = new Set<SessionTranscriptListener>();
   const bridgeStateListeners = new Set<BridgeStateListener>();
   const permissionRequestListeners = new Set<PermissionRequestListener>();
+  const foreignNeedsYouListeners = new Set<ForeignNeedsYouListener>();
+  const hookBusLivenessListeners = new Set<HookBusLivenessListener>();
 
   let state: ClientState = {
     status: 'connecting',
@@ -1064,6 +1165,14 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
 
   function emitPermissionRequest(request: PermissionRequest): void {
     for (const listener of permissionRequestListeners) listener(request);
+  }
+
+  function emitForeignNeedsYou(item: ForeignNeedsYou): void {
+    for (const listener of foreignNeedsYouListeners) listener(item);
+  }
+
+  function emitHookBusLiveness(hookBusLiveness: HookBusLiveness): void {
+    for (const listener of hookBusLivenessListeners) listener(hookBusLiveness);
   }
 
   // Write a frame only when the socket is OPEN; otherwise drop + warn (never throw).
@@ -1186,6 +1295,26 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
       return;
     }
 
+    if (type === 'foreign-session-needs-you') {
+      const item = parseForeignNeedsYou(data);
+      if (item === null) {
+        console.warn('[ws-client] dropped malformed frame:', data);
+        return;
+      }
+      emitForeignNeedsYou(item);
+      return;
+    }
+
+    if (type === 'hook-bus-liveness') {
+      const hookBusLiveness = parseHookBusLiveness(data);
+      if (hookBusLiveness === null) {
+        console.warn('[ws-client] dropped malformed frame:', data);
+        return;
+      }
+      emitHookBusLiveness(hookBusLiveness);
+      return;
+    }
+
     // Never throw into the app — drop and warn.
     console.warn('[ws-client] dropped malformed frame:', data);
   }
@@ -1249,6 +1378,8 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     sessionTranscriptListeners.clear();
     bridgeStateListeners.clear();
     permissionRequestListeners.clear();
+    foreignNeedsYouListeners.clear();
+    hookBusLivenessListeners.clear();
 
     if (state.reconnectHandle !== null) {
       timers.clearTimeout(state.reconnectHandle);
@@ -1409,6 +1540,18 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
       permissionRequestListeners.add(listener);
       return () => {
         permissionRequestListeners.delete(listener);
+      };
+    },
+    onForeignNeedsYou: (listener) => {
+      foreignNeedsYouListeners.add(listener);
+      return () => {
+        foreignNeedsYouListeners.delete(listener);
+      };
+    },
+    onHookBusLiveness: (listener) => {
+      hookBusLivenessListeners.add(listener);
+      return () => {
+        hookBusLivenessListeners.delete(listener);
       };
     },
     pin,
