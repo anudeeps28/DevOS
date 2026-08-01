@@ -2,7 +2,7 @@ import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { NeedsYouInbox } from '@/components/NeedsYouInbox';
-import type { BridgeState, PermissionRequest } from '@/lib/ws-client';
+import type { BridgeState, ForeignNeedsYou, PermissionRequest } from '@/lib/ws-client';
 
 function bridgeState(overrides: Partial<BridgeState> = {}): BridgeState {
   return {
@@ -133,5 +133,43 @@ describe('NeedsYouInbox', () => {
     render(<NeedsYouInbox bridgeState={null} onApprove={() => {}} permissions={[permission]} />);
 
     expect(screen.queryByTestId('needs-you-inbox-empty')).not.toBeInTheDocument();
+  });
+
+  it('renders a foreign needs-you item with its reason', () => {
+    const foreignItem: ForeignNeedsYou = {
+      path: '/abs/other',
+      sessionId: 'foreign-1',
+      kind: 'idle_prompt',
+      reason: 'Waiting for input on step 3',
+      ts: 1700000000000,
+      cleared: false,
+    };
+    render(<NeedsYouInbox bridgeState={null} onApprove={() => {}} foreignItems={[foreignItem]} />);
+
+    const item = screen.getByTestId('needs-you-foreign-foreign-1');
+    expect(item).toHaveAttribute('data-kind', 'idle_prompt');
+    expect(item).toHaveTextContent('Waiting for input on step 3');
+  });
+
+  it('does not show the empty-state message when only foreign items are present', () => {
+    const foreignItem: ForeignNeedsYou = {
+      path: '/abs/other',
+      sessionId: 'foreign-1',
+      kind: 'permission_prompt',
+      reason: 'needs approval',
+      ts: 1700000000000,
+      cleared: false,
+    };
+    render(<NeedsYouInbox bridgeState={null} onApprove={() => {}} foreignItems={[foreignItem]} />);
+
+    expect(screen.queryByTestId('needs-you-inbox-empty')).not.toBeInTheDocument();
+  });
+
+  it('shows the empty state when inbox, permissions, and foreignItems are all empty', () => {
+    render(
+      <NeedsYouInbox bridgeState={null} onApprove={() => {}} permissions={[]} foreignItems={[]} />,
+    );
+
+    expect(screen.getByTestId('needs-you-inbox-empty')).toBeInTheDocument();
   });
 });
