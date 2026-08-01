@@ -4,6 +4,7 @@ import {
   createWsClient,
   type BridgeState,
   type ConnectionStatus,
+  type CostUsage,
   type ForeignNeedsYou,
   type GitState,
   type Heartbeat,
@@ -1504,6 +1505,66 @@ describe('ws-client hook-bus-liveness frames', () => {
     expect(() => socket.message(hookBusLivenessFrame({ connected: 'yes' }))).not.toThrow();
     expect(() => socket.message(hookBusLivenessFrame({ lastReceivedAt: 'nope' }))).not.toThrow();
     expect(() => socket.message(JSON.stringify({ type: 'hook-bus-liveness', lastReceivedAt: 1 }))).not.toThrow();
+
+    expect(received).toEqual([]);
+    expect(warn).toHaveBeenCalled();
+  });
+});
+
+/** A well-formed cost-usage frame body. */
+function sampleCostUsage(): CostUsage {
+  return {
+    costTodayUsd: 12.34,
+    inputTokensToday: 1000,
+    outputTokensToday: 500,
+    sinceEpochMs: 1700000000000,
+  };
+}
+
+function costUsageFrame(overrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({ type: 'cost-usage', ...sampleCostUsage(), ...overrides });
+}
+
+describe('ws-client cost-usage frames', () => {
+  beforeEach(() => {
+    FakeSocket.instances = [];
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function makeCostUsageClient() {
+    const received: CostUsage[] = [];
+    const client = createWsClient({
+      url: 'ws://localhost/ws',
+      createWebSocket: (url) => new FakeSocket(url),
+    });
+    const off = client.onCostUsage((usage) => received.push(usage));
+    const socket = FakeSocket.instances[0]!;
+    socket.open();
+    return { client, received, off, socket };
+  }
+
+  it('delivers a valid cost-usage frame to subscribers', () => {
+    const { received, socket } = makeCostUsageClient();
+
+    socket.message(costUsageFrame());
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toEqual(sampleCostUsage());
+    expect(Object.isFrozen(received[0])).toBe(true);
+  });
+
+  it('drops malformed cost-usage frames without emitting to listeners', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { received, socket } = makeCostUsageClient();
+
+    expect(() => socket.message(costUsageFrame({ costTodayUsd: 'nope' }))).not.toThrow();
+    expect(() => socket.message(costUsageFrame({ inputTokensToday: NaN }))).not.toThrow();
+    expect(() =>
+      socket.message(JSON.stringify({ type: 'cost-usage', costTodayUsd: 1 })),
+    ).not.toThrow();
 
     expect(received).toEqual([]);
     expect(warn).toHaveBeenCalled();

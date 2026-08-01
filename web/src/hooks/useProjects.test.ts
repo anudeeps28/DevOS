@@ -7,6 +7,8 @@ import type {
   BridgeStateListener,
   CandidateListener,
   ConnectionStatus,
+  CostUsage,
+  CostUsageListener,
   GitState,
   GitStateListener,
   LifecycleSignals,
@@ -42,6 +44,7 @@ function makeFakeClient() {
   let sessionPersonasListener: SessionPersonasListener | null = null;
   let bridgeStateListener: BridgeStateListener | null = null;
   let sessionTranscriptListener: SessionTranscriptListener | null = null;
+  let costUsageListener: CostUsageListener | null = null;
   const pin = vi.fn();
   const unpin = vi.fn();
   const discover = vi.fn();
@@ -126,6 +129,12 @@ function makeFakeClient() {
     onPermissionRequest: () => () => {},
     onForeignNeedsYou: () => () => {},
     onHookBusLiveness: () => () => {},
+    onCostUsage: (listener) => {
+      costUsageListener = listener;
+      return () => {
+        costUsageListener = null;
+      };
+    },
     pin,
     unpin,
     discover,
@@ -184,6 +193,7 @@ function makeFakeClient() {
       sessionId: string,
       events: readonly TranscriptEvent[],
     ) => sessionTranscriptListener?.(path, sessionId, events),
+    emitCostUsage: (usage: CostUsage) => costUsageListener?.(usage),
   };
 }
 
@@ -850,6 +860,32 @@ describe('useProjects', () => {
       '/abs/one': stateOne,
       '/abs/two': stateTwo,
     });
+  });
+
+  it('starts with a null costToday', () => {
+    const fake = makeFakeClient();
+    const { result } = renderHook(() =>
+      useProjects({ createClient: () => fake.client }),
+    );
+
+    expect(result.current.costToday).toBeNull();
+  });
+
+  it('sets costToday when a cost-usage frame is emitted', () => {
+    const fake = makeFakeClient();
+    const { result } = renderHook(() =>
+      useProjects({ createClient: () => fake.client }),
+    );
+
+    const usage: CostUsage = {
+      costTodayUsd: 4.5,
+      inputTokensToday: 100,
+      outputTokensToday: 50,
+      sinceEpochMs: 1700000000000,
+    };
+    act(() => fake.emitCostUsage(usage));
+
+    expect(result.current.costToday).toEqual(usage);
   });
 
   it('closes the client on unmount', () => {

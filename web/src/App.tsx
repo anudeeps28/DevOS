@@ -1,6 +1,7 @@
 import { useState } from 'react';
 
 import { ConnectionIndicator } from '@/components/ConnectionIndicator';
+import { CostToday } from '@/components/CostToday';
 import { Fleet } from '@/components/Fleet';
 import { Heartbeat } from '@/components/Heartbeat';
 import { HookBusIndicator } from '@/components/HookBusIndicator';
@@ -44,6 +45,7 @@ function App() {
     resolvePermission,
     foreignNeedsYou,
     hookBusConnected,
+    costToday,
   } = useProjects();
 
   return (
@@ -52,6 +54,7 @@ function App() {
       <ConnectionIndicator status={status} />
       <HookBusIndicator connected={hookBusConnected} />
       <Heartbeat heartbeat={heartbeat} />
+      <CostToday costToday={costToday} />
       <div className="flex w-full max-w-4xl flex-row gap-6">
         <LeftRail active={tab} onSelect={setTab} />
         <div className="flex flex-1 flex-col items-center gap-8">

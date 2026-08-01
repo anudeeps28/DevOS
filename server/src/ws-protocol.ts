@@ -402,6 +402,15 @@ export interface HookBusLivenessSnapshot {
   readonly lastReceivedAt: number | null;
 }
 
+/** Outbound: a usage indicator (not a bill) — today's spend + token counts for owned sessions. */
+export interface CostUsageSnapshot {
+  readonly type: 'cost-usage';
+  readonly costTodayUsd: number;
+  readonly inputTokensToday: number;
+  readonly outputTokensToday: number;
+  readonly sinceEpochMs: number;
+}
+
 /** Every message the server accepts from a client. */
 export type InboundMessage =
   | PinMessage
@@ -434,7 +443,8 @@ export type OutboundMessage =
   | BridgeStateSnapshot
   | ForeignSessionNeedsYouSnapshot
   | HookBusLivenessSnapshot
-  | SessionPersonasSnapshot;
+  | SessionPersonasSnapshot
+  | CostUsageSnapshot;
 
 /**
  * Validate a raw WS frame against the inbound contract. Branches on `type` first:

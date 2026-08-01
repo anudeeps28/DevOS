@@ -13,6 +13,7 @@ import { createHookBus, type HookBus } from './hooks/hook-bus.js';
 import { createHookHandler } from './hooks/hook-handler.js';
 import { createRegistry, type Registry } from './registry/registry.js';
 import { createBridge, type Bridge } from './session/bridge.js';
+import { createCostLedgerStore, type CostLedgerStore } from './session/cost-ledger-store.js';
 import { createSessionStore } from './session/session-store.js';
 import { createSessionManager, type SessionManager } from './session/session-manager.js';
 import type { QueryFn } from './session/session-engine.js';
@@ -46,6 +47,8 @@ export interface DevOsServer {
   readonly hookBus: HookBus;
   /** The resolved local WS auth token (minted or supplied) — exposed for tests. */
   readonly authToken: string;
+  /** The cost ledger store — exposed so integration tests can read the SQLite aggregate directly. */
+  readonly costLedger: CostLedgerStore;
 }
 
 export function createServer(options?: CreateServerOptions): DevOsServer {
@@ -58,8 +61,10 @@ export function createServer(options?: CreateServerOptions): DevOsServer {
   const db = openDatabase(options?.dbPath ?? DB_PATH);
   const registry = createRegistry(db);
   const sessionStore = createSessionStore(db);
+  const costLedger = createCostLedgerStore(db);
   const sessionManager = createSessionManager({
     store: sessionStore,
+    costLedger,
     ...(options?.query !== undefined ? { query: options.query } : {}),
   });
 
@@ -96,6 +101,7 @@ export function createServer(options?: CreateServerOptions): DevOsServer {
     sessionManager,
     bridge,
     hookBus,
+    costLedger,
     projectRoots: options?.projectRoots ?? PROJECT_ROOTS,
     authToken,
     requireToken,
@@ -130,7 +136,7 @@ export function createServer(options?: CreateServerOptions): DevOsServer {
     db.close();
   };
 
-  return { server, start, stop, registry, sessionManager, bridge, hookBus, authToken };
+  return { server, start, stop, registry, sessionManager, bridge, hookBus, authToken, costLedger };
 }
 
 function registerShutdown(instance: DevOsServer): void {
