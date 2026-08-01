@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { WebSocket } from 'ws';
 
 import { WS_PATH } from './config.js';
+import { createHookBus } from './hooks/hook-bus.js';
 import type { Registry } from './registry/registry.js';
 import type { Bridge } from './session/bridge.js';
 import type {
@@ -269,6 +270,7 @@ async function startGateway(options: HarnessOptions = {}): Promise<GatewayHarnes
     registry,
     sessionManager,
     bridge,
+    hookBus: createHookBus(),
     projectRoots: [],
     authToken: '',
     requireToken: false,

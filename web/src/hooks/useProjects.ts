@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 
 import {
   createWsClient,
+  type ForeignNeedsYou,
   type GitState,
   type LifecycleSignals,
   type PermissionRequest,
@@ -78,6 +79,10 @@ export interface UseProjectsResult {
     requestId: string,
     decision: 'allow' | 'deny',
   ) => void;
+  /** Foreign-session needs-you signals, deduped by session id; cleared items are removed. */
+  readonly foreignNeedsYou: readonly ForeignNeedsYou[];
+  /** Whether the server's hook bus is currently connected. */
+  readonly hookBusConnected: boolean;
 }
 
 export interface UseProjectsOptions {
@@ -101,6 +106,8 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
   const [pendingPermissions, setPendingPermissions] = useState<
     Record<string, readonly PermissionRequest[]>
   >({});
+  const [foreignNeedsYou, setForeignNeedsYou] = useState<readonly ForeignNeedsYou[]>([]);
+  const [hookBusConnected, setHookBusConnected] = useState(false);
 
   // Hold the latest factory in a ref so the setup effect can run once (on mount)
   // without re-subscribing when an inline options object changes identity.
@@ -180,6 +187,15 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
         return { ...prev, [req.sessionId]: [...others, req] };
       }),
     );
+    // Immutable fold: a foreign-session needs-you signal upserts by session id;
+    // a cleared signal removes the entry.
+    const offForeignNeedsYou = client.onForeignNeedsYou((item) =>
+      setForeignNeedsYou((prev) => {
+        const others = prev.filter((x) => x.sessionId !== item.sessionId);
+        return item.cleared ? others : [...others, item];
+      }),
+    );
+    const offHookBusLiveness = client.onHookBusLiveness((s) => setHookBusConnected(s.connected));
     // Immutable fold: a transcript batch upserts by seq within the session id.
     const offSessionTranscript = client.onSessionTranscript((_path, sessionId, events) =>
       setTranscripts((prev) => ({
@@ -222,6 +238,8 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
       offSessionState();
       offSessionTranscript();
       offPermissionRequest();
+      offForeignNeedsYou();
+      offHookBusLiveness();
       offStatus();
       client.close();
       clientRef.current = null;
@@ -319,5 +337,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     interruptSession,
     pendingPermissions,
     resolvePermission,
+    foreignNeedsYou,
+    hookBusConnected,
   };
 }

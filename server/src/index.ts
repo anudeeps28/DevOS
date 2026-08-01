@@ -7,8 +7,10 @@
 import http from 'node:http';
 import { pathToFileURL } from 'node:url';
 import type { AddressInfo } from 'node:net';
-import { DB_PATH, HOST, PORT, PROD, PROJECT_ROOTS, WS_PATH, assertLoopbackHost } from './config.js';
+import { DB_PATH, HOOK_PATH, HOST, PORT, PROD, PROJECT_ROOTS, WS_PATH, assertLoopbackHost } from './config.js';
 import { openDatabase } from './db/database.js';
+import { createHookBus, type HookBus } from './hooks/hook-bus.js';
+import { createHookHandler } from './hooks/hook-handler.js';
 import { createRegistry, type Registry } from './registry/registry.js';
 import { createBridge, type Bridge } from './session/bridge.js';
 import { createSessionStore } from './session/session-store.js';
@@ -40,6 +42,8 @@ export interface DevOsServer {
   readonly sessionManager: SessionManager;
   /** The Bridge — exposed so integration tests can inspect pipeline runs. */
   readonly bridge: Bridge;
+  /** The hook event bus — exposed so integration tests can inspect foreign-session events. */
+  readonly hookBus: HookBus;
   /** The resolved local WS auth token (minted or supplied) — exposed for tests. */
   readonly authToken: string;
 }
@@ -65,11 +69,33 @@ export function createServer(options?: CreateServerOptions): DevOsServer {
   const requireToken = options?.requireToken ?? PROD;
 
   const staticHandler = createStaticHandler({ authToken });
-  const server = http.createServer((req, res) => staticHandler(req, res));
+
+  // Hook event bus: foreign Claude sessions POST their hook events to HOOK_PATH.
+  // Route the hook POST before the static handler (which 405s non-GET) so no
+  // asset read happens on the hook path. The WS upgrade never reaches this
+  // request handler — `ws` intercepts it on the server's 'upgrade' event.
+  const hookBus = createHookBus();
+  const hookHandler = createHookHandler({ hookBus });
+  const server = http.createServer((req, res) => {
+    if (req.method === 'POST') {
+      let pathname: string | null = null;
+      try {
+        pathname = new URL(req.url ?? '/', 'http://localhost').pathname;
+      } catch {
+        pathname = null;
+      }
+      if (pathname === HOOK_PATH) {
+        hookHandler(req, res);
+        return;
+      }
+    }
+    staticHandler(req, res);
+  });
   const gateway = attachWsGateway(server, {
     registry,
     sessionManager,
     bridge,
+    hookBus,
     projectRoots: options?.projectRoots ?? PROJECT_ROOTS,
     authToken,
     requireToken,
@@ -104,7 +130,7 @@ export function createServer(options?: CreateServerOptions): DevOsServer {
     db.close();
   };
 
-  return { server, start, stop, registry, sessionManager, bridge, authToken };
+  return { server, start, stop, registry, sessionManager, bridge, hookBus, authToken };
 }
 
 function registerShutdown(instance: DevOsServer): void {
