@@ -106,6 +106,8 @@ export interface UseProjectsResult {
   readonly requestWorkItemSessions: (path: string, workItemId: string) => void;
   /** Latest bridge-state snapshots keyed by absolute project path; empty until the first arrives. */
   readonly bridgeStates: Record<string, BridgeState>;
+  /** Approve a parked bridge gate for a project path; delegates to the live client. */
+  readonly approveGate: (path: string) => void;
   /** Spawn an owned session for a pinned project + role; delegates to the live client. */
   readonly spawnSession: (path: string, role: string, workItemId?: string) => void;
   /** Folded per-session transcripts keyed by session id (upserted + sorted by seq, bounded). */
@@ -409,6 +411,10 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     });
   }
 
+  function approveGate(path: string): void {
+    clientRef.current?.sendGateApprove(path);
+  }
+
   return {
     projects,
     candidates,
@@ -427,6 +433,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     workItemSessions,
     requestWorkItemSessions,
     bridgeStates,
+    approveGate,
     spawnSession,
     transcripts,
     requestTranscript,

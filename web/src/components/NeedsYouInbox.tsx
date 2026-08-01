@@ -21,19 +21,19 @@ function InboxIcon({ kind }: { kind: BridgeInboxItem['kind'] }): JSX.Element {
  * BridgeState's inbox and reports clicks via `onApprove`.
  */
 export function NeedsYouInbox({
-  bridgeState,
+  bridgeStates,
   onApprove,
   permissions = [],
   onPermissionDecision = () => {},
   foreignItems = [],
 }: {
-  bridgeState: BridgeState | null;
+  bridgeStates: readonly BridgeState[];
   onApprove: (path: string) => void;
   permissions?: readonly PermissionRequest[];
   onPermissionDecision?: (sessionId: string, requestId: string, decision: 'allow' | 'deny') => void;
   foreignItems?: readonly ForeignNeedsYou[];
 }): JSX.Element {
-  const inbox = bridgeState?.inbox ?? [];
+  const inboxItems = bridgeStates.flatMap((state) => state.inbox.map((item) => ({ item, path: state.path })));
 
   return (
     <section
@@ -43,7 +43,7 @@ export function NeedsYouInbox({
       <span className="text-xs font-medium uppercase tracking-widest text-muted-foreground">
         Needs you
       </span>
-      {inbox.length === 0 && permissions.length === 0 && foreignItems.length === 0 ? (
+      {inboxItems.length === 0 && permissions.length === 0 && foreignItems.length === 0 ? (
         <p
           data-testid="needs-you-inbox-empty"
           className="rounded-md border border-dashed border-border px-3 py-4 text-center text-sm text-muted-foreground"
@@ -89,26 +89,26 @@ export function NeedsYouInbox({
               </div>
             </li>
           ))}
-          {inbox.map((item, index) => (
+          {inboxItems.map((entry, index) => (
             <li
-              key={`${item.stage}-${item.ts}-${index}`}
+              key={`${entry.item.stage}-${entry.item.ts}-${index}`}
               data-testid={`needs-you-item-${index}`}
-              data-kind={item.kind}
+              data-kind={entry.item.kind}
               className="flex items-start justify-between gap-2 rounded-lg border border-border bg-card p-3"
             >
               <div className="flex min-w-0 items-start gap-2">
-                <InboxIcon kind={item.kind} />
+                <InboxIcon kind={entry.item.kind} />
                 <div className="flex min-w-0 flex-col gap-0.5">
                   <span className="text-xs font-medium uppercase tracking-widest text-muted-foreground">
-                    {item.stage}
+                    {entry.item.stage}
                   </span>
-                  <span className="text-sm text-foreground">{item.reason}</span>
+                  <span className="text-sm text-foreground">{entry.item.reason}</span>
                 </div>
               </div>
               <button
                 type="button"
                 data-testid={`needs-you-approve-${index}`}
-                onClick={() => bridgeState !== null && onApprove(bridgeState.path)}
+                onClick={() => onApprove(entry.path)}
                 className="shrink-0 rounded-md border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-accent"
               >
                 Approve

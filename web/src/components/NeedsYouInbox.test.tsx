@@ -17,13 +17,13 @@ function bridgeState(overrides: Partial<BridgeState> = {}): BridgeState {
 
 describe('NeedsYouInbox', () => {
   it('shows the empty state when there is no bridge state', () => {
-    render(<NeedsYouInbox bridgeState={null} onApprove={() => {}} />);
+    render(<NeedsYouInbox bridgeStates={[]} onApprove={() => {}} />);
 
     expect(screen.getByTestId('needs-you-inbox-empty')).toBeInTheDocument();
   });
 
   it('shows the empty state when the inbox is empty', () => {
-    render(<NeedsYouInbox bridgeState={bridgeState({ inbox: [] })} onApprove={() => {}} />);
+    render(<NeedsYouInbox bridgeStates={[bridgeState({ inbox: [] })]} onApprove={() => {}} />);
 
     expect(screen.getByTestId('needs-you-inbox-empty')).toBeInTheDocument();
   });
@@ -32,7 +32,7 @@ describe('NeedsYouInbox', () => {
     const state = bridgeState({
       inbox: [{ stage: 'implement', kind: 'question', reason: 'Which approach?', ts: 1700000000000 }],
     });
-    render(<NeedsYouInbox bridgeState={state} onApprove={() => {}} />);
+    render(<NeedsYouInbox bridgeStates={[state]} onApprove={() => {}} />);
 
     expect(screen.queryByTestId('needs-you-inbox-empty')).not.toBeInTheDocument();
     const item = screen.getByTestId('needs-you-item-0');
@@ -46,11 +46,44 @@ describe('NeedsYouInbox', () => {
     const state = bridgeState({
       inbox: [{ stage: 'implement', kind: 'interrupt', reason: 'paused', ts: 1 }],
     });
-    render(<NeedsYouInbox bridgeState={state} onApprove={onApprove} />);
+    render(<NeedsYouInbox bridgeStates={[state]} onApprove={onApprove} />);
 
     fireEvent.click(screen.getByTestId('needs-you-approve-0'));
 
     expect(onApprove).toHaveBeenCalledWith('/abs/repo');
+  });
+
+  it('surfaces parked items from multiple pinned projects', () => {
+    const stateOne = bridgeState({
+      path: '/abs/one',
+      inbox: [{ stage: 'implement', kind: 'question', reason: 'Which approach?', ts: 1 }],
+    });
+    const stateTwo = bridgeState({
+      path: '/abs/two',
+      inbox: [{ stage: 'review', kind: 'interrupt', reason: 'paused', ts: 2 }],
+    });
+    render(<NeedsYouInbox bridgeStates={[stateOne, stateTwo]} onApprove={() => {}} />);
+
+    expect(screen.getByTestId('needs-you-item-0')).toBeInTheDocument();
+    expect(screen.getByTestId('needs-you-item-1')).toBeInTheDocument();
+    expect(screen.queryByTestId('needs-you-inbox-empty')).not.toBeInTheDocument();
+  });
+
+  it("fires onApprove with the clicked item's own project path", () => {
+    const onApprove = vi.fn();
+    const stateOne = bridgeState({
+      path: '/abs/one',
+      inbox: [{ stage: 'implement', kind: 'question', reason: 'Which approach?', ts: 1 }],
+    });
+    const stateTwo = bridgeState({
+      path: '/abs/two',
+      inbox: [{ stage: 'review', kind: 'interrupt', reason: 'paused', ts: 2 }],
+    });
+    render(<NeedsYouInbox bridgeStates={[stateOne, stateTwo]} onApprove={onApprove} />);
+
+    fireEvent.click(screen.getByTestId('needs-you-approve-1'));
+
+    expect(onApprove).toHaveBeenCalledWith('/abs/two');
   });
 
   it('renders a pending permission request with its title', () => {
@@ -63,7 +96,7 @@ describe('NeedsYouInbox', () => {
       title: 'Write to config.json',
       input: '{"file":"config.json"}',
     };
-    render(<NeedsYouInbox bridgeState={null} onApprove={() => {}} permissions={[permission]} />);
+    render(<NeedsYouInbox bridgeStates={[]} onApprove={() => {}} permissions={[permission]} />);
 
     const item = screen.getByTestId('needs-you-permission-req9');
     expect(item).toBeInTheDocument();
@@ -83,7 +116,7 @@ describe('NeedsYouInbox', () => {
     };
     render(
       <NeedsYouInbox
-        bridgeState={null}
+        bridgeStates={[]}
         onApprove={() => {}}
         permissions={[permission]}
         onPermissionDecision={onPermissionDecision}
@@ -108,7 +141,7 @@ describe('NeedsYouInbox', () => {
     };
     render(
       <NeedsYouInbox
-        bridgeState={null}
+        bridgeStates={[]}
         onApprove={() => {}}
         permissions={[permission]}
         onPermissionDecision={onPermissionDecision}
@@ -130,7 +163,7 @@ describe('NeedsYouInbox', () => {
       title: null,
       input: '{}',
     };
-    render(<NeedsYouInbox bridgeState={null} onApprove={() => {}} permissions={[permission]} />);
+    render(<NeedsYouInbox bridgeStates={[]} onApprove={() => {}} permissions={[permission]} />);
 
     expect(screen.queryByTestId('needs-you-inbox-empty')).not.toBeInTheDocument();
   });
@@ -144,7 +177,7 @@ describe('NeedsYouInbox', () => {
       ts: 1700000000000,
       cleared: false,
     };
-    render(<NeedsYouInbox bridgeState={null} onApprove={() => {}} foreignItems={[foreignItem]} />);
+    render(<NeedsYouInbox bridgeStates={[]} onApprove={() => {}} foreignItems={[foreignItem]} />);
 
     const item = screen.getByTestId('needs-you-foreign-foreign-1');
     expect(item).toHaveAttribute('data-kind', 'idle_prompt');
@@ -160,14 +193,14 @@ describe('NeedsYouInbox', () => {
       ts: 1700000000000,
       cleared: false,
     };
-    render(<NeedsYouInbox bridgeState={null} onApprove={() => {}} foreignItems={[foreignItem]} />);
+    render(<NeedsYouInbox bridgeStates={[]} onApprove={() => {}} foreignItems={[foreignItem]} />);
 
     expect(screen.queryByTestId('needs-you-inbox-empty')).not.toBeInTheDocument();
   });
 
   it('shows the empty state when inbox, permissions, and foreignItems are all empty', () => {
     render(
-      <NeedsYouInbox bridgeState={null} onApprove={() => {}} permissions={[]} foreignItems={[]} />,
+      <NeedsYouInbox bridgeStates={[]} onApprove={() => {}} permissions={[]} foreignItems={[]} />,
     );
 
     expect(screen.getByTestId('needs-you-inbox-empty')).toBeInTheDocument();

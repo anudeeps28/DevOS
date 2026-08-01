@@ -37,6 +37,7 @@ function App() {
     sessions,
     sessionPersonas,
     bridgeStates,
+    approveGate,
     spawnSession,
     transcripts,
     sendSessionInput,
@@ -104,8 +105,8 @@ function App() {
           )}
           {tab === 'inbox' && (
             <NeedsYouInbox
-              bridgeState={null}
-              onApprove={() => {}}
+              bridgeStates={Object.values(bridgeStates)}
+              onApprove={approveGate}
               permissions={Object.values(pendingPermissions).flat()}
               onPermissionDecision={(sessionId, requestId, decision) =>
                 resolvePermission(sessionId, requestId, decision)

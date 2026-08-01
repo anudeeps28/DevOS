@@ -866,6 +866,18 @@ describe('useProjects', () => {
     });
   });
 
+  it('approveGate delegates to client.sendGateApprove with the path', () => {
+    const fake = makeFakeClient();
+    const { result } = renderHook(() =>
+      useProjects({ createClient: () => fake.client }),
+    );
+
+    act(() => result.current.approveGate('/abs/one'));
+
+    expect(fake.sendGateApprove).toHaveBeenCalledWith('/abs/one');
+    expect(fake.sendGateApprove).toHaveBeenCalledTimes(1);
+  });
+
   it('starts with a null costToday', () => {
     const fake = makeFakeClient();
     const { result } = renderHook(() =>
