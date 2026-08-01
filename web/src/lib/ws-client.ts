@@ -111,6 +111,23 @@ export interface SessionState {
   readonly role: string;
   readonly status: string;
   readonly sdkSessionId: string | null;
+  readonly workItemId: string | null;
+  readonly rateLimited: boolean;
+}
+
+/**
+ * One owned session's persona identity — role x its story's live phase, joined
+ * against the roster. Mirrors the server's SessionPersona (server/src/ws-protocol.ts)
+ * — duplicated typed contract, no shared package. `phase` is typed as a plain
+ * string here — the client doesn't import the server's Phase union. Frozen —
+ * never mutated after construction.
+ */
+export interface SessionPersona {
+  readonly sessionId: string;
+  readonly workItemId: string | null;
+  readonly role: string;
+  readonly phase: string | null;
+  readonly persona: string | null;
 }
 
 /**
@@ -275,6 +292,10 @@ export type GitStateListener = (path: string, state: GitState) => void;
 export type TrackerStateListener = (path: string, state: TrackerState) => void;
 export type LifecycleSignalsListener = (path: string, signals: LifecycleSignals) => void;
 export type SessionStateListener = (path: string, session: SessionState) => void;
+export type SessionPersonasListener = (
+  path: string,
+  personas: readonly SessionPersona[],
+) => void;
 export type SessionTranscriptListener = (
   path: string,
   sessionId: string,
@@ -304,6 +325,8 @@ export interface WsClient {
   readonly onLifecycleSignals: (listener: LifecycleSignalsListener) => () => void;
   /** Subscribe to validated owned-session state snapshots. */
   readonly onSessionState: (listener: SessionStateListener) => () => void;
+  /** Subscribe to validated session-personas snapshots. */
+  readonly onSessionPersonas: (listener: SessionPersonasListener) => () => void;
   /** Subscribe to validated owned-session transcript batches. */
   readonly onSessionTranscript: (listener: SessionTranscriptListener) => () => void;
   /** Subscribe to validated bridge-state snapshots. */
@@ -326,6 +349,8 @@ export interface WsClient {
   readonly requestTrackerState: (path: string) => void;
   /** Request the current lifecycle signals for a project path; no-op (warns) when the socket is not open. */
   readonly requestLifecycleSignals: (path: string) => void;
+  /** Request the current session-personas join for a project path; no-op (warns) when the socket is not open. */
+  readonly requestSessionPersonas: (path: string) => void;
   /** Spawn an owned session for a pinned project + role; no-op (warns) when the socket is not open. */
   readonly spawnSession: (path: string, role: string, workItemId?: string) => void;
   /** Request the buffered transcript of a live owned session; no-op (warns) when the socket is not open. */
@@ -719,22 +744,80 @@ function parseLifecycleSignalsSnapshot(
 
 /**
  * Validate a single raw entry against the SessionState contract:
- * `{ id: string, projectPath: string, role: string, status: string, sdkSessionId: string|null }`.
+ * `{ id: string, projectPath: string, role: string, status: string, sdkSessionId: string|null,
+ *    workItemId: string|null, rateLimited: boolean }`.
  * Returns a frozen SessionState, or null for anything malformed.
  */
 function parseSessionState(entry: unknown): SessionState | null {
   if (typeof entry !== 'object' || entry === null) return null;
 
   const record = entry as Record<string, unknown>;
-  const { id, projectPath, role, status, sdkSessionId } = record;
+  const { id, projectPath, role, status, sdkSessionId, workItemId, rateLimited } = record;
 
   if (typeof id !== 'string' || id.length === 0) return null;
   if (typeof projectPath !== 'string' || projectPath.length === 0) return null;
   if (typeof role !== 'string') return null;
   if (typeof status !== 'string') return null;
   if (sdkSessionId !== null && typeof sdkSessionId !== 'string') return null;
+  if (workItemId !== null && typeof workItemId !== 'string') return null;
+  if (typeof rateLimited !== 'boolean') return null;
 
-  return Object.freeze({ id, projectPath, role, status, sdkSessionId });
+  return Object.freeze({ id, projectPath, role, status, sdkSessionId, workItemId, rateLimited });
+}
+
+/**
+ * Validate a single raw entry against the SessionPersona contract:
+ * `{ sessionId: string, workItemId: string|null, role: string, phase: string|null,
+ *    persona: string|null }`.
+ * Returns a frozen SessionPersona, or null for anything malformed.
+ */
+function parseSessionPersona(entry: unknown): SessionPersona | null {
+  if (typeof entry !== 'object' || entry === null) return null;
+
+  const record = entry as Record<string, unknown>;
+  const { sessionId, workItemId, role, phase, persona } = record;
+
+  if (typeof sessionId !== 'string' || sessionId.length === 0) return null;
+  if (workItemId !== null && typeof workItemId !== 'string') return null;
+  if (typeof role !== 'string') return null;
+  if (phase !== null && typeof phase !== 'string') return null;
+  if (persona !== null && typeof persona !== 'string') return null;
+
+  return Object.freeze({ sessionId, workItemId, role, phase, persona });
+}
+
+/**
+ * Validate a raw WS frame against the pinned session-personas contract:
+ * `{ type: 'session-personas', path: string, personas: SessionPersona[] }`.
+ * Returns a frozen `{ path, personas }`, or null for anything malformed.
+ */
+function parseSessionPersonasSnapshot(
+  data: unknown,
+): { path: string; personas: readonly SessionPersona[] } | null {
+  if (typeof data !== 'string') return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return null;
+  }
+
+  if (typeof parsed !== 'object' || parsed === null) return null;
+
+  const frame = parsed as Record<string, unknown>;
+  if (frame.type !== 'session-personas') return null;
+  if (typeof frame.path !== 'string' || frame.path.length === 0) return null;
+  if (!Array.isArray(frame.personas)) return null;
+
+  const personas: SessionPersona[] = [];
+  for (const entry of frame.personas) {
+    const persona = parseSessionPersona(entry);
+    if (persona === null) return null;
+    personas.push(persona);
+  }
+
+  return Object.freeze({ path: frame.path, personas: Object.freeze(personas) });
 }
 
 /**
@@ -1100,6 +1183,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
   const trackerStateListeners = new Set<TrackerStateListener>();
   const lifecycleSignalsListeners = new Set<LifecycleSignalsListener>();
   const sessionStateListeners = new Set<SessionStateListener>();
+  const sessionPersonasListeners = new Set<SessionPersonasListener>();
   const sessionTranscriptListeners = new Set<SessionTranscriptListener>();
   const bridgeStateListeners = new Set<BridgeStateListener>();
   const permissionRequestListeners = new Set<PermissionRequestListener>();
@@ -1149,6 +1233,10 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
 
   function emitSessionState(path: string, session: SessionState): void {
     for (const listener of sessionStateListeners) listener(path, session);
+  }
+
+  function emitSessionPersonas(path: string, personas: readonly SessionPersona[]): void {
+    for (const listener of sessionPersonasListeners) listener(path, personas);
   }
 
   function emitSessionTranscript(
@@ -1265,6 +1353,16 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
       return;
     }
 
+    if (type === 'session-personas') {
+      const snapshot = parseSessionPersonasSnapshot(data);
+      if (snapshot === null) {
+        console.warn('[ws-client] dropped malformed frame:', data);
+        return;
+      }
+      emitSessionPersonas(snapshot.path, snapshot.personas);
+      return;
+    }
+
     if (type === 'session-transcript') {
       const snapshot = parseSessionTranscriptSnapshot(data);
       if (snapshot === null) {
@@ -1375,6 +1473,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     trackerStateListeners.clear();
     lifecycleSignalsListeners.clear();
     sessionStateListeners.clear();
+    sessionPersonasListeners.clear();
     sessionTranscriptListeners.clear();
     bridgeStateListeners.clear();
     permissionRequestListeners.clear();
@@ -1424,6 +1523,10 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
 
   function requestLifecycleSignals(path: string): void {
     sendFrame({ type: 'lifecycle-signals', path });
+  }
+
+  function requestSessionPersonas(path: string): void {
+    sendFrame({ type: 'session-personas', path });
   }
 
   function spawnSession(path: string, role: string, workItemId?: string): void {
@@ -1524,6 +1627,12 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
         sessionStateListeners.delete(listener);
       };
     },
+    onSessionPersonas: (listener) => {
+      sessionPersonasListeners.add(listener);
+      return () => {
+        sessionPersonasListeners.delete(listener);
+      };
+    },
     onSessionTranscript: (listener) => {
       sessionTranscriptListeners.add(listener);
       return () => {
@@ -1560,6 +1669,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     requestGitState,
     requestTrackerState,
     requestLifecycleSignals,
+    requestSessionPersonas,
     spawnSession,
     requestTranscript,
     sendSessionInput,

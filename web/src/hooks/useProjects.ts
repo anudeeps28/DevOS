@@ -2,12 +2,14 @@ import { useEffect, useRef, useState } from 'react';
 
 import {
   createWsClient,
+  type BridgeState,
   type ForeignNeedsYou,
   type GitState,
   type LifecycleSignals,
   type PermissionRequest,
   type RegistryCandidate,
   type RegistryProject,
+  type SessionPersona,
   type SessionState,
   type TrackerState,
   type TranscriptEvent,
@@ -39,6 +41,34 @@ function foldTranscript(
     : merged;
 }
 
+/**
+ * Immutably fold a session-personas snapshot into the existing per-path list:
+ * upsert (replace) by `sessionId`, but RETAIN a previously non-null `persona`/
+ * `phase` when the incoming entry for that session id has it as null — a late
+ * join that hasn't resolved a phase yet shouldn't blank out a value the UI
+ * already showed. Never throws. Returns a NEW map; inputs are not mutated.
+ */
+function foldPersonas(
+  prev: Record<string, readonly SessionPersona[]>,
+  path: string,
+  incoming: readonly SessionPersona[],
+): Record<string, readonly SessionPersona[]> {
+  const prior = prev[path] ?? [];
+  const priorById = new Map(prior.map((p) => [p.sessionId, p]));
+
+  const merged = incoming.map((entry) => {
+    const previousEntry = priorById.get(entry.sessionId);
+    if (previousEntry === undefined) return entry;
+    return {
+      ...entry,
+      persona: entry.persona ?? previousEntry.persona,
+      phase: entry.phase ?? previousEntry.phase,
+    };
+  });
+
+  return { ...prev, [path]: Object.freeze(merged) };
+}
+
 export interface UseProjectsResult {
   /** Latest validated registry snapshot; empty until the first one arrives. */
   readonly projects: readonly RegistryProject[];
@@ -64,6 +94,12 @@ export interface UseProjectsResult {
   readonly requestLifecycleSignals: (path: string) => void;
   /** Latest owned-session states keyed by absolute project path (upserted by session id). */
   readonly sessions: Record<string, readonly SessionState[]>;
+  /** Latest session-persona joins keyed by absolute project path (upserted by session id). */
+  readonly sessionPersonas: Record<string, readonly SessionPersona[]>;
+  /** Request a fresh session-personas join for a project path; delegates to the live client. */
+  readonly requestSessionPersonas: (path: string) => void;
+  /** Latest bridge-state snapshots keyed by absolute project path; empty until the first arrives. */
+  readonly bridgeStates: Record<string, BridgeState>;
   /** Spawn an owned session for a pinned project + role; delegates to the live client. */
   readonly spawnSession: (path: string, role: string, workItemId?: string) => void;
   /** Folded per-session transcripts keyed by session id (upserted + sorted by seq, bounded). */
@@ -105,6 +141,10 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
   const [trackerStates, setTrackerStates] = useState<Record<string, TrackerState>>({});
   const [lifecycleSignals, setLifecycleSignals] = useState<Record<string, LifecycleSignals>>({});
   const [sessions, setSessions] = useState<Record<string, readonly SessionState[]>>({});
+  const [sessionPersonas, setSessionPersonas] = useState<
+    Record<string, readonly SessionPersona[]>
+  >({});
+  const [bridgeStates, setBridgeStates] = useState<Record<string, BridgeState>>({});
   const [transcripts, setTranscripts] = useState<Record<string, readonly TranscriptEvent[]>>({});
   const [pendingPermissions, setPendingPermissions] = useState<
     Record<string, readonly PermissionRequest[]>
@@ -181,6 +221,16 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
         });
       }
     });
+    // Immutable fold: a session-personas snapshot upserts by session id within the
+    // path, retaining a previously non-null persona/phase when the incoming entry
+    // is null (see foldPersonas).
+    const offSessionPersonas = client.onSessionPersonas((path, personas) =>
+      setSessionPersonas((prev) => foldPersonas(prev, path, personas)),
+    );
+    // Immutable fold: a bridge-state snapshot replaces the map with a new object.
+    const offBridgeState = client.onBridgeState((path, bridgeState) =>
+      setBridgeStates((prev) => ({ ...prev, [path]: bridgeState })),
+    );
     // Immutable fold: a permission request upserts by requestId within the session id.
     const offPermissionRequest = client.onPermissionRequest((req) =>
       setPendingPermissions((prev) => {
@@ -229,6 +279,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
         client.requestGitState(project.path);
         client.requestTrackerState(project.path);
         client.requestLifecycleSignals(project.path);
+        client.requestSessionPersonas(project.path);
       }
       // Backfill transcripts for known live sessions not yet requested on
       // this connection.
@@ -246,6 +297,8 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
       offTrackerState();
       offLifecycleSignals();
       offSessionState();
+      offSessionPersonas();
+      offBridgeState();
       offSessionTranscript();
       offPermissionRequest();
       offForeignNeedsYou();
@@ -266,6 +319,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
       client.requestGitState(project.path);
       client.requestTrackerState(project.path);
       client.requestLifecycleSignals(project.path);
+      client.requestSessionPersonas(project.path);
     }
   }, [projects]);
 
@@ -291,6 +345,10 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
 
   function requestLifecycleSignals(path: string): void {
     clientRef.current?.requestLifecycleSignals(path);
+  }
+
+  function requestSessionPersonas(path: string): void {
+    clientRef.current?.requestSessionPersonas(path);
   }
 
   function spawnSession(path: string, role: string, workItemId?: string): void {
@@ -340,6 +398,9 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     lifecycleSignals,
     requestLifecycleSignals,
     sessions,
+    sessionPersonas,
+    requestSessionPersonas,
+    bridgeStates,
     spawnSession,
     transcripts,
     requestTranscript,

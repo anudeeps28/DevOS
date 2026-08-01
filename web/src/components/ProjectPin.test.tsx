@@ -432,7 +432,15 @@ describe('ProjectPin', () => {
 
   describe('session control', () => {
     function sampleSession(id: string, path: string, status = 'running'): SessionState {
-      return { id, projectPath: path, role: 'builder', status, sdkSessionId: null };
+      return {
+        id,
+        projectPath: path,
+        role: 'builder',
+        status,
+        sdkSessionId: null,
+        workItemId: null,
+        rateLimited: false,
+      };
     }
 
     it('shows "no sessions" when none are running for the project', () => {

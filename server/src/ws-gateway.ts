@@ -17,6 +17,7 @@ import type { HookBus } from './hooks/hook-bus.js';
 import { readLifecycleSignals } from './lifecycle/lifecycle-reader.js';
 import type { Registry } from './registry/registry.js';
 import type { Bridge } from './session/bridge.js';
+import { readSessionPersonas } from './session/persona-reader.js';
 import { isValidRole } from './session/roles.js';
 import type { SessionManager } from './session/session-manager.js';
 import { readTrackerState } from './tracker/tracker-reader.js';
@@ -59,6 +60,12 @@ const TRACKER_STATE_MIN_INTERVAL_MS = 200;
 // `readLifecycleSignals` read — never memoized server-side (ARCHITECTURE §9.2: derived
 // live per render). The window only drops rapid-fire repeats on a single socket.
 const LIFECYCLE_SIGNALS_MIN_INTERVAL_MS = 200;
+
+// Minimum interval between two `session-personas` reads on the SAME socket. This is
+// a FLOOD-GUARD ONLY, never a cache: every accepted request always does a fresh
+// `readSessionPersonas` read (roster + phase.md are never memoized server-side). The
+// window only drops rapid-fire repeats of the SAME path on a single socket.
+const SESSION_PERSONAS_MIN_INTERVAL_MS = 200;
 
 // Minimum interval between two `session-transcript-request` backfills for the SAME
 // session on the SAME socket. This is a FLOOD-GUARD ONLY, never a cache: every
@@ -152,6 +159,85 @@ function sendFrame(socket: WebSocket, message: ServerFrame): void {
   } catch (err) {
     console.error('[ws] failed to send frame', err);
   }
+}
+
+// Deterministic canned fleet fixture for e2e — gated on DEVOS_E2E_FLEET_FIXTURE so it
+// NEVER runs unless explicitly opted into. One pinned fixture path ("WI-1"): a running
+// builder and a rate-limited reviewer, their persona join, and a sample tool-use event
+// for the builder session — enough for the Fleet tab to render without a live SDK.
+const FLEET_FIXTURE_PATH = '/tmp/devos-e2e-fleet-fixture';
+const FLEET_FIXTURE_WORK_ITEM_ID = 'WI-1';
+const FLEET_FIXTURE_BUILDER_SESSION_ID = 'e2e-fixture-builder';
+const FLEET_FIXTURE_REVIEWER_SESSION_ID = 'e2e-fixture-reviewer';
+
+/** Send the deterministic canned fleet fixture frames to one freshly-connected client. */
+function sendFleetFixture(socket: WebSocket): void {
+  const builder: OutboundMessage = {
+    type: 'session-state',
+    path: FLEET_FIXTURE_PATH,
+    session: {
+      id: FLEET_FIXTURE_BUILDER_SESSION_ID,
+      projectPath: FLEET_FIXTURE_PATH,
+      role: 'builder',
+      status: 'running',
+      sdkSessionId: null,
+      workItemId: FLEET_FIXTURE_WORK_ITEM_ID,
+      rateLimited: false,
+    },
+  };
+  const reviewer: OutboundMessage = {
+    type: 'session-state',
+    path: FLEET_FIXTURE_PATH,
+    session: {
+      id: FLEET_FIXTURE_REVIEWER_SESSION_ID,
+      projectPath: FLEET_FIXTURE_PATH,
+      role: 'reviewer',
+      status: 'running',
+      sdkSessionId: null,
+      workItemId: FLEET_FIXTURE_WORK_ITEM_ID,
+      rateLimited: true,
+    },
+  };
+  const personas: OutboundMessage = {
+    type: 'session-personas',
+    path: FLEET_FIXTURE_PATH,
+    personas: [
+      {
+        sessionId: FLEET_FIXTURE_BUILDER_SESSION_ID,
+        workItemId: FLEET_FIXTURE_WORK_ITEM_ID,
+        role: 'builder',
+        phase: 'coding',
+        persona: 'Shipwright',
+      },
+      {
+        sessionId: FLEET_FIXTURE_REVIEWER_SESSION_ID,
+        workItemId: FLEET_FIXTURE_WORK_ITEM_ID,
+        role: 'reviewer',
+        phase: 'reviewing',
+        persona: 'Warden',
+      },
+    ],
+  };
+  const transcript: OutboundMessage = {
+    type: 'session-transcript',
+    path: FLEET_FIXTURE_PATH,
+    sessionId: FLEET_FIXTURE_BUILDER_SESSION_ID,
+    events: [
+      {
+        kind: 'tool-use',
+        toolName: 'Task',
+        toolInput: '{}',
+        toolUseId: 'e2e-fixture-tool-use-1',
+        sessionId: FLEET_FIXTURE_BUILDER_SESSION_ID,
+        seq: 0,
+        ts: Date.now(),
+      },
+    ],
+  };
+  sendFrame(socket, builder);
+  sendFrame(socket, reviewer);
+  sendFrame(socket, personas);
+  sendFrame(socket, transcript);
 }
 
 export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGateway {
@@ -361,6 +447,12 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
     // drop the fan-out.
     const lastLifecycleSignalsAt = new Map<string, number>();
 
+    // Per-socket, per-PATH flood-guard for `session-personas` — see
+    // SESSION_PERSONAS_MIN_INTERVAL_MS. Keyed by path (not a single scalar) because a
+    // single socket fans out one read per pinned project; a per-socket scalar would
+    // drop the fan-out.
+    const lastSessionPersonasAt = new Map<string, number>();
+
     // Per-socket, per-SESSION flood-guard for `session-transcript-request` — see
     // SESSION_TRANSCRIPT_REQUEST_MIN_INTERVAL_MS. Keyed by sessionId (not a single
     // scalar) because a client backfills once per live session in a burst on
@@ -381,6 +473,11 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
       console.error('[ws] failed to send initial registry snapshot', err);
     }
     sendFrame(socket, { type: 'hook-bus-liveness', ...options.hookBus.getLiveness(Date.now()) });
+
+    // e2e fixture: only when explicitly opted into via env — never runs otherwise.
+    if (process.env['DEVOS_E2E_FLEET_FIXTURE'] === '1') {
+      sendFleetFixture(socket);
+    }
 
     socket.on('message', async (data) => {
       // Boundary: validate every inbound frame; malformed input is dropped, never thrown.
@@ -474,6 +571,32 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
           });
         } catch (err) {
           console.error('[ws] lifecycle-signals read failed', err);
+        }
+        return;
+      }
+
+      // Session-personas read: reply to the requesting socket only (never broadcast).
+      // The whole flow is guarded so a read failure never crashes the gateway.
+      if (message.type === 'session-personas') {
+        // Access control: only read pinned projects (see isPinnedPath).
+        if (!isPinnedPath(message.path)) return;
+        // Flood-guard: drop repeats of the SAME path within the min-interval on
+        // this socket. Distinct paths (the per-project fan-out) always pass.
+        const now = Date.now();
+        const last = lastSessionPersonasAt.get(message.path) ?? 0;
+        if (now - last < SESSION_PERSONAS_MIN_INTERVAL_MS) return;
+        pruneFloodGuard(lastSessionPersonasAt, now, SESSION_PERSONAS_MIN_INTERVAL_MS);
+        lastSessionPersonasAt.set(message.path, now);
+
+        try {
+          const sessions = options.sessionManager
+            .list()
+            .filter((s) => s.projectPath === message.path)
+            .map((s) => ({ sessionId: s.id, workItemId: s.workItemId, role: s.role }));
+          const personas = await readSessionPersonas(message.path, sessions);
+          sendFrame(socket, { type: 'session-personas', path: message.path, personas });
+        } catch (err) {
+          console.error('[ws] session-personas read failed', err);
         }
         return;
       }

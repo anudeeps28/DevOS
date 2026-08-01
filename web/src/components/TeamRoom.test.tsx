@@ -38,6 +38,8 @@ function runningSession(id: string, path = '/abs/one'): SessionState {
     role: 'builder',
     status: 'running',
     sdkSessionId: null,
+    workItemId: null,
+    rateLimited: false,
   };
 }
 

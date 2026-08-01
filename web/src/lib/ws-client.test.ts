@@ -11,6 +11,7 @@ import {
   type LifecycleSignals,
   type RegistryCandidate,
   type RegistryProject,
+  type SessionPersona,
   type SessionState,
   type TrackerState,
   type TranscriptEvent,
@@ -868,6 +869,8 @@ function sampleSessionState(id: string, path: string): SessionState {
     role: 'builder',
     status: 'running',
     sdkSessionId: null,
+    workItemId: null,
+    rateLimited: false,
   };
 }
 
@@ -908,6 +911,21 @@ describe('ws-client session-state frames', () => {
     expect(Object.isFrozen(received[0]!.session)).toBe(true);
   });
 
+  it('round-trips a non-null workItemId and a true rateLimited flag', () => {
+    const { received, socket } = makeSessionClient();
+    const session = {
+      ...sampleSessionState('sess-1', '/abs/repo'),
+      workItemId: 'WI-9',
+      rateLimited: true,
+    };
+
+    socket.message(sessionStateFrame('/abs/repo', session));
+
+    expect(received).toHaveLength(1);
+    expect(received[0]!.session.workItemId).toBe('WI-9');
+    expect(received[0]!.session.rateLimited).toBe(true);
+  });
+
   it('drops malformed session-state frames without emitting to listeners', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const { received, socket } = makeSessionClient();
@@ -929,6 +947,19 @@ describe('ws-client session-state frames', () => {
     expect(() =>
       socket.message(sessionStateFrame('/abs/repo', { ...base, sdkSessionId: 7 })),
     ).not.toThrow();
+    // session.workItemId a number (must be string|null).
+    expect(() =>
+      socket.message(sessionStateFrame('/abs/repo', { ...base, workItemId: 7 })),
+    ).not.toThrow();
+    // session.rateLimited missing entirely (required on the wire).
+    expect(() => {
+      const { rateLimited: _rateLimited, ...withoutRateLimited } = { ...base, workItemId: null };
+      socket.message(sessionStateFrame('/abs/repo', withoutRateLimited));
+    }).not.toThrow();
+    // session.rateLimited non-boolean.
+    expect(() =>
+      socket.message(sessionStateFrame('/abs/repo', { ...base, rateLimited: 'yes' })),
+    ).not.toThrow();
 
     expect(received).toEqual([]);
     expect(warn).toHaveBeenCalled();
@@ -947,6 +978,95 @@ describe('ws-client session-state frames', () => {
     expect(socket.sent).toEqual([
       JSON.stringify({ type: 'session-spawn', path: '/abs/repo', role: 'reviewer', workItemId: 'WI-9' }),
     ]);
+  });
+});
+
+/** A well-formed session-persona entry matching the SessionPersona contract. */
+function samplePersona(sessionId: string): SessionPersona {
+  return {
+    sessionId,
+    workItemId: 'WI-9',
+    role: 'builder',
+    phase: 'coding',
+    persona: 'Shipwright',
+  };
+}
+
+function personasFrame(path: string, personas: unknown): string {
+  return JSON.stringify({ type: 'session-personas', path, personas });
+}
+
+describe('ws-client session-personas frames', () => {
+  beforeEach(() => {
+    FakeSocket.instances = [];
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function makePersonasClient() {
+    const received: { path: string; personas: readonly SessionPersona[] }[] = [];
+    const client = createWsClient({
+      url: 'ws://localhost/ws',
+      createWebSocket: (url) => new FakeSocket(url),
+    });
+    const off = client.onSessionPersonas((path, personas) => received.push({ path, personas }));
+    const socket = FakeSocket.instances[0]!;
+    socket.open();
+    return { client, received, off, socket };
+  }
+
+  it('delivers a valid session-personas snapshot with the correct path and frozen personas', () => {
+    const { received, socket } = makePersonasClient();
+    const personas = [samplePersona('sess-1'), samplePersona('sess-2')];
+
+    socket.message(personasFrame('/abs/repo', personas));
+
+    expect(received).toHaveLength(1);
+    expect(received[0]!.path).toBe('/abs/repo');
+    expect(received[0]!.personas).toEqual(personas);
+    expect(Object.isFrozen(received[0]!.personas)).toBe(true);
+    expect(Object.isFrozen(received[0]!.personas[0])).toBe(true);
+  });
+
+  it('drops malformed session-personas frames without emitting to listeners', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { received, socket } = makePersonasClient();
+    const persona = samplePersona('sess-1');
+
+    // path missing.
+    expect(() =>
+      socket.message(JSON.stringify({ type: 'session-personas', personas: [persona] })),
+    ).not.toThrow();
+    // personas not an array.
+    expect(() =>
+      socket.message(JSON.stringify({ type: 'session-personas', path: '/abs/repo', personas: {} })),
+    ).not.toThrow();
+    // one entry malformed (sessionId empty) drops the whole frame.
+    expect(() =>
+      socket.message(personasFrame('/abs/repo', [{ ...persona, sessionId: '' }])),
+    ).not.toThrow();
+    // one entry malformed (role non-string) drops the whole frame.
+    expect(() =>
+      socket.message(personasFrame('/abs/repo', [{ ...persona, role: 42 }])),
+    ).not.toThrow();
+
+    expect(received).toEqual([]);
+    expect(warn).toHaveBeenCalled();
+  });
+
+  it('requestSessionPersonas() sends a session-personas frame once the socket is OPEN', () => {
+    const client = createWsClient({
+      url: 'ws://localhost/ws',
+      createWebSocket: (url) => new FakeSocket(url),
+    });
+    const socket = FakeSocket.instances[0]!;
+    socket.open();
+
+    client.requestSessionPersonas('/abs/repo');
+
+    expect(socket.sent).toEqual([JSON.stringify({ type: 'session-personas', path: '/abs/repo' })]);
   });
 });
 
