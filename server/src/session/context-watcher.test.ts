@@ -4,21 +4,41 @@ import { describe, expect, it } from 'vitest';
 import {
   CONTEXT_THRESHOLD,
   DEFAULT_CONTEXT_WINDOW,
+  ONE_MILLION_CONTEXT_WINDOW,
   contextOccupancy,
   contextTotalFromResult,
   crossesThreshold,
+  isKnownContextWindow,
   windowFor,
 } from './context-watcher.js';
 
 describe('windowFor', () => {
-  it('returns the 1M override for the known 1M-context model id', () => {
-    expect(windowFor('claude-opus-4-8[1m]')).toBe(1_000_000);
+  it('resolves any [1m]-marked model id to the 1M window (marker, not exact version)', () => {
+    // Regression for the shipped bug: the map only had 'claude-opus-4-8[1m]', but the
+    // real roster runs 'claude-opus-5[1m]', which silently fell back to the 200k default
+    // and recycled at 160k instead of 800k. The [1m] marker must drive the window.
+    expect(windowFor('claude-opus-5[1m]')).toBe(ONE_MILLION_CONTEXT_WINDOW);
+    expect(windowFor('claude-opus-4-8[1m]')).toBe(ONE_MILLION_CONTEXT_WINDOW);
+    expect(windowFor('some-future-opus-9[1m]')).toBe(ONE_MILLION_CONTEXT_WINDOW);
   });
 
-  it('falls back to DEFAULT_CONTEXT_WINDOW for any other model id', () => {
-    expect(windowFor('claude-opus-5[1m]')).toBe(DEFAULT_CONTEXT_WINDOW);
+  it('falls back to DEFAULT_CONTEXT_WINDOW for a model with no [1m] marker', () => {
+    expect(windowFor('claude-sonnet-5')).toBe(DEFAULT_CONTEXT_WINDOW);
     expect(windowFor('inherit')).toBe(DEFAULT_CONTEXT_WINDOW);
     expect(windowFor('')).toBe(DEFAULT_CONTEXT_WINDOW);
+  });
+});
+
+describe('isKnownContextWindow', () => {
+  it('is true for any [1m]-marked model (window is known, not the silent default)', () => {
+    expect(isKnownContextWindow('claude-opus-5[1m]')).toBe(true);
+    expect(isKnownContextWindow('claude-opus-4-8[1m]')).toBe(true);
+  });
+
+  it('is false for a model whose window is only the default (unrecognized)', () => {
+    expect(isKnownContextWindow('claude-sonnet-5')).toBe(false);
+    expect(isKnownContextWindow('inherit')).toBe(false);
+    expect(isKnownContextWindow('')).toBe(false);
   });
 });
 

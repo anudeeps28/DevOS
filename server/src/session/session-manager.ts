@@ -16,7 +16,13 @@ import { randomUUID } from 'node:crypto';
 import type { TranscriptEvent, TranscriptEventBody } from '../ws-protocol.js';
 import type { Role } from './roles.js';
 import type { Effort } from './roster-reader.js';
-import { contextOccupancy, contextTotalFromResult, crossesThreshold } from './context-watcher.js';
+import {
+  contextOccupancy,
+  contextTotalFromResult,
+  crossesThreshold,
+  DEFAULT_CONTEXT_WINDOW,
+  isKnownContextWindow,
+} from './context-watcher.js';
 import {
   defaultQuery,
   type EngineMessage,
@@ -413,6 +419,18 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     }
 
     const model = input.model ?? DEFAULT_MODEL;
+
+    // Warn ONCE per session when an EXPLICIT model (e.g. a roster-declared one from the
+    // Bridge) has no known context window: it falls back to the 200k default and recycles
+    // at 80% of that (160k) — far earlier than a 1M model intends. This keeps the
+    // silent-fallback bug (a roster model the watcher doesn't recognize) loud instead of
+    // quietly recycling mid-task. The `inherit` default is intentional and not warned.
+    if (input.model !== undefined && !isKnownContextWindow(input.model)) {
+      console.warn(
+        `[session] unknown context window for model "${input.model}" — using ${DEFAULT_CONTEXT_WINDOW}-token default; ` +
+          `context-recycle will trigger at 80% of that. Add a [1m] marker or an override in context-watcher.ts.`,
+      );
+    }
 
     // Start the engine. A synchronous failure here must release the slot.
     let engine: EngineSession;
