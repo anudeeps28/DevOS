@@ -46,6 +46,8 @@ function App() {
     foreignNeedsYou,
     hookBusConnected,
     costToday,
+    workItemSessions,
+    requestWorkItemSessions,
   } = useProjects();
 
   return (
@@ -82,6 +84,9 @@ function App() {
                 interruptSession={interruptSession}
                 pendingPermissions={pendingPermissions}
                 resolvePermission={resolvePermission}
+                workItemSessions={workItemSessions}
+                requestWorkItemSessions={requestWorkItemSessions}
+                connected={status === 'connected'}
               />
             </>
           )}

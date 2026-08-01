@@ -196,7 +196,11 @@ function makePermissionSession(sdkId: string): {
     send: async (): Promise<void> => {},
     onPermissionRequest: (listener) => broker.onRequest(listener),
     resolvePermission: (requestId, decision) => broker.resolve(requestId, decision),
-  } satisfies Pick<EngineSession, 'interrupt' | 'send' | 'onPermissionRequest' | 'resolvePermission'>);
+    end: (): void => release(),
+  } satisfies Pick<
+    EngineSession,
+    'interrupt' | 'send' | 'onPermissionRequest' | 'resolvePermission' | 'end'
+  >);
 
   return { engine, broker, release };
 }

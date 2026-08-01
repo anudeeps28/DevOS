@@ -163,6 +163,10 @@ function makeSteerableSession(sdkId: string): {
     },
     onPermissionRequest: (): void => {},
     resolvePermission: (): void => {},
+    end: (): void => {
+      closed = true;
+      wake();
+    },
   });
 
   return {

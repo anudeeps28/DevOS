@@ -17,9 +17,10 @@ import { join } from 'node:path';
 import type { Registry } from '../registry/registry.js';
 import type { BridgeGate, BridgeInboxItem, BridgeStateSnapshot } from '../ws-protocol.js';
 import { defaultOpenPr, type OpenPrAdapter } from './pr-adapter.js';
+import { buildResumePrompt } from './resume-prompt.js';
 import type { Role } from './roles.js';
 import { readRoster, type Roster } from './roster-reader.js';
-import type { SessionManager, SessionSnapshot } from './session-manager.js';
+import type { ContextUsageSignal, SessionManager, SessionSnapshot } from './session-manager.js';
 
 /** Public surface of the Bridge — one instance drives every pinned project's run. */
 export interface Bridge {
@@ -58,9 +59,12 @@ export interface BridgeDeps {
   ) => { title: string; body: string; verdicts: readonly string[]; advisories: readonly string[] } | null;
   /** Mechanical open-PR seam invoked on a CLEAR verdict — defaults to `defaultOpenPr`. */
   readonly openPr?: OpenPrAdapter;
+  /** Max context-recycle respawns per run before escalating instead of resuming again. Defaults to 2. */
+  readonly contextRespawnCap?: number;
 }
 
 const DEFAULT_REWORK_LOOP_CAP = 3;
+const DEFAULT_CONTEXT_RESPAWN_CAP = 2;
 const FAILURE_REPORT_REL_DIR = join('.claude', 'failure-reports');
 // The two-session handoff contract (SPEC §3.1, .claude/agents/{builder,reviewer}.md):
 // every artifact the sessions exchange lives in `tasks/stories/<id>/`, NOT in a
@@ -155,6 +159,8 @@ interface BridgeRun {
   reworkCount: number;
   /** Set by `interrupt`; blocks auto-advance on the next `ended` until approved. */
   paused: boolean;
+  /** Count of context-recycle respawns for this run. In-memory only, never persisted. */
+  contextRespawnCount: number;
 }
 
 /** Safe indexed access into a pipeline (noUncheckedIndexedAccess-friendly). */
@@ -172,6 +178,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
   const readReviewReport = deps.readReviewReport ?? defaultReadReviewReport;
   const draftPrBody = deps.draftPrBody ?? defaultDraftPrBody;
   const openPr = deps.openPr ?? defaultOpenPr;
+  const contextRespawnCap = deps.contextRespawnCap ?? DEFAULT_CONTEXT_RESPAWN_CAP;
 
   const runs = new Map<string, BridgeRun>();
   const listeners = new Set<(snap: BridgeStateSnapshot) => void>();
@@ -335,6 +342,11 @@ export function createBridge(deps: BridgeDeps): Bridge {
 
   const handleEnded = async (run: BridgeRun): Promise<void> => {
     const isLast = run.index >= run.pipeline.length - 1;
+    // A context-budget escalation ("task too big — split it") is terminal for this
+    // run: the over-budget session was asked to end at a boundary, and its later
+    // natural `ended` must NOT advance the pipeline or open a PR. Mirrors the
+    // run.paused guard below; checked first because escalated outranks any pause.
+    if (run.gate === 'escalated') return;
     // An interrupt during this stage pins the run at awaiting-approval regardless
     // of auto_advance — the next `ended` must not sneak past it (AC3).
     if (run.paused) {
@@ -356,6 +368,9 @@ export function createBridge(deps: BridgeDeps): Bridge {
 
   const handleErrored = async (run: BridgeRun): Promise<void> => {
     const stage = stageAt(run.pipeline, run.index) ?? '';
+    // Same terminal guard as handleEnded: once escalated for context budget, an
+    // `errored` end must not sneak into rework/escalate again.
+    if (run.gate === 'escalated') return;
     // A human interrupt pins the run at awaiting-approval regardless of how the
     // stage's session then terminates — an `errored` end must not sneak past the
     // pause into rework/escalate any more than an `ended` one can (AC3). Mirrors
@@ -396,6 +411,51 @@ export function createBridge(deps: BridgeDeps): Bridge {
     }
   });
 
+  // A session's context-window occupancy crossed the threshold: respawn the SAME
+  // stage with a resume prompt (context-recycle), or escalate once the per-run cap
+  // is hit. This is a same-stage respawn, never a pipeline advance — the old
+  // session's `currentSessionId` is overwritten BEFORE it is asked to end, so its
+  // later `ended` no longer correlates to this run and `handleEnded` ignores it.
+  const handleContextUsage = async (signal: ContextUsageSignal): Promise<void> => {
+    const run = findRunBySessionId(signal.sessionId);
+    if (run === null) return;
+    if (run.gate === 'escalated' || run.gate === 'done') return;
+
+    if (run.contextRespawnCount >= contextRespawnCap) {
+      // Cap hit: stop respawning and escalate. Set the terminal gate BEFORE ending
+      // the session so its subsequent `ended` hits the escalated guard in
+      // handleEnded and cannot advance the pipeline. End the over-budget session at
+      // a clean boundary rather than leaving it running past 80% indefinitely.
+      run.gate = 'escalated';
+      run.inbox.push(
+        Object.freeze<BridgeInboxItem>({
+          stage: stageAt(run.pipeline, run.index) ?? '',
+          kind: 'escalation',
+          reason: 'task too big — split it',
+          ts: Date.now(),
+        }),
+      );
+      const overBudgetId = run.currentSessionId;
+      emit(run);
+      if (overBudgetId !== null) sessionManager.endAtBoundary(overBudgetId);
+      return;
+    }
+
+    const role = stageAt(run.pipeline, run.index);
+    if (role === null) return;
+
+    run.contextRespawnCount += 1;
+    const prompt = buildResumePrompt(
+      { workItemId: run.workItemId ?? '' },
+      (file) => readStoryArtifact(run.projectPath, run.workItemId, file),
+    );
+    const oldId = run.currentSessionId;
+    await spawnAndEmit(run, role, role, { prompt });
+    if (oldId !== null) sessionManager.endAtBoundary(oldId);
+  };
+
+  sessionManager.onContextUsage((signal: ContextUsageSignal) => void handleContextUsage(signal));
+
   const start = (projectPath: string, workItemId?: string): void => {
     const roster = resolveRoster(projectPath);
     if (roster === null) return;
@@ -413,6 +473,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
       inbox: [],
       reworkCount: 0,
       paused: false,
+      contextRespawnCount: 0,
     };
     runs.set(projectPath, run);
 

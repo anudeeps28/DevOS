@@ -231,6 +231,31 @@ export interface SessionPersonasSnapshot {
   readonly personas: readonly SessionPersona[];
 }
 
+/** One work item's owned session anchor, as sent to the client. */
+export interface WorkItemSessionAnchor {
+  readonly id: string;
+  readonly role: string | null;
+  readonly status: string | null;
+  readonly sdkSessionId: string | null;
+  readonly currentStage: string | null;
+  readonly createdAt: number;
+}
+
+/** Inbound: request the current owned-session anchors for a work item of a pinned project path. */
+export interface WorkItemSessionsRequestMessage {
+  readonly type: 'work-item-sessions-request';
+  readonly path: string;
+  readonly workItemId: string;
+}
+
+/** Outbound: a work-item-sessions snapshot for a single project path + work item. */
+export interface WorkItemSessionsSnapshot {
+  readonly type: 'work-item-sessions';
+  readonly path: string;
+  readonly workItemId: string;
+  readonly sessions: readonly WorkItemSessionAnchor[];
+}
+
 /** Inbound: spawn an owned Agent-SDK session for a pinned project + role. */
 export interface SessionSpawnMessage {
   readonly type: 'session-spawn';
@@ -273,6 +298,8 @@ export type TranscriptEventBody =
       readonly totalCostUsd: number;
       readonly inputTokens: number;
       readonly outputTokens: number;
+      readonly cacheReadInputTokens: number;
+      readonly cacheCreationInputTokens: number;
       readonly isError: boolean;
     }
   | { readonly kind: 'user-text'; readonly text: string }
@@ -427,7 +454,8 @@ export type InboundMessage =
   | BridgeStartMessage
   | GateApproveMessage
   | BridgeInterruptMessage
-  | SessionPersonasMessage;
+  | SessionPersonasMessage
+  | WorkItemSessionsRequestMessage;
 
 /** Every registry message the server emits to a client. */
 export type OutboundMessage =
@@ -444,7 +472,8 @@ export type OutboundMessage =
   | ForeignSessionNeedsYouSnapshot
   | HookBusLivenessSnapshot
   | SessionPersonasSnapshot
-  | CostUsageSnapshot;
+  | CostUsageSnapshot
+  | WorkItemSessionsSnapshot;
 
 /**
  * Validate a raw WS frame against the inbound contract. Branches on `type` first:
@@ -526,6 +555,28 @@ export function parseInboundMessage(data: unknown): InboundMessage | null {
       return null;
     }
     return Object.freeze<SessionPersonasMessage>({ type: 'session-personas', path });
+  }
+
+  // `work-item-sessions-request` requires a non-empty ABSOLUTE path (like the read
+  // frames) AND a safe workItemId (same allowlist as bridge-start/session-spawn).
+  if (type === 'work-item-sessions-request') {
+    const { path, workItemId } = frame;
+    if (
+      typeof path !== 'string' ||
+      path.length === 0 ||
+      path.length > MAX_PATH_LENGTH ||
+      !isAbsolute(path)
+    ) {
+      return null;
+    }
+    if (!isSafeWorkItemId(workItemId)) {
+      return null;
+    }
+    return Object.freeze<WorkItemSessionsRequestMessage>({
+      type: 'work-item-sessions-request',
+      path,
+      workItemId,
+    });
   }
 
   // `session-spawn` requires a non-empty ABSOLUTE path (like the read frames) AND a

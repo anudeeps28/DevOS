@@ -117,6 +117,8 @@ function normalizeResult(message: EngineMessage): readonly TranscriptEventBody[]
       totalCostUsd: toNumber(message.total_cost_usd),
       inputTokens: toNumber(usage['input_tokens']),
       outputTokens: toNumber(usage['output_tokens']),
+      cacheReadInputTokens: toNumber(usage['cache_read_input_tokens']),
+      cacheCreationInputTokens: toNumber(usage['cache_creation_input_tokens']),
       isError: message.is_error === true,
     }),
   ];

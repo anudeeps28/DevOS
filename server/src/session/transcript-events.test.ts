@@ -170,6 +170,8 @@ describe('normalizeMessage', () => {
           totalCostUsd: 0.42,
           inputTokens: 100,
           outputTokens: 200,
+          cacheReadInputTokens: 0,
+          cacheCreationInputTokens: 0,
           isError: false,
         },
       ]);
@@ -191,6 +193,8 @@ describe('normalizeMessage', () => {
           totalCostUsd: 0,
           inputTokens: 0,
           outputTokens: 0,
+          cacheReadInputTokens: 0,
+          cacheCreationInputTokens: 0,
           isError: false,
         },
       ]);

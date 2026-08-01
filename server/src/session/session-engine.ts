@@ -52,6 +52,12 @@ export interface EngineSession extends AsyncIterable<EngineMessage> {
   onPermissionRequest(listener: (req: EnginePermissionRequest) => void): void;
   /** Resolve a pending permission request by id. Idempotent no-op for an unknown id. */
   resolvePermission(requestId: string, decision: PermissionDecision): void;
+  /**
+   * End the session at a clean turn boundary: closes the streaming-input queue so the
+   * current turn finishes and the generator then returns. Distinct from `interrupt()`,
+   * which aborts the current turn immediately.
+   */
+  end(): void;
 }
 
 /** Parameters for spawning one owned session. */
@@ -349,5 +355,6 @@ export const defaultQuery: QueryFn = ({ cwd, role, model, effort, prompt }): Eng
     resolvePermission: (requestId: string, decision: PermissionDecision): void => {
       broker.resolve(requestId, decision);
     },
+    end: (): void => input.close(),
   });
 };

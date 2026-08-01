@@ -21,6 +21,7 @@ import type { CostLedgerStore } from './session/cost-ledger-store.js';
 import { readSessionPersonas } from './session/persona-reader.js';
 import { isValidRole } from './session/roles.js';
 import type { SessionManager } from './session/session-manager.js';
+import type { SessionStore } from './session/session-store.js';
 import { readTrackerState } from './tracker/tracker-reader.js';
 import {
   buildAllowedOrigins,
@@ -67,6 +68,12 @@ const LIFECYCLE_SIGNALS_MIN_INTERVAL_MS = 200;
 // `readSessionPersonas` read (roster + phase.md are never memoized server-side). The
 // window only drops rapid-fire repeats of the SAME path on a single socket.
 const SESSION_PERSONAS_MIN_INTERVAL_MS = 200;
+
+// Minimum interval between two `work-item-sessions-request` reads for the SAME
+// (path, workItemId) pair on the SAME socket. This is a FLOOD-GUARD ONLY, never a
+// cache: every accepted request always does a fresh `sessionStore.listByWorkItem`
+// read. The window only drops rapid-fire repeats of the SAME key on a single socket.
+const WORK_ITEM_SESSIONS_MIN_INTERVAL_MS = 200;
 
 // Minimum interval between two `session-transcript-request` backfills for the SAME
 // session on the SAME socket. This is a FLOOD-GUARD ONLY, never a cache: every
@@ -140,6 +147,7 @@ export interface WsGatewayOptions {
   readonly intervalMs?: number;
   readonly registry: Registry;
   readonly sessionManager: SessionManager;
+  readonly sessionStore: SessionStore;
   readonly bridge: Bridge;
   readonly hookBus: HookBus;
   readonly costLedger: CostLedgerStore;
@@ -466,6 +474,12 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
     // drop the fan-out.
     const lastSessionPersonasAt = new Map<string, number>();
 
+    // Per-socket, per-KEY flood-guard for `work-item-sessions-request` — see
+    // WORK_ITEM_SESSIONS_MIN_INTERVAL_MS. Keyed by `path workItemId` (not a
+    // single scalar) because a client fans out one request per pinned work item;
+    // a per-socket scalar would drop the fan-out.
+    const lastWorkItemSessionsAt = new Map<string, number>();
+
     // Per-socket, per-SESSION flood-guard for `session-transcript-request` — see
     // SESSION_TRANSCRIPT_REQUEST_MIN_INTERVAL_MS. Keyed by sessionId (not a single
     // scalar) because a client backfills once per live session in a burst on
@@ -629,6 +643,43 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
           sendFrame(socket, { type: 'session-personas', path: message.path, personas });
         } catch (err) {
           console.error('[ws] session-personas read failed', err);
+        }
+        return;
+      }
+
+      // Work-item-sessions read: reply to the requesting socket only (never broadcast).
+      // The whole flow is guarded so a read failure never crashes the gateway.
+      if (message.type === 'work-item-sessions-request') {
+        // Access control: only read pinned projects (see isPinnedPath).
+        if (!isPinnedPath(message.path)) return;
+        // Flood-guard: drop repeats of the SAME (path, workItemId) key within the
+        // min-interval on this socket. Distinct keys (the per-work-item fan-out)
+        // always pass.
+        const key = `${message.path} ${message.workItemId}`;
+        const now = Date.now();
+        const last = lastWorkItemSessionsAt.get(key) ?? 0;
+        if (now - last < WORK_ITEM_SESSIONS_MIN_INTERVAL_MS) return;
+        pruneFloodGuard(lastWorkItemSessionsAt, now, WORK_ITEM_SESSIONS_MIN_INTERVAL_MS);
+        lastWorkItemSessionsAt.set(key, now);
+
+        try {
+          const rows = options.sessionStore.listByWorkItem(message.workItemId, message.path);
+          const sessions = rows.map((row) => ({
+            id: row.id,
+            role: row.role,
+            status: row.status,
+            sdkSessionId: row.sdkSessionId,
+            currentStage: row.currentStage,
+            createdAt: row.createdAt,
+          }));
+          sendFrame(socket, {
+            type: 'work-item-sessions',
+            path: message.path,
+            workItemId: message.workItemId,
+            sessions,
+          });
+        } catch (err) {
+          console.error('[ws] work-item-sessions read failed', err);
         }
         return;
       }
