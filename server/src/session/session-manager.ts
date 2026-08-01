@@ -25,6 +25,7 @@ import {
   type QueryFn,
 } from './session-engine.js';
 import { acquireSessionSlot, type ReleaseSlot } from './session-spawn-limit.js';
+import type { CostLedgerStore, CostUsageAggregate } from './cost-ledger-store.js';
 import type { SessionStore } from './session-store.js';
 import { MAX_TEXT_CHARS, normalizeMessage } from './transcript-events.js';
 
@@ -58,6 +59,9 @@ export interface SpawnInput {
 
 export type StateListener = (snapshot: SessionSnapshot) => void;
 
+/** Fired with the latest cost/usage aggregate whenever a `result` message is recorded. */
+export type CostUsageListener = (usage: CostUsageAggregate) => void;
+
 /** Fired with each frozen batch of transcript events captured from a live session. */
 export type TranscriptListener = (
   projectPath: string,
@@ -82,6 +86,8 @@ export interface SessionManager {
   readonly onTranscript: (listener: TranscriptListener) => () => void;
   /** Register a listener fired on every permission request. Returns an unsubscribe fn. */
   readonly onPermissionRequest: (listener: PermissionRequestListener) => () => void;
+  /** Register a listener fired with the latest cost/usage aggregate. Returns an unsubscribe fn. */
+  readonly onCostUsage: (listener: CostUsageListener) => () => void;
   /** The live session's buffered transcript (frozen copy), or `[]` if absent/ended. */
   readonly getTranscript: (id: string) => readonly TranscriptEvent[];
   /**
@@ -109,6 +115,8 @@ export interface SessionManagerDeps {
   readonly store: SessionStore;
   /** The engine seam — defaults to the real SDK. Tests inject a fake. */
   readonly query?: QueryFn;
+  /** The cost ledger — absent means cost recording is a no-op (non-Bridge callers/tests). */
+  readonly costLedger?: CostLedgerStore;
 }
 
 const DEFAULT_PROMPT = 'You are now attached to this project. Await further instructions.';
@@ -143,12 +151,13 @@ function isInitMessage(message: EngineMessage): boolean {
 }
 
 export function createSessionManager(deps: SessionManagerDeps): SessionManager {
-  const { store } = deps;
+  const { store, costLedger } = deps;
   const query: QueryFn = deps.query ?? defaultQuery;
   const live = new Map<string, LiveSession>();
   const listeners = new Set<StateListener>();
   const transcriptListeners = new Set<TranscriptListener>();
   const permissionRequestListeners = new Set<PermissionRequestListener>();
+  const costUsageListeners = new Set<CostUsageListener>();
   // Track detached consume loops so stopAll can await their completion (so the final
   // 'ended'/'errored' status persists before the DB is closed on shutdown).
   const consuming = new Set<Promise<void>>();
@@ -196,6 +205,16 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     }
   };
 
+  const emitCostUsage = (usage: CostUsageAggregate): void => {
+    for (const listener of costUsageListeners) {
+      try {
+        listener(usage);
+      } catch (err) {
+        console.error('[session] cost usage listener threw', err);
+      }
+    }
+  };
+
   // Stamp one body with this session's identity + ordering, push it onto the bounded
   // ring buffer (oldest dropped), and return the frozen event. Shared by transcript
   // capture (from the engine stream) and the user-text echo (from sendInput).
@@ -211,6 +230,40 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     return event;
   };
 
+  // Persist one `result` body's cost/usage figures to the ledger and emit the updated
+  // aggregate. Guarded: a throw here (store failure) is logged and swallowed — it must
+  // never flip the session's status or break the consume loop (AC5-style isolation).
+  const isFiniteNonNegative = (n: number): boolean => Number.isFinite(n) && n >= 0;
+
+  const recordCost = (s: LiveSession, body: Extract<TranscriptEventBody, { kind: 'result' }>): void => {
+    if (costLedger === undefined) return;
+    // Validate at the boundary: a NaN/Infinity/negative from the SDK would poison the
+    // account-wide SUM broadcast to every client. Drop (and log) rather than persist it.
+    if (
+      !isFiniteNonNegative(body.inputTokens) ||
+      !isFiniteNonNegative(body.outputTokens) ||
+      !isFiniteNonNegative(body.totalCostUsd)
+    ) {
+      console.error(
+        `[session] cost ledger skipping non-finite/negative usage for ${s.id}`,
+        { inputTokens: body.inputTokens, outputTokens: body.outputTokens, totalCostUsd: body.totalCostUsd },
+      );
+      return;
+    }
+    try {
+      costLedger.insert({
+        sessionId: s.id,
+        inputTokens: body.inputTokens,
+        outputTokens: body.outputTokens,
+        costUsd: body.totalCostUsd,
+        at: Date.now(),
+      });
+      emitCostUsage(costLedger.costToday());
+    } catch (err) {
+      console.error(`[session] cost ledger recording for ${s.id} threw`, err);
+    }
+  };
+
   // Normalize one engine message into stamped transcript events, push them onto the
   // session's bounded ring buffer, and fan the frozen batch out to listeners.
   const captureTranscript = (s: LiveSession, message: EngineMessage): void => {
@@ -218,6 +271,9 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     if (bodies.length === 0) return;
     const batch: TranscriptEvent[] = bodies.map((body) => pushEvent(s, body));
     emitTranscript(s, Object.freeze(batch));
+    for (const body of bodies) {
+      if (body.kind === 'result') recordCost(s, body);
+    }
   };
 
   const setStatus = (s: LiveSession, status: SessionStatus): void => {
@@ -357,6 +413,11 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     return () => permissionRequestListeners.delete(listener);
   };
 
+  const onCostUsage = (listener: CostUsageListener): (() => void) => {
+    costUsageListeners.add(listener);
+    return () => costUsageListeners.delete(listener);
+  };
+
   const getTranscript = (id: string): readonly TranscriptEvent[] => {
     const s = live.get(id);
     return s === undefined ? [] : Object.freeze([...s.transcript]);
@@ -471,6 +532,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     onState,
     onTranscript,
     onPermissionRequest,
+    onCostUsage,
     getTranscript,
     sendInput,
     interrupt,

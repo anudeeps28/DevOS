@@ -243,6 +243,18 @@ export interface HookBusLiveness {
   readonly lastReceivedAt: number | null;
 }
 
+/**
+ * A validated cost/usage snapshot. Mirrors the server's CostUsageSnapshot
+ * (server/src/ws-protocol.ts) — duplicated typed contract, no shared package.
+ * Frozen — never mutated after construction.
+ */
+export interface CostUsage {
+  readonly costTodayUsd: number;
+  readonly inputTokensToday: number;
+  readonly outputTokensToday: number;
+  readonly sinceEpochMs: number;
+}
+
 /** The slice of the WebSocket API this client depends on (keeps fakes tiny). */
 export interface WebSocketLike {
   readonly readyState: number;
@@ -305,6 +317,7 @@ export type BridgeStateListener = (path: string, state: BridgeState) => void;
 export type PermissionRequestListener = (request: PermissionRequest) => void;
 export type ForeignNeedsYouListener = (item: ForeignNeedsYou) => void;
 export type HookBusLivenessListener = (state: HookBusLiveness) => void;
+export type CostUsageListener = (usage: CostUsage) => void;
 
 /** Public, framework-agnostic client surface. */
 export interface WsClient {
@@ -337,6 +350,8 @@ export interface WsClient {
   readonly onForeignNeedsYou: (listener: ForeignNeedsYouListener) => () => void;
   /** Subscribe to validated hook-bus liveness snapshots. */
   readonly onHookBusLiveness: (listener: HookBusLivenessListener) => () => void;
+  /** Subscribe to validated cost/usage snapshots. */
+  readonly onCostUsage: (listener: CostUsageListener) => () => void;
   /** Pin a project by absolute path; no-op (warns) when the socket is not open. */
   readonly pin: (path: string, opts?: { displayName?: string; uiPrefs?: unknown }) => void;
   /** Unpin a project by absolute path; no-op (warns) when the socket is not open. */
@@ -1145,6 +1160,37 @@ function parseHookBusLiveness(data: unknown): HookBusLiveness | null {
 }
 
 /**
+ * Validate a raw WS frame against the pinned cost-usage contract:
+ * `{ type: 'cost-usage', costTodayUsd: <finite number>, inputTokensToday: <finite number>,
+ *    outputTokensToday: <finite number>, sinceEpochMs: <finite number> }`.
+ * Returns a frozen CostUsage, or null for anything malformed.
+ */
+function parseCostUsage(data: unknown): CostUsage | null {
+  if (typeof data !== 'string') return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return null;
+  }
+
+  if (typeof parsed !== 'object' || parsed === null) return null;
+
+  const frame = parsed as Record<string, unknown>;
+  if (frame.type !== 'cost-usage') return null;
+
+  const { costTodayUsd, inputTokensToday, outputTokensToday, sinceEpochMs } = frame;
+
+  if (typeof costTodayUsd !== 'number' || !Number.isFinite(costTodayUsd)) return null;
+  if (typeof inputTokensToday !== 'number' || !Number.isFinite(inputTokensToday)) return null;
+  if (typeof outputTokensToday !== 'number' || !Number.isFinite(outputTokensToday)) return null;
+  if (typeof sinceEpochMs !== 'number' || !Number.isFinite(sinceEpochMs)) return null;
+
+  return Object.freeze({ costTodayUsd, inputTokensToday, outputTokensToday, sinceEpochMs });
+}
+
+/**
  * Peek the `type` discriminant of a raw frame without full validation, so
  * handleMessage can route to the right parser. Returns null for anything that
  * is not a JSON object with a string `type`. Never throws.
@@ -1189,6 +1235,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
   const permissionRequestListeners = new Set<PermissionRequestListener>();
   const foreignNeedsYouListeners = new Set<ForeignNeedsYouListener>();
   const hookBusLivenessListeners = new Set<HookBusLivenessListener>();
+  const costUsageListeners = new Set<CostUsageListener>();
 
   let state: ClientState = {
     status: 'connecting',
@@ -1261,6 +1308,10 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
 
   function emitHookBusLiveness(hookBusLiveness: HookBusLiveness): void {
     for (const listener of hookBusLivenessListeners) listener(hookBusLiveness);
+  }
+
+  function emitCostUsage(usage: CostUsage): void {
+    for (const listener of costUsageListeners) listener(usage);
   }
 
   // Write a frame only when the socket is OPEN; otherwise drop + warn (never throw).
@@ -1413,6 +1464,16 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
       return;
     }
 
+    if (type === 'cost-usage') {
+      const usage = parseCostUsage(data);
+      if (usage === null) {
+        console.warn('[ws-client] dropped malformed frame:', data);
+        return;
+      }
+      emitCostUsage(usage);
+      return;
+    }
+
     // Never throw into the app — drop and warn.
     console.warn('[ws-client] dropped malformed frame:', data);
   }
@@ -1479,6 +1540,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     permissionRequestListeners.clear();
     foreignNeedsYouListeners.clear();
     hookBusLivenessListeners.clear();
+    costUsageListeners.clear();
 
     if (state.reconnectHandle !== null) {
       timers.clearTimeout(state.reconnectHandle);
@@ -1661,6 +1723,12 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
       hookBusLivenessListeners.add(listener);
       return () => {
         hookBusLivenessListeners.delete(listener);
+      };
+    },
+    onCostUsage: (listener) => {
+      costUsageListeners.add(listener);
+      return () => {
+        costUsageListeners.delete(listener);
       };
     },
     pin,

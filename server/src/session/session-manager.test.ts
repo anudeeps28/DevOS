@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { openDatabase } from '../db/database.js';
 import { createRegistry } from '../registry/registry.js';
 import type { TranscriptEvent } from '../ws-protocol.js';
+import type { CostLedgerInsert, CostUsageAggregate } from './cost-ledger-store.js';
 import { createSessionStore } from './session-store.js';
 import { createSessionManager, type SessionSnapshot } from './session-manager.js';
 import type {
@@ -397,6 +398,43 @@ function assistantText(text: string): EngineMessage {
   return { type: 'assistant', message: { content: [{ type: 'text', text }] } };
 }
 
+/** A `result` engine message carrying the given cost/usage metrics. */
+function resultMessage(totalCostUsd: number, inputTokens: number, outputTokens: number): EngineMessage {
+  return {
+    type: 'result',
+    duration_ms: 100,
+    num_turns: 1,
+    total_cost_usd: totalCostUsd,
+    usage: { input_tokens: inputTokens, output_tokens: outputTokens },
+    is_error: false,
+  };
+}
+
+const CANNED_AGGREGATE: CostUsageAggregate = Object.freeze({
+  costTodayUsd: 1.23,
+  inputTokensToday: 100,
+  outputTokensToday: 200,
+  sinceEpochMs: 0,
+});
+
+/** A fake CostLedgerStore that records insert() calls and returns a canned aggregate. */
+function makeFakeCostLedger(opts: { throwOnInsert?: boolean } = {}): {
+  costLedger: { insert: (row: CostLedgerInsert) => void; costToday: () => CostUsageAggregate };
+  inserts: CostLedgerInsert[];
+} {
+  const inserts: CostLedgerInsert[] = [];
+  const costLedger = {
+    insert: (row: CostLedgerInsert): void => {
+      inserts.push(row);
+      if (opts.throwOnInsert === true) {
+        throw new Error('ledger insert boom');
+      }
+    },
+    costToday: (): CostUsageAggregate => CANNED_AGGREGATE,
+  };
+  return { costLedger, inserts };
+}
+
 describe('SessionManager transcript', () => {
   it('emits ordered init/assistant-text/tool-use/tool-result/result events via onTranscript', async () => {
     const store = freshStore();
@@ -721,6 +759,97 @@ describe('SessionManager permission relay', () => {
     expect(received.filter((e) => e.kind === 'permission')).toHaveLength(1);
 
     fake.finish();
+    await mgr.stopAll();
+  });
+});
+
+describe('SessionManager cost usage', () => {
+  it('records one ledger row per result message and emits the aggregate via onCostUsage', async () => {
+    const store = freshStore();
+    const fake = makeSession();
+    const { costLedger, inserts } = makeFakeCostLedger();
+    const mgr = createSessionManager({ store, query: () => fake.session, costLedger });
+    const usages: CostUsageAggregate[] = [];
+    mgr.onCostUsage((usage) => usages.push(usage));
+
+    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'builder' });
+    fake.emit(resultMessage(0.05, 10, 20));
+
+    await waitUntil(() => inserts.length >= 1);
+
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0]).toMatchObject({
+      sessionId: snap.id,
+      inputTokens: 10,
+      outputTokens: 20,
+      costUsd: 0.05,
+    });
+    expect(usages).toContainEqual(CANNED_AGGREGATE);
+
+    fake.finish();
+    await mgr.stopAll();
+  });
+
+  it('a throwing costLedger.insert is isolated — status still ends "ended", no rethrow', async () => {
+    const store = freshStore();
+    const fake = makeSession();
+    const { costLedger, inserts } = makeFakeCostLedger({ throwOnInsert: true });
+    const mgr = createSessionManager({ store, query: () => fake.session, costLedger });
+    const emissions: SessionSnapshot[] = [];
+    mgr.onState((s) => emissions.push(s));
+
+    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'builder' });
+    fake.emit(resultMessage(0.05, 10, 20));
+    await waitUntil(() => inserts.length >= 1);
+
+    fake.finish();
+    await waitFor(emissions, (e) => e.id === snap.id && e.status === 'ended');
+    expect(store.get(snap.id)?.status).toBe('ended');
+
+    await mgr.stopAll();
+  });
+
+  it('with no costLedger dep, a result message is a no-op (no throw)', async () => {
+    const store = freshStore();
+    const fake = makeSession();
+    const mgr = createSessionManager({ store, query: () => fake.session });
+    const emissions: SessionSnapshot[] = [];
+    mgr.onState((s) => emissions.push(s));
+
+    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'builder' });
+    expect(() => fake.emit(resultMessage(0.05, 10, 20))).not.toThrow();
+
+    fake.finish();
+    await waitFor(emissions, (e) => e.id === snap.id && e.status === 'ended');
+    expect(store.get(snap.id)?.status).toBe('ended');
+
+    await mgr.stopAll();
+  });
+
+  it('drops a negative result body — no ledger row, status still "ended"', async () => {
+    const store = freshStore();
+    const fake = makeSession();
+    const { costLedger, inserts } = makeFakeCostLedger();
+    const mgr = createSessionManager({ store, query: () => fake.session, costLedger });
+    const usages: CostUsageAggregate[] = [];
+    const emissions: SessionSnapshot[] = [];
+    mgr.onCostUsage((usage) => usages.push(usage));
+    mgr.onState((s) => emissions.push(s));
+
+    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'builder' });
+    // A negative cost, a negative input-token count, and a negative output-token count
+    // are each poison for the account-wide SUM and must be dropped at the boundary.
+    fake.emit(resultMessage(-0.01, 10, 20));
+    fake.emit(resultMessage(0.05, -5, 20));
+    fake.emit(resultMessage(0.05, 10, -1));
+
+    fake.finish();
+    await waitFor(emissions, (e) => e.id === snap.id && e.status === 'ended');
+
+    expect(inserts).toHaveLength(0);
+    expect(usages).toHaveLength(0);
+    expect(store.get(snap.id)?.status).toBe('ended');
+
     await mgr.stopAll();
   });
 });

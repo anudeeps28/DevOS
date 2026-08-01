@@ -15,11 +15,13 @@ import { WS_PATH } from './config.js';
 import { createHookBus } from './hooks/hook-bus.js';
 import type { Registry } from './registry/registry.js';
 import type { Bridge } from './session/bridge.js';
+import type { CostLedgerStore, CostUsageAggregate } from './session/cost-ledger-store.js';
 import type {
   EnginePermissionRequest,
   PermissionDecision,
 } from './session/session-engine.js';
 import type {
+  CostUsageListener,
   SessionManager,
   SessionSnapshot,
   StateListener,
@@ -160,6 +162,15 @@ interface HarnessOptions {
   readonly pinnedPaths?: readonly string[];
   readonly sessions?: Readonly<Record<string, SessionSnapshot>>;
   readonly transcripts?: Readonly<Record<string, readonly TranscriptEvent[]>>;
+  readonly costUsage?: CostUsageAggregate;
+}
+
+interface CostUsageFrame {
+  readonly type: 'cost-usage';
+  readonly costTodayUsd: number;
+  readonly inputTokensToday: number;
+  readonly outputTokensToday: number;
+  readonly sinceEpochMs: number;
 }
 
 interface GatewayHarness {
@@ -172,6 +183,8 @@ interface GatewayHarness {
   ) => void;
   /** Fire the manager's state channel as if a live session's state changed. */
   readonly fireState: (session: SessionSnapshot) => void;
+  /** Fire the manager's cost-usage channel as if a `result` was just recorded. */
+  readonly fireCostUsage: (usage: CostUsageAggregate) => void;
   /** Every `sendInput(sessionId, text)` the gateway forwarded to the manager. */
   readonly steerCalls: () => readonly { readonly sessionId: string; readonly text: string }[];
   /** Every `interrupt(sessionId)` the gateway forwarded to the manager. */
@@ -207,6 +220,10 @@ interface TestClient {
   readonly personasFrames: () => readonly SessionPersonasFrame[];
   /** Resolve once at least `count` session-personas frames arrived; reject on timeout. */
   readonly waitForPersonasCount: (count: number, timeoutMs?: number) => Promise<void>;
+  /** Every `cost-usage` frame seen so far. */
+  readonly costUsageFrames: () => readonly CostUsageFrame[];
+  /** Resolve once at least `count` cost-usage frames arrived; reject on timeout. */
+  readonly waitForCostUsageCount: (count: number, timeoutMs?: number) => Promise<void>;
   readonly close: () => void;
 }
 
@@ -227,8 +244,12 @@ async function startGateway(options: HarnessOptions = {}): Promise<GatewayHarnes
   const pinnedPaths = options.pinnedPaths ?? [];
   const sessions = options.sessions ?? {};
   const transcripts = options.transcripts ?? {};
+  const costUsage: CostUsageAggregate =
+    options.costUsage ??
+    Object.freeze({ costTodayUsd: 0, inputTokensToday: 0, outputTokensToday: 0, sinceEpochMs: 0 });
   const transcriptListeners = new Set<TranscriptListener>();
   const stateListeners = new Set<StateListener>();
+  const costUsageListeners = new Set<CostUsageListener>();
   const permissionRequestListeners = new Set<
     (path: string, sessionId: string, req: EnginePermissionRequest) => void
   >();
@@ -270,6 +291,12 @@ async function startGateway(options: HarnessOptions = {}): Promise<GatewayHarnes
         transcriptListeners.delete(listener);
       };
     },
+    onCostUsage: (listener: CostUsageListener) => {
+      costUsageListeners.add(listener);
+      return () => {
+        costUsageListeners.delete(listener);
+      };
+    },
     getTranscript: (id: string) => transcripts[id] ?? [],
     onPermissionRequest: (
       listener: (path: string, sessionId: string, req: EnginePermissionRequest) => void,
@@ -301,6 +328,11 @@ async function startGateway(options: HarnessOptions = {}): Promise<GatewayHarnes
     getInbox: () => [],
   });
 
+  const costLedger: CostLedgerStore = Object.freeze({
+    insert: () => {},
+    costToday: () => costUsage,
+  });
+
   const server: Server = createServer();
   const gateway: WsGateway = attachWsGateway(server, {
     intervalMs: 60_000, // keep heartbeat noise out of short-lived tests
@@ -308,6 +340,7 @@ async function startGateway(options: HarnessOptions = {}): Promise<GatewayHarnes
     sessionManager,
     bridge,
     hookBus: createHookBus(),
+    costLedger,
     projectRoots: [],
     authToken: '',
     requireToken: false,
@@ -327,6 +360,11 @@ async function startGateway(options: HarnessOptions = {}): Promise<GatewayHarnes
     fireState: (session: SessionSnapshot) => {
       for (const listener of stateListeners) {
         listener(session);
+      }
+    },
+    fireCostUsage: (usage: CostUsageAggregate) => {
+      for (const listener of costUsageListeners) {
+        listener(usage);
       }
     },
     steerCalls: () => [...steerCalls],
@@ -356,6 +394,7 @@ function openClient(url: string, openTimeoutMs = 3000): Promise<TestClient> {
     const permissionFrames: Record<string, unknown>[] = [];
     const stateFrames: SessionStateFrame[] = [];
     const personasFrames: SessionPersonasFrame[] = [];
+    const costUsageFrames: CostUsageFrame[] = [];
     let opened = false;
 
     /** Poll until `getCount()` reaches `count`, or reject after `timeoutMs`. */
@@ -423,6 +462,12 @@ function openClient(url: string, openTimeoutMs = 3000): Promise<TestClient> {
         (parsed as { type?: unknown }).type === 'session-personas'
       ) {
         personasFrames.push(parsed as SessionPersonasFrame);
+      } else if (
+        typeof parsed === 'object' &&
+        parsed !== null &&
+        (parsed as { type?: unknown }).type === 'cost-usage'
+      ) {
+        costUsageFrames.push(parsed as CostUsageFrame);
       }
     });
 
@@ -461,6 +506,9 @@ function openClient(url: string, openTimeoutMs = 3000): Promise<TestClient> {
         personasFrames: () => [...personasFrames],
         waitForPersonasCount: (count: number, timeoutMs = 3000) =>
           waitForCount(() => personasFrames.length, 'session-personas', count, timeoutMs),
+        costUsageFrames: () => [...costUsageFrames],
+        waitForCostUsageCount: (count: number, timeoutMs = 3000) =>
+          waitForCount(() => costUsageFrames.length, 'cost-usage', count, timeoutMs),
         close: () => {
           socket.removeAllListeners();
           socket.close();
@@ -784,5 +832,43 @@ describe('ws-gateway session-personas routing', () => {
 
     await settle();
     expect(client.personasFrames()).toHaveLength(0);
+  });
+});
+
+describe('ws-gateway cost-usage', () => {
+  it('sends an initial cost-usage snapshot from costLedger.costToday() on connect', async () => {
+    const usage: CostUsageAggregate = Object.freeze({
+      costTodayUsd: 4.56,
+      inputTokensToday: 100,
+      outputTokensToday: 200,
+      sinceEpochMs: 12_345,
+    });
+    const harness = await startGateway({ costUsage: usage });
+    const client = await openClient(harness.url);
+
+    await client.waitForCostUsageCount(1);
+    expect(client.costUsageFrames()[0]).toEqual({ type: 'cost-usage', ...usage });
+  });
+
+  it('broadcasts an onCostUsage emission to all connected clients', async () => {
+    const harness = await startGateway();
+    const clientA = await openClient(harness.url);
+    const clientB = await openClient(harness.url);
+    // Each already got the initial snapshot on connect.
+    await clientA.waitForCostUsageCount(1);
+    await clientB.waitForCostUsageCount(1);
+
+    const usage: CostUsageAggregate = Object.freeze({
+      costTodayUsd: 1.23,
+      inputTokensToday: 10,
+      outputTokensToday: 20,
+      sinceEpochMs: 999,
+    });
+    harness.fireCostUsage(usage);
+
+    await clientA.waitForCostUsageCount(2);
+    await clientB.waitForCostUsageCount(2);
+    expect(clientA.costUsageFrames()[1]).toEqual({ type: 'cost-usage', ...usage });
+    expect(clientB.costUsageFrames()[1]).toEqual({ type: 'cost-usage', ...usage });
   });
 });

@@ -47,6 +47,7 @@ function makeFakeClient() {
     onPermissionRequest: () => () => {},
     onForeignNeedsYou: () => () => {},
     onHookBusLiveness: () => () => {},
+    onCostUsage: () => () => {},
     pin: () => {},
     unpin: () => {},
     discover: () => {},

@@ -17,6 +17,7 @@ import type { HookBus } from './hooks/hook-bus.js';
 import { readLifecycleSignals } from './lifecycle/lifecycle-reader.js';
 import type { Registry } from './registry/registry.js';
 import type { Bridge } from './session/bridge.js';
+import type { CostLedgerStore } from './session/cost-ledger-store.js';
 import { readSessionPersonas } from './session/persona-reader.js';
 import { isValidRole } from './session/roles.js';
 import type { SessionManager } from './session/session-manager.js';
@@ -141,6 +142,7 @@ export interface WsGatewayOptions {
   readonly sessionManager: SessionManager;
   readonly bridge: Bridge;
   readonly hookBus: HookBus;
+  readonly costLedger: CostLedgerStore;
   readonly projectRoots: readonly string[];
   readonly authToken: string;
   readonly requireToken: boolean;
@@ -349,6 +351,17 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
     }
   });
 
+  // Push the latest cost/usage aggregate to all OPEN clients whenever the manager
+  // records a `result` — mirrors the onState/onTranscript broadcasts above. This
+  // figure is account-wide (not project-scoped), so it broadcasts to every client
+  // with NO isPinnedPath gate.
+  options.sessionManager.onCostUsage((usage) => {
+    const frame: OutboundMessage = { type: 'cost-usage', ...usage };
+    for (const client of wss.clients) {
+      sendFrame(client, frame);
+    }
+  });
+
   // Push every Bridge run state change to all OPEN clients so every tab's Bridge
   // view stays in sync (mirrors the onState/onTranscript broadcasts above).
   // Access control: broadcast ONLY runs owned by a currently-pinned project — the
@@ -474,9 +487,28 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
     }
     sendFrame(socket, { type: 'hook-bus-liveness', ...options.hookBus.getLiveness(Date.now()) });
 
+    try {
+      sendFrame(socket, { type: 'cost-usage', ...options.costLedger.costToday() });
+    } catch (err) {
+      console.error('[ws] failed to send initial cost-usage snapshot', err);
+    }
+
     // e2e fixture: only when explicitly opted into via env — never runs otherwise.
     if (process.env['DEVOS_E2E_FLEET_FIXTURE'] === '1') {
       sendFleetFixture(socket);
+    }
+
+    // e2e fixture: a single deterministic non-zero cost-usage frame so the e2e can
+    // assert the figure updates from the empty-DB snapshot (0.00) to $1.23. Only when
+    // explicitly opted into via env — never runs otherwise.
+    if (process.env['DEVOS_E2E_COST_FIXTURE'] === '1') {
+      sendFrame(socket, {
+        type: 'cost-usage',
+        costTodayUsd: 1.2345,
+        inputTokensToday: 1200,
+        outputTokensToday: 3400,
+        sinceEpochMs: Date.now(),
+      });
     }
 
     socket.on('message', async (data) => {

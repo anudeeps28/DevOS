@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   createWsClient,
   type BridgeState,
+  type CostUsage,
   type ForeignNeedsYou,
   type GitState,
   type LifecycleSignals,
@@ -122,6 +123,8 @@ export interface UseProjectsResult {
   readonly foreignNeedsYou: readonly ForeignNeedsYou[];
   /** Whether the server's hook bus is currently connected. */
   readonly hookBusConnected: boolean;
+  /** Latest validated cost/usage snapshot; null until the first one arrives. */
+  readonly costToday: CostUsage | null;
 }
 
 export interface UseProjectsOptions {
@@ -151,6 +154,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
   >({});
   const [foreignNeedsYou, setForeignNeedsYou] = useState<readonly ForeignNeedsYou[]>([]);
   const [hookBusConnected, setHookBusConnected] = useState(false);
+  const [costToday, setCostToday] = useState<CostUsage | null>(null);
 
   // Hold the latest factory in a ref so the setup effect can run once (on mount)
   // without re-subscribing when an inline options object changes identity.
@@ -256,6 +260,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
       }),
     );
     const offHookBusLiveness = client.onHookBusLiveness((s) => setHookBusConnected(s.connected));
+    const offCostUsage = client.onCostUsage(setCostToday);
     // Immutable fold: a transcript batch upserts by seq within the session id.
     const offSessionTranscript = client.onSessionTranscript((_path, sessionId, events) =>
       setTranscripts((prev) => ({
@@ -303,6 +308,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
       offPermissionRequest();
       offForeignNeedsYou();
       offHookBusLiveness();
+      offCostUsage();
       offStatus();
       client.close();
       clientRef.current = null;
@@ -410,5 +416,6 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     resolvePermission,
     foreignNeedsYou,
     hookBusConnected,
+    costToday,
   };
 }
