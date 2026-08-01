@@ -432,7 +432,7 @@ describe('ProjectPin', () => {
 
   describe('session control', () => {
     function sampleSession(id: string, path: string, status = 'running'): SessionState {
-      return { id, projectPath: path, role: 'shipwright', status, sdkSessionId: null };
+      return { id, projectPath: path, role: 'builder', status, sdkSessionId: null };
     }
 
     it('shows "no sessions" when none are running for the project', () => {
@@ -466,7 +466,7 @@ describe('ProjectPin', () => {
 
       fireEvent.click(screen.getByTestId('session-spawn-/abs/one'));
 
-      expect(spawnSession).toHaveBeenCalledWith('/abs/one', 'shipwright');
+      expect(spawnSession).toHaveBeenCalledWith('/abs/one', 'builder');
     });
   });
 });

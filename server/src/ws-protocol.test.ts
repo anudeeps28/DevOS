@@ -176,19 +176,19 @@ describe('parseInboundMessage', () => {
   describe('session-spawn frames', () => {
     it('accepts a spawn with an absolute path and a valid role', () => {
       const result = parseInboundMessage(
-        JSON.stringify({ type: 'session-spawn', path: '/abs/project', role: 'shipwright' }),
+        JSON.stringify({ type: 'session-spawn', path: '/abs/project', role: 'builder' }),
       );
-      expect(result).toEqual({ type: 'session-spawn', path: '/abs/project', role: 'shipwright' });
+      expect(result).toEqual({ type: 'session-spawn', path: '/abs/project', role: 'builder' });
     });
 
     it('preserves workItemId when it is a string, omits it otherwise', () => {
       const withId = parseInboundMessage(
-        JSON.stringify({ type: 'session-spawn', path: '/abs', role: 'navigator', workItemId: 'WI-1' }),
+        JSON.stringify({ type: 'session-spawn', path: '/abs', role: 'builder', workItemId: 'WI-1' }),
       );
-      expect(withId).toEqual({ type: 'session-spawn', path: '/abs', role: 'navigator', workItemId: 'WI-1' });
+      expect(withId).toEqual({ type: 'session-spawn', path: '/abs', role: 'builder', workItemId: 'WI-1' });
 
       const noId = parseInboundMessage(
-        JSON.stringify({ type: 'session-spawn', path: '/abs', role: 'navigator', workItemId: 42 }),
+        JSON.stringify({ type: 'session-spawn', path: '/abs', role: 'builder', workItemId: 42 }),
       );
       expect(noId).toBeNull(); // non-string workItemId is rejected
     });
@@ -197,7 +197,7 @@ describe('parseInboundMessage', () => {
       const workItemId = 'x'.repeat(513); // exceeds MAX_WORK_ITEM_ID_LENGTH (512)
       expect(
         parseInboundMessage(
-          JSON.stringify({ type: 'session-spawn', path: '/abs', role: 'navigator', workItemId }),
+          JSON.stringify({ type: 'session-spawn', path: '/abs', role: 'builder', workItemId }),
         ),
       ).toBeNull();
     });
@@ -213,10 +213,10 @@ describe('parseInboundMessage', () => {
 
     it('rejects a spawn with a relative or empty path', () => {
       expect(
-        parseInboundMessage(JSON.stringify({ type: 'session-spawn', path: 'rel/dir', role: 'lookout' })),
+        parseInboundMessage(JSON.stringify({ type: 'session-spawn', path: 'rel/dir', role: 'reviewer' })),
       ).toBeNull();
       expect(
-        parseInboundMessage(JSON.stringify({ type: 'session-spawn', path: '', role: 'lookout' })),
+        parseInboundMessage(JSON.stringify({ type: 'session-spawn', path: '', role: 'reviewer' })),
       ).toBeNull();
     });
   });

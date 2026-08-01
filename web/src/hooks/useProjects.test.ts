@@ -176,7 +176,7 @@ function runningSession(id: string, path = '/abs/one'): SessionState {
   return {
     id,
     projectPath: path,
-    role: 'shipwright',
+    role: 'builder',
     status: 'running',
     sdkSessionId: null,
   };
@@ -349,7 +349,7 @@ describe('useProjects', () => {
     const running: SessionState = {
       id: 'sess-1',
       projectPath: '/abs/one',
-      role: 'shipwright',
+      role: 'builder',
       status: 'running',
       sdkSessionId: null,
     };
@@ -373,9 +373,9 @@ describe('useProjects', () => {
       useProjects({ createClient: () => fake.client }),
     );
 
-    act(() => result.current.spawnSession('/abs/path', 'lookout'));
+    act(() => result.current.spawnSession('/abs/path', 'reviewer'));
 
-    expect(fake.spawnSession).toHaveBeenCalledWith('/abs/path', 'lookout');
+    expect(fake.spawnSession).toHaveBeenCalledWith('/abs/path', 'reviewer');
   });
 
   it('requests git-state for each pinned project when the registry arrives', () => {

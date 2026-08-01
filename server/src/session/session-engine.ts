@@ -17,6 +17,7 @@ import {
   type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
 import type { Role } from './roles.js';
+import type { Effort } from './roster-reader.js';
 import { MAX_TEXT_CHARS } from './transcript-events.js';
 
 /**
@@ -59,6 +60,10 @@ export interface SpawnParams {
   readonly cwd: string;
   /** The session's role identity (Navigator/Shipwright/…). */
   readonly role: Role;
+  /** The roster-declared model id for this role (bracketed context-window suffix included). */
+  readonly model: string;
+  /** The roster-declared effort level for this role. */
+  readonly effort: Effort;
   /** The initial prompt that kicks off the session. */
   readonly prompt: string;
 }
@@ -308,7 +313,7 @@ async function* withInputClose(
  * Deliberately sets NO `permissionMode` — the SDK default is NOT auto-approve.
  */
 export function buildSessionOptions(
-  { cwd, role }: Pick<SpawnParams, 'cwd' | 'role'>,
+  { cwd, role, model, effort }: Pick<SpawnParams, 'cwd' | 'role' | 'model' | 'effort'>,
   broker: PermissionBroker,
 ): Options {
   return {
@@ -317,6 +322,8 @@ export function buildSessionOptions(
     env: buildSessionEnv(),
     systemPrompt: { type: 'preset', preset: 'claude_code', append: roleAppend(role) },
     canUseTool: broker.canUseTool,
+    model,
+    effort,
   };
 }
 
@@ -326,9 +333,9 @@ export function buildSessionOptions(
  * SDK `Query` wrapped so its input queue closes on iteration end, plus `send()` to
  * push a steering message into the open stream and the permission broker's relay.
  */
-export const defaultQuery: QueryFn = ({ cwd, role, prompt }): EngineSession => {
+export const defaultQuery: QueryFn = ({ cwd, role, model, effort, prompt }): EngineSession => {
   const broker = createPermissionBroker();
-  const options = buildSessionOptions({ cwd, role }, broker);
+  const options = buildSessionOptions({ cwd, role, model, effort }, broker);
   const input = createInputStream(prompt);
   const q = query({ prompt: input.stream, options });
   return Object.assign(withInputClose(q, input, broker), {

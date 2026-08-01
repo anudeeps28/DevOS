@@ -16,7 +16,7 @@
 //   AC5 — a garbage mid-stream message never flips the session to `errored` (it ends
 //         `ended`); a concurrently-running normal sibling stays `running`.
 //
-// The fake engine keys its behavior off the role: 'warden' yields garbage messages
+// The fake engine keys its behavior off the role: 'reviewer' yields garbage messages
 // mid-stream (AC5); every other role yields a clean scripted stream. Each fake session
 // holds OPEN (gated on a manual promise) after its content messages, then yields its
 // `result` message and completes when released (or interrupted at teardown).
@@ -212,7 +212,7 @@ function makeFakeEngine(): { query: QueryFn; spawns: FakeSpawn[] } {
     counter += 1;
     const sdkId = `sdk-${counter}`;
     const content =
-      params.role === 'warden' ? garbageContentMessages(sdkId) : normalContentMessages(sdkId);
+      params.role === 'reviewer' ? garbageContentMessages(sdkId) : normalContentMessages(sdkId);
     const { engine, release } = makeScriptedSession(content);
     spawns.push({ params, release });
     return engine;
@@ -433,7 +433,7 @@ describe('team-room transcript over the live WS transport', () => {
     server.instance.registry.pin(project);
 
     const client = await connect(server.url);
-    const sessionId = await spawnSession(client, project, 'shipwright');
+    const sessionId = await spawnSession(client, project, 'builder');
 
     // AC1 — the live stream delivers the content events (tool-result is the last
     // content message, so waiting for it guarantees the earlier ones arrived too).
@@ -492,7 +492,7 @@ describe('team-room transcript over the live WS transport', () => {
 
     // Client A watches the whole live stream.
     const clientA = await connect(server.url);
-    const sessionId = await spawnSession(clientA, project, 'shipwright');
+    const sessionId = await spawnSession(clientA, project, 'builder');
     await clientA.waitForFrame(transcriptWithKind(sessionId, 'tool-result'), 5000, 'tool-result on A');
 
     // Client B joins LATE — after the content events already flowed — and requests
@@ -541,7 +541,7 @@ describe('team-room transcript over the live WS transport', () => {
     server.instance.registry.pin(project);
 
     const client = await connect(server.url);
-    const sessionId = await spawnSession(client, project, 'shipwright');
+    const sessionId = await spawnSession(client, project, 'builder');
     await client.waitForFrame(transcriptWithKind(sessionId, 'tool-result'), 5000, 'tool-result event');
 
     // While live, the manager serves the buffered transcript.
@@ -612,17 +612,17 @@ describe('team-room transcript over the live WS transport', () => {
     server.instance.registry.pin(project);
 
     const client = await connect(server.url);
-    // 'warden' yields garbage messages mid-stream; 'lookout' is the clean sibling.
-    const gnarlyId = await spawnSession(client, project, 'warden');
-    const siblingId = await spawnSession(client, project, 'lookout');
+    // 'reviewer' yields garbage messages mid-stream; 'builder' is the clean sibling.
+    const gnarlyId = await spawnSession(client, project, 'reviewer');
+    const siblingId = await spawnSession(client, project, 'builder');
 
     // The garbage-laced stream still delivers its clean events.
-    await client.waitForFrame(transcriptWithKind(gnarlyId, 'tool-result'), 5000, 'warden tool-result');
+    await client.waitForFrame(transcriptWithKind(gnarlyId, 'tool-result'), 5000, 'reviewer tool-result');
 
-    // Release ONLY the warden session — the sibling stays gated (still running).
-    const wardenSpawn = engine.spawns.find((s) => s.params.role === 'warden');
+    // Release ONLY the reviewer session — the sibling stays gated (still running).
+    const wardenSpawn = engine.spawns.find((s) => s.params.role === 'reviewer');
     wardenSpawn?.release();
-    await client.waitForFrame(sessionEnded(gnarlyId), 5000, 'warden ended');
+    await client.waitForFrame(sessionEnded(gnarlyId), 5000, 'reviewer ended');
 
     // The affected session NEVER reported `errored` — garbage is skipped, not fatal.
     const gnarlyStatuses = client
@@ -648,7 +648,7 @@ describe('team-room transcript over the live WS transport', () => {
     expect(live.some((s) => s.id === gnarlyId)).toBe(false);
 
     // Release the sibling and confirm it also ends cleanly (isolation both ways).
-    const siblingSpawn = engine.spawns.find((s) => s.params.role === 'lookout');
+    const siblingSpawn = engine.spawns.find((s) => s.params.role === 'builder');
     siblingSpawn?.release();
     await client.waitForFrame(sessionEnded(siblingId), 5000, 'sibling ended');
   }, 15000);

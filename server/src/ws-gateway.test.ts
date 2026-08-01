@@ -119,7 +119,7 @@ function anchor(path: string): ProjectAnchor {
 
 /** A live-session snapshot for the fake manager. */
 function liveSnapshot(id: string, projectPath: string): SessionSnapshot {
-  return Object.freeze({ id, projectPath, role: 'navigator' as const, status: 'running' as const, sdkSessionId: null });
+  return Object.freeze({ id, projectPath, role: 'builder' as const, status: 'running' as const, sdkSessionId: null });
 }
 
 /** A minimal assistant-text transcript event fixture. */

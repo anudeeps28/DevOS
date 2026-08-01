@@ -3,7 +3,7 @@
 **Status:** Destination artifact of the "Development OS" wayfinder map (`6h6M5cm9WjffWxfg`).
 Compiles the resolved decisions (tickets A–H) + the per-project workspace reference design into a spec a build
 session can execute without further open decisions.
-**Date:** 2026-07-18 · **Revised:** 2026-07-20 (role-session orchestration — §3.1) ·
+**Date:** 2026-07-18 · **Revised:** 2026-07-20 (role sessions) · 2026-07-31 (two-session consolidation — §3.1) ·
 **Scope:** V1 = local-only, single-user, full control (spawn/steer/discuss).
 
 > Home: this becomes the founding design doc of the **separate `development-os` repo** (built *using*
@@ -50,46 +50,64 @@ it reaches into each project through that project's own installed harness.
 - **Known constraint:** SDK/`-p` sessions are headless & non-attachable → the OS is the **sole UI** for
   every session it spawns; it must fully own input, interrupt, and permission UX.
 
-### 3.1 Role-session orchestration (revision 2026-07-20)
+### 3.1 Two-session orchestration (revision 2026-07-31 — supersedes the 2026-07-20 five-role relay)
 
-Formalizes the existing "many disposable sessions per durable work item" model (ARCHITECTURE.md
-decision log) into **OS-orchestrated role sessions**: the pipeline is NOT one long session with a lead
-agent — it is a **sequence of fresh top-level sessions, one per stage, each with a role identity**,
-spawned by deterministic server code. This mirrors (and automates) the manual workflow the harness was
-designed around: plan in one session, hand off via artifacts, code in a fresh session, test in another.
+The per-work-item pipeline is **two sessions**, spawned in sequence by deterministic server code: one
+**build session** and one **fresh adversarial review session**. This supersedes the five-role-session
+relay (grill 2026-07-31): real usage data showed the per-stage cold-start overhead (each fresh session
+re-reads rules/notes/codebase before working) multiplied cost ~5× per item with no quality gain — the
+proven `/implement`/`/story` single-session flow already produces finished work. The clean-context
+benefit the relay provided is supplied **upstream instead**: wayfinder/grill/milestone decomposition
+writes tasks sized to one context window, each carrying its full context (description + acceptance
+criteria). Review independence — the one separation that is load-bearing ("never grade your own
+homework") — is preserved as its own fresh session.
 
-- **The Bridge** — the OS's deterministic orchestrator (server code, not an agent). Owns stage
-  sequencing, session spawning, gate enforcement, and rework routing. Zero prompting logic.
-- **The crew** — stage-level roles, each a fresh SDK session (cwd = project) running that stage's
-  harness skill(s):
+- **The Bridge** — unchanged: the OS's deterministic orchestrator (server code, not an agent). Owns
+  session sequencing, spawning, gate enforcement, and rework routing. Zero prompting logic.
+- **The two sessions** — each a fresh SDK session (cwd = project), roster-declared:
 
-  | Role | Stage | Runs (skills) |
-  |---|---|---|
-  | **Navigator** | Decide / Define | `/grill-me`, `/wayfinder`, `/architect`, `/plan` |
-  | **Shipwright** | Build | `/implement`, `/story`, `/run-tasks` |
-  | **Lookout** | Test | `/tdd`, e2e + acceptance gates |
-  | **Warden** | Security | security review before PR |
-  | **Harbormaster** | Ship | PR, `/deploy`, `/improve-harness` |
+  | Role | Does | Runs (skills) | Model / effort (roster-declared) |
+  |---|---|---|---|
+  | **builder** | understand → plan → code → test → fix; commits, pushes, drafts the PR body to story files | `/implement`, `/story`, `/run-tasks` | Opus 1M-context / medium |
+  | **reviewer** | adversarial review of the finished change — **report-only, never touches code** | evaluation + acceptance + architecture + security review | Opus 1M-context / high |
 
-- **Two agent levels.** Role sessions are the OS-visible unit; *within* a role session the harness's
-  own Claude Code subagents (evaluator, code-reviewer, debug-agent, …) still fan out as today. The
-  Fleet UI headlines roles and expands to inner subagent activity — never flattened into one list.
+- **Phases are display metadata, not sessions.** The old role names live on as UI phase labels carried
+  in the roster (`phases` list per role): planning→**Navigator**, coding→**Shipwright**,
+  testing→**Lookout**, reviewing→**Warden**, shipping→**Harbormaster**. Renaming is a roster data edit.
+- **Phase-detection contract — the harness announces.** Each phase's work is done by its own subagent;
+  the skill writes a phase marker into the story workspace (`tasks/stories/<id>/`) at subagent
+  boundaries. The OS's Story State Reader live-derives the current phase from the marker; the OS never
+  learns harness internals.
+- **Two agent levels (unchanged).** Sessions are the OS-visible unit; within a session the harness's
+  subagents fan out as today. The Fleet UI headlines sessions/phases and expands to inner subagent
+  activity — never flattened into one list.
+- **Review verdict + rework loop.** Only **BLOCK-tier** findings fail a review; advisory-only passes
+  (advisories are appended to the PR body). On fail: the reviewer's findings report → the Bridge
+  respawns a **fresh build session** with the report as its work order → a fresh review. **Loop cap
+  3**, then Escalation → the pipeline parks in the Needs-you inbox.
+- **PR mechanics.** The build session's final act: commit, push, draft the PR body into the story
+  files. On a CLEAR verdict the **Bridge mechanically opens the PR** via the project's code-platform
+  adapter script, appending review verdicts + advisories. No extra session; the reviewer stays
+  report-only.
+- **Advance policy — the PR is the single default human gate.** Approval happens upstream at
+  task-writing time (description + acceptance criteria); the pipeline runs task → build → review → PR
+  without stopping. **Interrupts always break through** — Question / Permission / Escalation /
+  `agent_needs_input` pauses the pipeline and lands in the Needs-you inbox; work resumes when
+  answered. Optional per-project **plan-gate toggle** (default OFF): the build session pauses once
+  after its internal planning phase for approval.
+- **Context handling — checkpoint + respawn, never compact.** State is continuously current on disk
+  (per-wave checkpointing in `tasks/stories/<id>/` — existing convention). The OS watches token usage
+  from the stream; at ~80% of the model's window the Bridge ends the session at a clean boundary and
+  respawns a fresh build session that resumes from task + acceptance criteria + state files + code so
+  far. ~2 resumes on one task → Escalation ("task too big — split it"). Threshold is
+  percentage-based — with the 1M-context model, mid-task respawns are rare by design.
 - **Handoff contract = the harness's existing artifacts** (grill-summary, plan/architecture docs,
-  `tasks/stories/<id>/` plans, review reports). No new handoff mechanism; a role session starts by
-  reading its predecessor's artifact.
-- **Advance policy — gated by default.** A role session completes → its artifact surfaces for human
-  approval → the Bridge spawns the next role. Per-project **auto-advance toggle**: when ON, a stage
-  that completes *cleanly* (no open questions, gates green) auto-spawns the next role. **Interrupts
-  always break through the toggle** — Question / Permission / Escalation / `agent_needs_input` pauses
-  the pipeline and lands in the Needs-you inbox regardless of auto-advance; work resumes when answered.
-- **Rework loop.** A failed stage (e.g. Lookout reports failing tests) with a *clear* next action →
-  the Bridge respawns the responsible role (usually Shipwright) with the failure report as input.
-  Unclear next action or loop-cap hit → Escalation to the human; the pipeline parks in the Needs-you
-  inbox until help arrives.
-- **Role definitions live in the harness, not the OS.** Each project's `.claude/` declares its role
-  roster (role → stage → skills + agent definition); the OS reads the roster and orchestrates —
-  **zero role/pipeline logic in DevOS**, mirroring the tracker-adapter pattern (§5). This requires a
-  harness-repo change (roster file + role agent definitions); the two ship together.
+  `tasks/stories/<id>/` plans, review reports). No new handoff mechanism.
+- **Role definitions live in the harness, not the OS.** Each project's `.claude/` roster declares the
+  two roles (skills, agent definition, phase labels, **model + effort**); the OS reads and
+  orchestrates — **zero role/pipeline logic in DevOS**, mirroring the tracker-adapter pattern (§5).
+  Per-project rosters carry the cost policy too (e.g. a budget-tier team declares smaller
+  models/windows in *their* roster; no code change). Harness + OS changes ship together.
 
 ## 4. Project registry (ticket C)
 
@@ -149,8 +167,9 @@ down into "Assign work."
   - Side rail: assigned agents (pause/resume/retry each), branch/files/tests/coverage meta, PR card.
   - Evidence tabs: files changed + test results + PR summary; artifact audit trail (brief/plan/
     test-strategy/evaluation/security-review, Draft→Final).
-- **Agents:** the crew's role sessions (Navigator/Shipwright/Lookout/Warden/Harbormaster — §3.1) with
-  role, stage, status + owned artifact; each expands to its internal harness subagents.
+- **Agents:** the work item's sessions (build / review — §3.1) headlined by their current **phase
+  persona** (Navigator/Shipwright/Lookout/Warden/Harbormaster, roster-declared display labels) with
+  status + owned artifact; each expands to its internal harness subagents.
 - **Board:** kanban across Queued→Planning→Coding→Testing→Review→PR→Merged.
 - **Skills panel:** org (read-only, versioned) + local (editable, can override an org skill).
 
@@ -161,11 +180,13 @@ status bar. **Cost/usage:** per-item token $ and a cost-today figure.
 
 1. User pins projects (registry) → Home shows the Projects Grid, live-derived.
 2. User opens a project → **Assign work** pulls a task via the project's tracker adapter.
-3. The Bridge spawns the stage's **role session** (cwd = project) running that stage's harness
-   skill(s); the role session fans out its own specialist subagents internally (§3.1).
-4. **Analyze → Plan** (Navigator) → **Plan gate** (human approves, or clean auto-advance) → **Code →
-   Test → Fix** (Shipwright ⇄ Lookout rework loop) → **Review** (Warden) → **Review gate** (human
-   approves) → **PR** (Harbormaster) via the project's code-platform adapter.
+3. The Bridge spawns the **build session** (cwd = project) running the build skill; it fans out its
+   own specialist subagents internally, writing phase markers as it goes (§3.1).
+4. **Understand → Plan → Code → Test → Fix** (one build session; phases display as Navigator →
+   Shipwright → Lookout; optional plan-gate pause) → build commits, pushes, drafts the PR body → the
+   Bridge spawns the **review session** (Warden; report-only) → on CLEAR the **Bridge opens the PR**
+   (Harbormaster phase) via the project's code-platform adapter; BLOCK findings loop back through a
+   fresh build session (cap 3 → escalate). **The PR is the default human gate.**
 5. Throughout: SDK stream drives the Team room + pipeline state + cost; hooks/inbox surface any
    Question/Permission/Escalation; the human steers via chat or answers a gate.
 
@@ -182,8 +203,8 @@ status bar. **Cost/usage:** per-item token $ and a cost-today figure.
 
 **In V1:** projects grid + per-project workspace, session spawn/steer/observe (SDK+hooks), unified
 inbox + notifications, tracker read/write via adapters, the phase pipeline with Plan/Review gates,
-inline Question/Permission/Escalation, **role-session orchestration** (the Bridge + crew roster,
-gated advance with per-project auto-advance toggle, rework loop — §3.1), Skills panel (view),
+inline Question/Permission/Escalation, **two-session orchestration** (the Bridge + roster, PR as the
+default gate with optional per-project plan gate, review rework loop — §3.1), Skills panel (view),
 cost/usage, SQLite state, **the
 project-lifecycle level** (stage badge New→Decide→Define→Build→Ship via the Project Lifecycle Reader,
 "Kick off next stage" launcher, and new-idea/add-project birth via the harness installer —
@@ -200,9 +221,10 @@ multi-device; cloud/remote execution.
 Every wayfinder ticket from both maps is resolved: the original "Development OS" map (tickets A–H →
 §§2–8) plus the follow-on **"project-lifecycle level"** map (`6h6gPPWFfHr5PwG8`, tickets T1–T3 → §4
 birth, §6 lifecycle badge + kick-off launcher, and ARCHITECTURE.md §9). The "Not yet specified" fog is
-either specified above or explicitly deferred to post-V1 (§9). The 2026-07-20 role-session revision
-(§3.1) was resolved directly with the architect (no wayfinder ticket): gates by default, per-project
-auto-advance with interrupt break-through, harness-owned role roster. A build session can start from this spec.
+either specified above or explicitly deferred to post-V1 (§9). The §3.1 orchestration model was
+revised twice: 2026-07-20 (role sessions, resolved with the architect) and 2026-07-31 (two-session
+consolidation, grill — 9 forks, `grill-summary.md`): PR as the default gate with interrupt
+break-through, harness-owned roster carrying phases/model/effort. A build session can start from this spec.
 First build slice suggestion: the local Node/TS server + SQLite registry + Projects-Grid home reading
 live git/tracker/session state (§2, §4, §6 home) — then the per-project Team room + SDK session driving
 (§3, §6 detail).

@@ -16,14 +16,31 @@ import { isValidRole } from './roles.js';
 
 const ROSTER_REL_PATH = join('.claude', 'harness-roles.json');
 
-const EXPECTED_SCHEMA_VERSION = 1;
+const EXPECTED_SCHEMA_VERSION = 2;
+
+const VALID_EFFORT_NAMES: readonly string[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+/** A display phase surfaced by a role (e.g. planning → Navigator). */
+export interface Phase {
+  readonly id: string;
+  readonly displayName: string;
+}
+
+/**
+ * Effort level for a role's model. Mirrors the SDK's `EffortLevel` union by value
+ * so the two agree at the `Options.effort` boundary without a cast — this reader
+ * stays SDK-free and does not import the SDK type.
+ */
+export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 /** Definition of a single role in the roster. */
 export interface RoleDef {
   readonly displayName: string;
-  readonly stages: readonly string[];
+  readonly phases: readonly Phase[];
   readonly skills: readonly string[];
   readonly agent: string;
+  readonly model: string;
+  readonly effort: Effort;
   readonly producesArtifacts: readonly string[];
 }
 
@@ -44,6 +61,25 @@ function isStringArray(value: unknown): value is readonly string[] {
   return Array.isArray(value) && value.every((entry) => typeof entry === 'string');
 }
 
+/** Parse a single raw phase entry. Returns null if `id`/`displayName` are not both strings. */
+function parsePhase(raw: unknown): Phase | null {
+  if (!isPlainObject(raw)) return null;
+  const { id, displayName } = raw;
+  if (typeof id !== 'string') return null;
+  if (typeof displayName !== 'string') return null;
+  return Object.freeze<Phase>({ id, displayName });
+}
+
+/** Type guard: `value` is an array of well-formed Phase entries. */
+function isPhaseArray(value: unknown): value is readonly Phase[] {
+  return Array.isArray(value) && value.every((entry) => parsePhase(entry) !== null);
+}
+
+/** Type guard: `value` is a valid Effort — one of the named levels. */
+function isEffort(raw: unknown): raw is Effort {
+  return typeof raw === 'string' && VALID_EFFORT_NAMES.includes(raw);
+}
+
 /**
  * Validate and freeze a single raw role-def object. Returns null if any required
  * field is missing or the wrong type.
@@ -51,19 +87,23 @@ function isStringArray(value: unknown): value is readonly string[] {
 function parseRoleDef(raw: unknown): RoleDef | null {
   if (!isPlainObject(raw)) return null;
 
-  const { displayName, stages, skills, agent, producesArtifacts } = raw;
+  const { displayName, phases, skills, agent, model, effort, producesArtifacts } = raw;
 
   if (typeof displayName !== 'string') return null;
-  if (!isStringArray(stages)) return null;
+  if (!isPhaseArray(phases)) return null;
   if (!isStringArray(skills)) return null;
   if (typeof agent !== 'string') return null;
+  if (typeof model !== 'string') return null;
+  if (!isEffort(effort)) return null;
   if (!isStringArray(producesArtifacts)) return null;
 
   return Object.freeze<RoleDef>({
     displayName,
-    stages: Object.freeze([...stages]),
+    phases: Object.freeze(phases.map((phase) => Object.freeze({ ...phase }))),
     skills: Object.freeze([...skills]),
     agent,
+    model,
+    effort,
     producesArtifacts: Object.freeze([...producesArtifacts]),
   });
 }

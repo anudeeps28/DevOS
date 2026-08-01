@@ -401,7 +401,7 @@ describe('steer + interrupt over the live WS transport', () => {
     server.instance.registry.pin(project);
 
     const client = await connect(server.url);
-    const sessionId = await spawnSession(client, project, 'shipwright');
+    const sessionId = await spawnSession(client, project, 'builder');
 
     // AC1 — steer: the typed message is echoed as a user-text event AND drives an
     // assistant `Ack:` reply that streams back on the existing session-transcript frame.
@@ -455,7 +455,7 @@ describe('steer + interrupt over the live WS transport', () => {
     server.instance.registry.pin(project);
 
     const client = await connect(server.url);
-    const sessionId = await spawnSession(client, project, 'shipwright');
+    const sessionId = await spawnSession(client, project, 'builder');
 
     // Unknown session — neither frame has any effect.
     client.send({ type: 'session-input', sessionId: 'does-not-exist', text: 'nope' });

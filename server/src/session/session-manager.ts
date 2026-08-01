@@ -15,6 +15,7 @@
 import { randomUUID } from 'node:crypto';
 import type { TranscriptEvent, TranscriptEventBody } from '../ws-protocol.js';
 import type { Role } from './roles.js';
+import type { Effort } from './roster-reader.js';
 import {
   defaultQuery,
   type EngineMessage,
@@ -47,6 +48,10 @@ export interface SpawnInput {
   readonly prompt?: string;
   /** The pipeline stage this spawn represents; written to `sessions.current_stage` by the Bridge. */
   readonly currentStage?: string;
+  /** The roster-declared model id; defaults to DEFAULT_MODEL when absent (non-Bridge spawns). */
+  readonly model?: string;
+  /** The roster-declared effort level; defaults to DEFAULT_EFFORT when absent (non-Bridge spawns). */
+  readonly effort?: Effort;
 }
 
 export type StateListener = (snapshot: SessionSnapshot) => void;
@@ -105,6 +110,11 @@ export interface SessionManagerDeps {
 }
 
 const DEFAULT_PROMPT = 'You are now attached to this project. Await further instructions.';
+
+// Fallback model/effort for a spawn with no roster context (e.g. a non-Bridge caller) —
+// 'inherit' means the SDK's main/default model (SPEC's subscription-auth default).
+const DEFAULT_MODEL = 'inherit';
+const DEFAULT_EFFORT: Effort = 'medium';
 
 /** Bound on the per-session in-memory transcript ring buffer (oldest dropped). */
 const MAX_TRANSCRIPT_EVENTS = 500;
@@ -275,7 +285,13 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     // Start the engine. A synchronous failure here must release the slot.
     let engine: EngineSession;
     try {
-      engine = query({ cwd: projectPath, role, prompt: input.prompt ?? DEFAULT_PROMPT });
+      engine = query({
+        cwd: projectPath,
+        role,
+        prompt: input.prompt ?? DEFAULT_PROMPT,
+        model: input.model ?? DEFAULT_MODEL,
+        effort: input.effort ?? DEFAULT_EFFORT,
+      });
     } catch (err) {
       release();
       store.updateStatus(id, 'errored');

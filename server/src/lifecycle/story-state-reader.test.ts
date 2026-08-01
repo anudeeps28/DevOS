@@ -73,4 +73,70 @@ describe('readStoryStates', () => {
     const summary = await readStoryStates(root);
     expect(Object.isFrozen(summary)).toBe(true);
   });
+
+  it('returns phase:null when there is no started story', async () => {
+    const root = await makeProject();
+    const summary = await readStoryStates(root);
+    expect(summary.phase).toBeNull();
+  });
+
+  it('a started story with a valid phase.md (schemaVersion 1, phase coding) → phase coding', async () => {
+    const root = await makeProject();
+    await makeStory(root, 'S1', {
+      'executor-state.md': '## Progress\ndone',
+      'phase.md': 'schemaVersion: 1\nphase: coding\nrole: builder\nupdated: 2026-07-31T21:10:00Z\n',
+    });
+    const summary = await readStoryStates(root);
+    expect(summary.hasStartedStory).toBe(true);
+    expect(summary.phase).toBe('coding');
+  });
+
+  it('a phase.md with an unrecognized schemaVersion → phase null (retain previous)', async () => {
+    const root = await makeProject();
+    await makeStory(root, 'S1', {
+      'executor-state.md': '## Progress\ndone',
+      'phase.md': 'schemaVersion: 2\nphase: coding\n',
+    });
+    const summary = await readStoryStates(root);
+    expect(summary.hasStartedStory).toBe(true);
+    expect(summary.phase).toBeNull();
+  });
+
+  it('a malformed phase.md (missing phase key) → phase null', async () => {
+    const root = await makeProject();
+    await makeStory(root, 'S1', {
+      'executor-state.md': '## Progress\ndone',
+      'phase.md': 'schemaVersion: 1\nrole: builder\n',
+    });
+    const summary = await readStoryStates(root);
+    expect(summary.phase).toBeNull();
+  });
+
+  it('garbage phase.md content → phase null, never throws', async () => {
+    const root = await makeProject();
+    await makeStory(root, 'S1', {
+      'executor-state.md': '## Progress\ndone',
+      'phase.md': 'not a key-value file at all\n{{{garbage}}}',
+    });
+    const summary = await readStoryStates(root);
+    expect(summary.phase).toBeNull();
+  });
+
+  it('duplicate phase: keys → first occurrence wins', async () => {
+    const root = await makeProject();
+    await makeStory(root, 'S1', {
+      'executor-state.md': '## Progress\ndone',
+      'phase.md': 'schemaVersion: 1\nphase: testing\nphase: shipping\n',
+    });
+    const summary = await readStoryStates(root);
+    expect(summary.phase).toBe('testing');
+  });
+
+  it('no phase.md at all → phase null', async () => {
+    const root = await makeProject();
+    await makeStory(root, 'S1', { 'executor-state.md': '## Progress\ndone' });
+    const summary = await readStoryStates(root);
+    expect(summary.hasStartedStory).toBe(true);
+    expect(summary.phase).toBeNull();
+  });
 });

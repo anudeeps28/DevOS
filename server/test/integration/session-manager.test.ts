@@ -10,8 +10,9 @@
 //         gateway stays up for a valid spawn; a fake generator that throws marks only
 //         that session errored while a sibling stays running.
 //
-// The fake engine keys its behavior off the role: a 'warden' session throws after
-// init (AC4 isolation), every other role yields init then stays open until interrupt.
+// The fake engine's throw behavior is opt-in per test via `throwsForRole` (AC4
+// isolation uses 'reviewer'); by default no role throws, so it yields init then
+// stays open until interrupt.
 // Isolation: per-test tmp DB + real tmp project dirs (projectRoots=[tmpdir()] so the
 // spawn containment guard passes); afterEach stops the server + removes the DB
 // sidecars and fixture dirs. NO live Claude.
@@ -80,13 +81,16 @@ function makeFakeSession(sdkId: string, throwAfterInit: boolean): EngineSession 
   });
 }
 
-function makeFakeEngine(): { query: QueryFn; calls: SpawnParams[] } {
+// `throwsForRole` lets a test opt a specific role INTO the fake-failure path
+// (AC4 isolation); by default no role throws, so concurrent spawns of different
+// roles (AC2) both stay open.
+function makeFakeEngine(throwsForRole?: string): { query: QueryFn; calls: SpawnParams[] } {
   const calls: SpawnParams[] = [];
   let counter = 0;
   const query: QueryFn = (params) => {
     calls.push(params);
     counter += 1;
-    return makeFakeSession(`sdk-${counter}`, params.role === 'warden');
+    return makeFakeSession(`sdk-${counter}`, params.role === throwsForRole);
   };
   return { query, calls };
 }
@@ -260,24 +264,24 @@ describe('session spawn + multiplex over the live WS transport', () => {
       (f) => f.path === project && f.session.status === 'running',
       5000,
     );
-    client.send({ type: 'session-spawn', path: project, role: 'shipwright' });
+    client.send({ type: 'session-spawn', path: project, role: 'builder' });
     const frame = await framePromise;
 
     // Engine invoked with cwd = project root and the requested role.
     expect(engine.calls).toHaveLength(1);
     expect(engine.calls[0]?.cwd).toBe(project);
-    expect(engine.calls[0]?.role).toBe('shipwright');
+    expect(engine.calls[0]?.role).toBe('builder');
 
     // The frame reports a running session carrying the role for this project.
     expect(frame.session.status).toBe('running');
-    expect(frame.session.role).toBe('shipwright');
+    expect(frame.session.role).toBe('builder');
     expect(frame.session.projectPath).toBe(project);
     expect(frame.session.id.length).toBeGreaterThan(0);
 
     // The manager lists it as a live running session.
     const live = server.instance.sessionManager.list();
     expect(live).toHaveLength(1);
-    expect(live[0]?.role).toBe('shipwright');
+    expect(live[0]?.role).toBe('builder');
     expect(live[0]?.status).toBe('running');
   }, 15000);
 
@@ -289,15 +293,15 @@ describe('session spawn + multiplex over the live WS transport', () => {
 
     const client = await connect(server.url);
     const first = client.waitForSessionState(
-      (f) => f.session.role === 'shipwright' && f.session.status === 'running',
+      (f) => f.session.role === 'builder' && f.session.status === 'running',
       5000,
     );
     const second = client.waitForSessionState(
-      (f) => f.session.role === 'lookout' && f.session.status === 'running',
+      (f) => f.session.role === 'reviewer' && f.session.status === 'running',
       5000,
     );
-    client.send({ type: 'session-spawn', path: project, role: 'shipwright' });
-    client.send({ type: 'session-spawn', path: project, role: 'lookout' });
+    client.send({ type: 'session-spawn', path: project, role: 'builder' });
+    client.send({ type: 'session-spawn', path: project, role: 'reviewer' });
 
     const [a, b] = await Promise.all([first, second]);
     expect(a.session.id).not.toBe(b.session.id);
@@ -318,13 +322,13 @@ describe('session spawn + multiplex over the live WS transport', () => {
     const client = await connect(server.url);
 
     // Spawn on the FOREIGN (unpinned) path — must be dropped, no engine call.
-    client.send({ type: 'session-spawn', path: foreign, role: 'shipwright' });
+    client.send({ type: 'session-spawn', path: foreign, role: 'builder' });
     // Give the server a beat, then confirm a valid spawn on the pinned path works.
     const valid = client.waitForSessionState(
       (f) => f.path === pinned && f.session.status === 'running',
       5000,
     );
-    client.send({ type: 'session-spawn', path: pinned, role: 'shipwright' });
+    client.send({ type: 'session-spawn', path: pinned, role: 'builder' });
     await valid;
 
     // The foreign spawn never reached the engine — only the pinned one did.
@@ -335,28 +339,28 @@ describe('session spawn + multiplex over the live WS transport', () => {
 
   it('AC4 — one session throwing is isolated; a sibling stays running', async () => {
     const project = makeProjectDir();
-    const engine = makeFakeEngine();
+    const engine = makeFakeEngine('reviewer');
     const server = await startServer(makeTmpDbPath(), engine.query);
     server.instance.registry.pin(project);
 
     const client = await connect(server.url);
-    // 'warden' throws after init; 'harbormaster' stays open.
+    // 'reviewer' throws after init; 'builder' stays open.
     const goodRunning = client.waitForSessionState(
-      (f) => f.session.role === 'harbormaster' && f.session.status === 'running',
+      (f) => f.session.role === 'builder' && f.session.status === 'running',
       5000,
     );
     const badErrored = client.waitForSessionState(
-      (f) => f.session.role === 'warden' && f.session.status === 'errored',
+      (f) => f.session.role === 'reviewer' && f.session.status === 'errored',
       5000,
     );
-    client.send({ type: 'session-spawn', path: project, role: 'harbormaster' });
-    client.send({ type: 'session-spawn', path: project, role: 'warden' });
+    client.send({ type: 'session-spawn', path: project, role: 'builder' });
+    client.send({ type: 'session-spawn', path: project, role: 'reviewer' });
 
     await Promise.all([goodRunning, badErrored]);
 
     // The errored session is gone from the live map; the sibling is still running.
     const live = server.instance.sessionManager.list();
-    expect(live.some((s) => s.role === 'harbormaster' && s.status === 'running')).toBe(true);
-    expect(live.some((s) => s.role === 'warden')).toBe(false);
+    expect(live.some((s) => s.role === 'builder' && s.status === 'running')).toBe(true);
+    expect(live.some((s) => s.role === 'reviewer')).toBe(false);
   }, 15000);
 });

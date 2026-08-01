@@ -35,7 +35,7 @@ function runningSession(id: string, path = '/abs/one'): SessionState {
   return {
     id,
     projectPath: path,
-    role: 'shipwright',
+    role: 'builder',
     status: 'running',
     sdkSessionId: null,
   };
