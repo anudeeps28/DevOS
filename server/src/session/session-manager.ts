@@ -37,6 +37,8 @@ export interface SessionSnapshot {
   readonly role: Role;
   readonly status: SessionStatus;
   readonly sdkSessionId: string | null;
+  readonly workItemId: string | null;
+  readonly rateLimited: boolean;
 }
 
 /** Input to spawn one owned session. */
@@ -124,6 +126,7 @@ interface LiveSession {
   readonly id: string;
   readonly projectPath: string;
   readonly role: Role;
+  readonly workItemId: string | null;
   status: SessionStatus;
   sdkSessionId: string | null;
   /** Monotonic per-session transcript sequence counter. */
@@ -157,6 +160,9 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       role: s.role,
       status: s.status,
       sdkSessionId: s.sdkSessionId,
+      workItemId: s.workItemId,
+      // Always false today — the deferred plan-limit detector is the future writer.
+      rateLimited: false,
     });
 
   const emit = (s: LiveSession): void => {
@@ -302,6 +308,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       id,
       projectPath,
       role,
+      workItemId: input.workItemId ?? null,
       status: 'running',
       sdkSessionId: null,
       seq: 0,

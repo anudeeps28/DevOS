@@ -13,6 +13,7 @@ import {
   type PinMessage,
   type SessionInputMessage,
   type SessionInterruptMessage,
+  type SessionPersonasMessage,
   type SessionTranscriptRequestMessage,
   type TranscriptEventBody,
   type UnpinMessage,
@@ -200,6 +201,16 @@ describe('parseInboundMessage', () => {
           JSON.stringify({ type: 'session-spawn', path: '/abs', role: 'builder', workItemId }),
         ),
       ).toBeNull();
+    });
+
+    it('rejects a spawn whose workItemId is a path-traversal payload', () => {
+      for (const workItemId of ['../../../../etc', 'a/b', '..', '.hidden', 'WI 1', 'WI/../x']) {
+        expect(
+          parseInboundMessage(
+            JSON.stringify({ type: 'session-spawn', path: '/abs', role: 'builder', workItemId }),
+          ),
+        ).toBeNull();
+      }
     });
 
     it('rejects a spawn with an invalid or absent role', () => {
@@ -429,6 +440,14 @@ describe('parseInboundMessage', () => {
         ),
       ).toBeNull();
     });
+
+    it('rejects a bridge-start whose workItemId is a path-traversal payload', () => {
+      for (const workItemId of ['../../etc', 'a/b', '..', '.hidden']) {
+        expect(
+          parseInboundMessage(JSON.stringify({ type: 'bridge-start', path: '/abs', workItemId })),
+        ).toBeNull();
+      }
+    });
   });
 
   describe('gate-approve frames', () => {
@@ -548,6 +567,31 @@ describe('parseInboundMessage', () => {
             decision: 'allow',
           }),
         ),
+      ).toBeNull();
+    });
+  });
+
+  describe('session-personas frames', () => {
+    it('accepts a session-personas message with an absolute path, frozen', () => {
+      const result = parseInboundMessage(
+        JSON.stringify({ type: 'session-personas', path: '/abs/project' }),
+      );
+      expect(result).toEqual<SessionPersonasMessage>({
+        type: 'session-personas',
+        path: '/abs/project',
+      });
+      expect(Object.isFrozen(result)).toBe(true);
+    });
+
+    it('rejects a session-personas message with a missing, empty, or relative path', () => {
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'session-personas' })),
+      ).toBeNull();
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'session-personas', path: '' })),
+      ).toBeNull();
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'session-personas', path: 'rel/dir' })),
       ).toBeNull();
     });
   });

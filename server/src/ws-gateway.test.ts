@@ -22,9 +22,10 @@ import type {
 import type {
   SessionManager,
   SessionSnapshot,
+  StateListener,
   TranscriptListener,
 } from './session/session-manager.js';
-import type { ProjectAnchor, TranscriptEvent } from './ws-protocol.js';
+import type { ProjectAnchor, SessionPersona, TranscriptEvent } from './ws-protocol.js';
 import { attachWsGateway, FLOOD_GUARD_MAX_KEYS, pruneFloodGuard, type WsGateway } from './ws-gateway.js';
 
 const WINDOW_MS = 200;
@@ -120,7 +121,15 @@ function anchor(path: string): ProjectAnchor {
 
 /** A live-session snapshot for the fake manager. */
 function liveSnapshot(id: string, projectPath: string): SessionSnapshot {
-  return Object.freeze({ id, projectPath, role: 'builder' as const, status: 'running' as const, sdkSessionId: null });
+  return Object.freeze({
+    id,
+    projectPath,
+    role: 'builder' as const,
+    status: 'running' as const,
+    sdkSessionId: null,
+    workItemId: null,
+    rateLimited: false,
+  });
 }
 
 /** A minimal assistant-text transcript event fixture. */
@@ -133,6 +142,18 @@ interface TranscriptFrame {
   readonly path: string;
   readonly sessionId: string;
   readonly events: readonly TranscriptEvent[];
+}
+
+interface SessionStateFrame {
+  readonly type: 'session-state';
+  readonly path: string;
+  readonly session: SessionSnapshot;
+}
+
+interface SessionPersonasFrame {
+  readonly type: 'session-personas';
+  readonly path: string;
+  readonly personas: readonly SessionPersona[];
 }
 
 interface HarnessOptions {
@@ -149,6 +170,8 @@ interface GatewayHarness {
     sessionId: string,
     events: readonly TranscriptEvent[],
   ) => void;
+  /** Fire the manager's state channel as if a live session's state changed. */
+  readonly fireState: (session: SessionSnapshot) => void;
   /** Every `sendInput(sessionId, text)` the gateway forwarded to the manager. */
   readonly steerCalls: () => readonly { readonly sessionId: string; readonly text: string }[];
   /** Every `interrupt(sessionId)` the gateway forwarded to the manager. */
@@ -176,6 +199,14 @@ interface TestClient {
   readonly waitForTranscriptCount: (count: number, timeoutMs?: number) => Promise<void>;
   /** Every `permission-request` frame seen so far. */
   readonly permissionRequestFrames: () => readonly Record<string, unknown>[];
+  /** Every `session-state` frame seen so far. */
+  readonly stateFrames: () => readonly SessionStateFrame[];
+  /** Resolve once at least `count` session-state frames arrived; reject on timeout. */
+  readonly waitForStateCount: (count: number, timeoutMs?: number) => Promise<void>;
+  /** Every `session-personas` frame seen so far. */
+  readonly personasFrames: () => readonly SessionPersonasFrame[];
+  /** Resolve once at least `count` session-personas frames arrived; reject on timeout. */
+  readonly waitForPersonasCount: (count: number, timeoutMs?: number) => Promise<void>;
   readonly close: () => void;
 }
 
@@ -197,6 +228,7 @@ async function startGateway(options: HarnessOptions = {}): Promise<GatewayHarnes
   const sessions = options.sessions ?? {};
   const transcripts = options.transcripts ?? {};
   const transcriptListeners = new Set<TranscriptListener>();
+  const stateListeners = new Set<StateListener>();
   const permissionRequestListeners = new Set<
     (path: string, sessionId: string, req: EnginePermissionRequest) => void
   >();
@@ -226,7 +258,12 @@ async function startGateway(options: HarnessOptions = {}): Promise<GatewayHarnes
     spawn: () => Promise.reject(new Error('spawn not used in gateway transcript tests')),
     list: () => Object.values(sessions),
     get: (id: string) => sessions[id] ?? null,
-    onState: () => () => {},
+    onState: (listener: StateListener) => {
+      stateListeners.add(listener);
+      return () => {
+        stateListeners.delete(listener);
+      };
+    },
     onTranscript: (listener: TranscriptListener) => {
       transcriptListeners.add(listener);
       return () => {
@@ -287,6 +324,11 @@ async function startGateway(options: HarnessOptions = {}): Promise<GatewayHarnes
         listener(path, sessionId, events);
       }
     },
+    fireState: (session: SessionSnapshot) => {
+      for (const listener of stateListeners) {
+        listener(session);
+      }
+    },
     steerCalls: () => [...steerCalls],
     interruptCalls: () => [...interruptCalls],
     firePermissionRequest: (path: string, sessionId: string, req: EnginePermissionRequest) => {
@@ -312,7 +354,28 @@ function openClient(url: string, openTimeoutMs = 3000): Promise<TestClient> {
     const socket = new WebSocket(url);
     const frames: TranscriptFrame[] = [];
     const permissionFrames: Record<string, unknown>[] = [];
+    const stateFrames: SessionStateFrame[] = [];
+    const personasFrames: SessionPersonasFrame[] = [];
     let opened = false;
+
+    /** Poll until `getCount()` reaches `count`, or reject after `timeoutMs`. */
+    function waitForCount(getCount: () => number, label: string, count: number, timeoutMs: number): Promise<void> {
+      return new Promise<void>((resolveWait, rejectWait) => {
+        const deadline = Date.now() + timeoutMs;
+        const poll = (): void => {
+          if (getCount() >= count) {
+            resolveWait();
+            return;
+          }
+          if (Date.now() >= deadline) {
+            rejectWait(new Error(`Timed out waiting for ${count} ${label} frame(s); saw ${getCount()}`));
+            return;
+          }
+          setTimeout(poll, 10);
+        };
+        poll();
+      });
+    }
 
     const openTimer = setTimeout(() => {
       if (!opened) {
@@ -348,6 +411,18 @@ function openClient(url: string, openTimeoutMs = 3000): Promise<TestClient> {
         (parsed as { type?: unknown }).type === 'permission-request'
       ) {
         permissionFrames.push(parsed as Record<string, unknown>);
+      } else if (
+        typeof parsed === 'object' &&
+        parsed !== null &&
+        (parsed as { type?: unknown }).type === 'session-state'
+      ) {
+        stateFrames.push(parsed as SessionStateFrame);
+      } else if (
+        typeof parsed === 'object' &&
+        parsed !== null &&
+        (parsed as { type?: unknown }).type === 'session-personas'
+      ) {
+        personasFrames.push(parsed as SessionPersonasFrame);
       }
     });
 
@@ -380,6 +455,12 @@ function openClient(url: string, openTimeoutMs = 3000): Promise<TestClient> {
             poll();
           }),
         permissionRequestFrames: () => [...permissionFrames],
+        stateFrames: () => [...stateFrames],
+        waitForStateCount: (count: number, timeoutMs = 3000) =>
+          waitForCount(() => stateFrames.length, 'session-state', count, timeoutMs),
+        personasFrames: () => [...personasFrames],
+        waitForPersonasCount: (count: number, timeoutMs = 3000) =>
+          waitForCount(() => personasFrames.length, 'session-personas', count, timeoutMs),
         close: () => {
           socket.removeAllListeners();
           socket.close();
@@ -646,5 +727,62 @@ describe('ws-gateway permission routing', () => {
 
     await settle();
     expect(client.permissionRequestFrames()).toEqual([]);
+  });
+});
+
+describe('ws-gateway session-state broadcast', () => {
+  it('broadcasts a session-state change carrying workItemId and rateLimited', async () => {
+    const harness = await startGateway({ pinnedPaths: [PROJECT_PATH] });
+    const client = await openClient(harness.url);
+    const session: SessionSnapshot = Object.freeze({
+      id: SESSION_ID,
+      projectPath: PROJECT_PATH,
+      role: 'reviewer' as const,
+      status: 'running' as const,
+      sdkSessionId: null,
+      workItemId: 'WI-1',
+      rateLimited: true,
+    });
+
+    harness.fireState(session);
+
+    await client.waitForStateCount(1);
+    expect(client.stateFrames()[0]).toEqual({
+      type: 'session-state',
+      path: PROJECT_PATH,
+      session,
+    });
+  });
+});
+
+describe('ws-gateway session-personas routing', () => {
+  it('replies to a session-personas request on the requesting socket only', async () => {
+    const harness = await startGateway({
+      pinnedPaths: [PROJECT_PATH],
+      sessions: { [SESSION_ID]: liveSnapshot(SESSION_ID, PROJECT_PATH) },
+    });
+    const requester = await openClient(harness.url);
+    const bystander = await openClient(harness.url);
+
+    requester.send({ type: 'session-personas', path: PROJECT_PATH });
+
+    await requester.waitForPersonasCount(1);
+    const frame = requester.personasFrames()[0];
+    expect(frame).toMatchObject({ type: 'session-personas', path: PROJECT_PATH });
+    expect(frame?.personas).toEqual([
+      { sessionId: SESSION_ID, workItemId: null, role: 'builder', phase: null, persona: null },
+    ]);
+    await settle();
+    expect(bystander.personasFrames()).toHaveLength(0);
+  });
+
+  it('sends no frame when the requested path is not pinned (fails closed)', async () => {
+    const harness = await startGateway({ pinnedPaths: [] }); // path NOT pinned
+    const client = await openClient(harness.url);
+
+    client.send({ type: 'session-personas', path: PROJECT_PATH });
+
+    await settle();
+    expect(client.personasFrames()).toHaveLength(0);
   });
 });

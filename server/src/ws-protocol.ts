@@ -27,6 +27,20 @@ const MAX_REASON_LENGTH = 4096;
 export const MAX_STEER_TEXT_LENGTH = 8192;
 export const MAX_REQUEST_ID_LENGTH = 128;
 
+// A workItemId is later joined into a filesystem path (tasks/stories/<id>/phase.md
+// by the persona reader), so it must be a safe single path segment — no separators,
+// no `..`, no leading dot. Allowlist strictly (reject, don't sanitize) at the
+// boundary so a traversal payload can never reach any path join downstream.
+const WORK_ITEM_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+function isSafeWorkItemId(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= MAX_WORK_ITEM_ID_LENGTH &&
+    WORK_ITEM_ID_PATTERN.test(value)
+  );
+}
+
 /** A persisted project anchor as sent to the client. */
 export interface ProjectAnchor {
   readonly path: string;
@@ -191,6 +205,30 @@ export interface SessionState {
   readonly role: string;
   readonly status: string;
   readonly sdkSessionId: string | null;
+  readonly workItemId: string | null;
+  readonly rateLimited: boolean;
+}
+
+/** One owned session's persona identity — role x its story's live phase, joined against the roster. */
+export interface SessionPersona {
+  readonly sessionId: string;
+  readonly workItemId: string | null;
+  readonly role: string;
+  readonly phase: Phase | null;
+  readonly persona: string | null;
+}
+
+/** Inbound: request the current persona join for every owned session of a pinned project path. */
+export interface SessionPersonasMessage {
+  readonly type: 'session-personas';
+  readonly path: string;
+}
+
+/** Outbound: a session-personas snapshot for a single project path. */
+export interface SessionPersonasSnapshot {
+  readonly type: 'session-personas';
+  readonly path: string;
+  readonly personas: readonly SessionPersona[];
 }
 
 /** Inbound: spawn an owned Agent-SDK session for a pinned project + role. */
@@ -379,7 +417,8 @@ export type InboundMessage =
   | PermissionDecisionMessage
   | BridgeStartMessage
   | GateApproveMessage
-  | BridgeInterruptMessage;
+  | BridgeInterruptMessage
+  | SessionPersonasMessage;
 
 /** Every registry message the server emits to a client. */
 export type OutboundMessage =
@@ -394,7 +433,8 @@ export type OutboundMessage =
   | PermissionRequestSnapshot
   | BridgeStateSnapshot
   | ForeignSessionNeedsYouSnapshot
-  | HookBusLivenessSnapshot;
+  | HookBusLivenessSnapshot
+  | SessionPersonasSnapshot;
 
 /**
  * Validate a raw WS frame against the inbound contract. Branches on `type` first:
@@ -464,6 +504,20 @@ export function parseInboundMessage(data: unknown): InboundMessage | null {
     return Object.freeze<LifecycleSignalsMessage>({ type: 'lifecycle-signals', path });
   }
 
+  // `session-personas` shares the same non-empty ABSOLUTE-path requirement as lifecycle-signals.
+  if (type === 'session-personas') {
+    const { path } = frame;
+    if (
+      typeof path !== 'string' ||
+      path.length === 0 ||
+      path.length > MAX_PATH_LENGTH ||
+      !isAbsolute(path)
+    ) {
+      return null;
+    }
+    return Object.freeze<SessionPersonasMessage>({ type: 'session-personas', path });
+  }
+
   // `session-spawn` requires a non-empty ABSOLUTE path (like the read frames) AND a
   // valid role (validated against the canonical roster). workItemId is optional.
   if (type === 'session-spawn') {
@@ -479,12 +533,10 @@ export function parseInboundMessage(data: unknown): InboundMessage | null {
     if (!isValidRole(role)) {
       return null;
     }
-    // workItemId is optional; when present it must be a bounded string (it is persisted
-    // to the sessions table — reject, don't truncate, so the boundary stays strict).
-    if (
-      workItemId !== undefined &&
-      (typeof workItemId !== 'string' || workItemId.length > MAX_WORK_ITEM_ID_LENGTH)
-    ) {
+    // workItemId is optional; when present it must be a safe path-segment string (it is
+    // persisted to the sessions table AND later joined into a filesystem path by the
+    // persona reader — reject anything with a separator/`..`, so the boundary stays strict).
+    if (workItemId !== undefined && !isSafeWorkItemId(workItemId)) {
       return null;
     }
     return Object.freeze<SessionSpawnMessage>({
@@ -593,10 +645,7 @@ export function parseInboundMessage(data: unknown): InboundMessage | null {
     ) {
       return null;
     }
-    if (
-      workItemId !== undefined &&
-      (typeof workItemId !== 'string' || workItemId.length > MAX_WORK_ITEM_ID_LENGTH)
-    ) {
+    if (workItemId !== undefined && !isSafeWorkItemId(workItemId)) {
       return null;
     }
     return Object.freeze<BridgeStartMessage>({
