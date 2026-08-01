@@ -351,6 +351,43 @@ describe('HTTP POST /hooks → WS broadcast (AC1/AC2/security)', () => {
     expect(before).toBe(before); // no-op sanity — the real assertion is `after.length === 0`
   }, 15000);
 
+  it('SEC5 — a request carrying an Origin header is rejected 403 with no broadcast (CSWSH defense)', async () => {
+    const sessionId = `sess-${randomUUID()}`;
+    const body = JSON.stringify({
+      session_id: sessionId,
+      cwd: pinnedDir,
+      hook_event_name: 'Notification',
+      notification_type: 'permission_prompt',
+    });
+
+    // A cross-origin browser POST always carries Origin; a real forwarder never does.
+    const res = await postHook(address.port, body, { origin: 'http://evil.example.com' });
+    expect(res.status).toBe(403);
+
+    // Fence: a subsequent Origin-less POST round-trips, proving no delayed broadcast.
+    const fenceSessionId = `sess-${randomUUID()}`;
+    const fencePromise = client.waitForFrame(
+      (f) => isForeignSessionNeedsYouFrame(f) && f.sessionId === fenceSessionId,
+      5000,
+      'fence needs-you frame',
+    );
+    await postHook(
+      address.port,
+      JSON.stringify({
+        session_id: fenceSessionId,
+        cwd: pinnedDir,
+        hook_event_name: 'Notification',
+        notification_type: 'permission_prompt',
+      }),
+    );
+    await fencePromise;
+
+    const after = client
+      .framesOfType(isForeignSessionNeedsYouFrame)
+      .filter((f) => f.sessionId === sessionId);
+    expect(after.length).toBe(0);
+  }, 15000);
+
   it('SEC2 — an oversize body is rejected 413 and the server stays up for a subsequent valid POST', async () => {
     const oversized = 'x'.repeat(MAX_HOOK_PAYLOAD_BYTES + 1024);
     const res = await postHook(address.port, oversized).catch((err: Error) => {

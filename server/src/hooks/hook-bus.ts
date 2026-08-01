@@ -30,6 +30,18 @@ const DEFAULT_REASON_BY_KIND: Readonly<Record<NotificationKind, string>> = {
   agent_needs_input: 'Agent needs input to continue.',
 };
 
+/**
+ * Collapse a foreign-supplied notification message into one safe single line:
+ * strip CR/LF, C0 control chars, and ESC (no ANSI), then length-cap. React
+ * escapes on render so this is not an XSS guard — it is the same free-text
+ * hygiene the phase-marker `detail` contract requires (one clean line, no
+ * control chars) for text that flows from an untrusted source into a UI.
+ */
+function sanitizeReason(raw: string): string {
+  // eslint-disable-next-line no-control-regex
+  return raw.replace(/[\u0000-\u001F\u007F]/g, ' ').slice(0, MAX_REASON_LENGTH);
+}
+
 /** A defensively-parsed Claude Code hook payload. */
 export type ParsedHook =
   | {
@@ -82,7 +94,7 @@ export function parseHookPayload(raw: unknown): ParsedHook | null {
     const rawMessage = body.message;
     const reason =
       typeof rawMessage === 'string' && rawMessage.length > 0
-        ? rawMessage.slice(0, MAX_REASON_LENGTH)
+        ? sanitizeReason(rawMessage)
         : DEFAULT_REASON_BY_KIND[kind];
 
     return Object.freeze<ParsedHook>({
@@ -164,6 +176,9 @@ export function createHookBus(opts?: { now?: () => number; staleMs?: number }): 
     }
   }
 
+  const computeConnected = (nowMs: number): boolean =>
+    lastReceivedAt !== null && nowMs - lastReceivedAt < staleMs;
+
   return {
     ingest(raw: unknown): void {
       const parsed = parseHookPayload(raw);
@@ -200,12 +215,11 @@ export function createHookBus(opts?: { now?: () => number; staleMs?: number }): 
     },
 
     getLiveness(nowMs: number): { connected: boolean; lastReceivedAt: number | null } {
-      const connected = lastReceivedAt !== null && nowMs - lastReceivedAt < staleMs;
-      return { connected, lastReceivedAt };
+      return { connected: computeConnected(nowMs), lastReceivedAt };
     },
 
     checkStale(nowMs: number): void {
-      if (wasConnected && !this.getLiveness(nowMs).connected) {
+      if (wasConnected && !computeConnected(nowMs)) {
         emitLiveness(false, lastReceivedAt);
       }
     },

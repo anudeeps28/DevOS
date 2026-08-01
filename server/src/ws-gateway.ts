@@ -281,8 +281,18 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
   // (posted over HTTP by a hook forwarder), so this mirrors the two-layer
   // spawn/bridge-start gate above and fails closed on either check.
   options.hookBus.onEvent(async (e) => {
-    if (!isPinnedPath(e.cwd) || !(await isWithinProjectRoots(e.cwd, options.projectRoots))) {
-      console.warn('[ws] dropped foreign hook — cwd not pinned/within roots');
+    // A `needs-you` event injects UI state, so it passes the full two-layer
+    // gate (pinned AND realpath-within-roots). A `clear` only REMOVES existing
+    // UI state and carries no new path exposure, so it is gated on the cheap
+    // sync isPinnedPath check alone — skipping the realpath check that would
+    // throw (and leak a stuck inbox item) if the session's dir was deleted
+    // between its Notification and its SessionEnd.
+    if (!isPinnedPath(e.cwd)) {
+      console.warn('[ws] dropped foreign hook — cwd not pinned');
+      return;
+    }
+    if (e.kind === 'needs-you' && !(await isWithinProjectRoots(e.cwd, options.projectRoots))) {
+      console.warn('[ws] dropped foreign hook — cwd not within roots');
       return;
     }
     const frame: OutboundMessage =

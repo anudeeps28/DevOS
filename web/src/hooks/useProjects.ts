@@ -18,6 +18,9 @@ import {
 /** Client-side bound on the folded per-session transcript (mirrors the server buffer). */
 const MAX_TRANSCRIPT_EVENTS = 500;
 
+/** Client-side bound on the foreign-session needs-you list (memory guard). */
+const MAX_FOREIGN_NEEDS_YOU = 100;
+
 /**
  * Immutably fold a transcript batch into the existing per-session list: upsert
  * (replace) by `seq`, keep ascending `seq` order, and bound to the last
@@ -192,7 +195,14 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     const offForeignNeedsYou = client.onForeignNeedsYou((item) =>
       setForeignNeedsYou((prev) => {
         const others = prev.filter((x) => x.sessionId !== item.sessionId);
-        return item.cleared ? others : [...others, item];
+        if (item.cleared) return others;
+        // Cap the list so a foreign process streaming many distinct sessionIds
+        // (deduped only by sessionId) can't grow browser memory unbounded —
+        // keep the most recent MAX_FOREIGN_NEEDS_YOU, dropping the oldest.
+        const next = [...others, item];
+        return next.length > MAX_FOREIGN_NEEDS_YOU
+          ? next.slice(next.length - MAX_FOREIGN_NEEDS_YOU)
+          : next;
       }),
     );
     const offHookBusLiveness = client.onHookBusLiveness((s) => setHookBusConnected(s.connected));

@@ -141,6 +141,21 @@ describe('parseHookPayload', () => {
       });
     });
 
+    it('strips CR/LF and C0 control chars from the reason (single-line hygiene)', () => {
+      const result = parseHookPayload(
+        notification({
+          notification_type: 'permission_prompt',
+          message: 'line one\r\nline two\tafter\u001B[31mred',
+        }),
+      );
+      expect(result).not.toBeNull();
+      const reason = (result as { reason: string }).reason;
+      // CR, LF, TAB and ESC each become a single space; visible text is preserved.
+      expect(reason).toBe('line one  line two after [31mred');
+      // eslint-disable-next-line no-control-regex
+      expect(/[\u0000-\u001F\u007F]/.test(reason)).toBe(false);
+    });
+
     it('maps SessionStart', () => {
       const result = parseHookPayload({
         session_id: 'sess-1',

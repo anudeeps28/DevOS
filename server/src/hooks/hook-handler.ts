@@ -86,6 +86,17 @@ export function createHookHandler(deps: { hookBus: HookBus }): RequestHandler {
         return;
       }
 
+      // Reject any request carrying an Origin header. A genuine hook forwarder
+      // (a local CLI process) never sends one; a browser cross-origin "simple"
+      // POST always does. Loopback + Host alone would let a drive-by page the
+      // user visits blindly POST a forged hook to a guessed pinned path — this
+      // closes that CSWSH-style vector (the HTTP twin of the WS Origin gate).
+      if (req.headers.origin !== undefined) {
+        console.warn('[hooks] rejected — origin present');
+        respondOnce(res, 403, { 'content-type': 'text/plain; charset=utf-8' }, 'Forbidden');
+        return;
+      }
+
       readBody(req, res, (rawBody) => {
         try {
           let parsed: unknown;
