@@ -160,6 +160,8 @@ interface LiveSession {
   readonly workItemId: string | null;
   /** The roster-declared model id this session was spawned with (defaults to DEFAULT_MODEL). */
   readonly model: string;
+  /** The real model id reported on system/init; null until captured. Used for context-window sizing (falls back to the spawn-time `model`). */
+  resolvedModel: string | null;
   status: SessionStatus;
   sdkSessionId: string | null;
   /** Monotonic per-session transcript sequence counter. */
@@ -311,15 +313,18 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   ): void => {
     if (s.contextFired) return;
     try {
+      // Size the window off the SDK-reported resolved model, not the spawn-time placeholder.
+      // The emitted signal's `model` therefore carries this window-sizing model id.
+      const windowModel = s.resolvedModel ?? s.model;
       const total = contextTotalFromResult(body);
-      if (!crossesThreshold(total, s.model)) return;
+      if (!crossesThreshold(total, windowModel)) return;
       s.contextFired = true;
-      const { occupiedTokens, windowTokens, fraction } = contextOccupancy(total, s.model);
+      const { occupiedTokens, windowTokens, fraction } = contextOccupancy(total, windowModel);
       emitContextUsage({
         sessionId: s.id,
         projectPath: s.projectPath,
         workItemId: s.workItemId,
-        model: s.model,
+        model: windowModel,
         occupiedTokens,
         windowTokens,
         fraction,
@@ -375,6 +380,9 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
             console.error(`[session] failed to persist sdk session id for ${s.id}`, err);
           }
           emit(s);
+        }
+        if (isInitMessage(message) && typeof message.model === 'string' && message.model.length > 0) {
+          s.resolvedModel = message.model;
         }
       }
       setStatus(s, 'ended');
@@ -436,6 +444,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       role,
       workItemId: input.workItemId ?? null,
       model,
+      resolvedModel: null,
       status: 'running',
       sdkSessionId: null,
       seq: 0,

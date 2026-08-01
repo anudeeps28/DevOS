@@ -6,10 +6,19 @@
 /** Default context window size in tokens, used when a model has no explicit override. */
 export const DEFAULT_CONTEXT_WINDOW = 200_000;
 
-/** Per-model context window overrides. */
+/**
+ * Exact-id context window overrides. Takes precedence over the generic `[Nm]` parse below, so
+ * this map is only needed for ids that do NOT already advertise a bracketed `[Nm]` hint.
+ */
 const MODEL_CONTEXT_WINDOWS: Readonly<Record<string, number>> = {
   'claude-opus-4-8[1m]': 1_000_000,
 };
+
+/** Matches a trailing `[<N>m]` context-window hint, e.g. `claude-opus-5[1m]` → N million tokens. */
+const MILLION_CONTEXT_HINT = /\[(\d+)m\]$/i;
+
+/** Upper bound on the parsed `[Nm]` million-token hint — rejects absurd ids that would disable recycling. */
+const MAX_MILLION_HINT = 100;
 
 /** Fraction of the context window occupied at which callers should warn. */
 export const CONTEXT_THRESHOLD = 0.8;
@@ -37,7 +46,20 @@ function clampNonNegativeFinite(value: number): number {
 
 /** Resolves the context window size for a model, falling back to the default. */
 export function windowFor(model: string): number {
-  return MODEL_CONTEXT_WINDOWS[model] ?? DEFAULT_CONTEXT_WINDOW;
+  const override = MODEL_CONTEXT_WINDOWS[model];
+  if (override !== undefined) {
+    return override;
+  }
+  // The `[Nm]` family rule: any model id ending in a bracketed `[<N>m]` hint (e.g.
+  // `claude-opus-4-8[1m]`, `claude-opus-5[1m]`) advertises an N-million-token window.
+  const match = MILLION_CONTEXT_HINT.exec(model);
+  if (match !== null) {
+    const millions = Number(match[1]);
+    if (Number.isFinite(millions) && millions > 0 && millions <= MAX_MILLION_HINT) {
+      return millions * 1_000_000;
+    }
+  }
+  return DEFAULT_CONTEXT_WINDOW;
 }
 
 /** Computes context window occupancy for a settled token total against a model's window. */

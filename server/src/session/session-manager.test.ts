@@ -896,6 +896,40 @@ describe('SessionManager context usage', () => {
     await mgr.stopAll();
   });
 
+  it('sizes the window off the model reported on system/init — no fire at 160k, fires at >=800k', async () => {
+    const store = freshStore();
+    const fake = makeSession();
+    const mgr = createSessionManager({ store, query: () => fake.session });
+    const signals: Parameters<Parameters<typeof mgr.onContextUsage>[0]>[0][] = [];
+    mgr.onContextUsage((signal) => signals.push(signal));
+
+    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'builder' });
+
+    fake.emit({ type: 'system', subtype: 'init', session_id: 'sdk-init-model', model: 'claude-opus-4-8[1m]' });
+    await waitUntil(() => store.get(snap.id)?.sdkSessionId === 'sdk-init-model');
+
+    // 160_000 / 1_000_000 (captured window) = 0.16 — must NOT fire. Under the old buggy
+    // 200k sizing this would be 0.8 and WOULD fire; this is the regression oracle.
+    fake.emit(resultMessage(0.01, 160_000, 20));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(signals).toHaveLength(0);
+
+    // 800_000 / 1_000_000 = 0.8 — crosses threshold.
+    fake.emit(resultMessage(0.02, 800_000, 20));
+    await waitUntil(() => signals.length >= 1);
+
+    expect(signals).toHaveLength(1);
+    expect(signals[0]).toMatchObject({
+      sessionId: snap.id,
+      model: 'claude-opus-4-8[1m]',
+      windowTokens: 1_000_000,
+    });
+    expect(signals[0]?.fraction).toBeGreaterThanOrEqual(0.8);
+
+    fake.finish();
+    await mgr.stopAll();
+  });
+
   it('endAtBoundary calls the engine end(); an unknown id is a guarded no-op', async () => {
     const store = freshStore();
     const fake = makeSession();

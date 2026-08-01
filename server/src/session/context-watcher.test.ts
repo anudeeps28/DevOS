@@ -16,9 +16,32 @@ describe('windowFor', () => {
   });
 
   it('falls back to DEFAULT_CONTEXT_WINDOW for any other model id', () => {
-    expect(windowFor('claude-opus-5[1m]')).toBe(DEFAULT_CONTEXT_WINDOW);
     expect(windowFor('inherit')).toBe(DEFAULT_CONTEXT_WINDOW);
     expect(windowFor('')).toBe(DEFAULT_CONTEXT_WINDOW);
+  });
+
+  it('returns the 1M window for the [1m] hint on other model ids', () => {
+    expect(windowFor('claude-opus-4-8[1m]')).toBe(1_000_000);
+    expect(windowFor('claude-opus-5[1m]')).toBe(1_000_000);
+  });
+
+  it('resolves a higher million-token hint from the bracketed suffix', () => {
+    expect(windowFor('some-model[2m]')).toBe(2_000_000);
+  });
+
+  it('falls back to DEFAULT_CONTEXT_WINDOW for an unknown model id with no hint', () => {
+    expect(windowFor('claude-sonnet-9')).toBe(DEFAULT_CONTEXT_WINDOW);
+    expect(windowFor('inherit')).toBe(DEFAULT_CONTEXT_WINDOW);
+    expect(windowFor('')).toBe(DEFAULT_CONTEXT_WINDOW);
+  });
+
+  it('rejects an absurdly large [Nm] hint rather than disabling recycling', () => {
+    // An out-of-range hint must fall back to the default, not yield a window so large
+    // the recycle threshold can never fire.
+    expect(windowFor('foo[999999999m]')).toBe(DEFAULT_CONTEXT_WINDOW);
+    expect(windowFor('foo[101m]')).toBe(DEFAULT_CONTEXT_WINDOW);
+    // The ceiling itself is still honoured.
+    expect(windowFor('foo[100m]')).toBe(100_000_000);
   });
 });
 
