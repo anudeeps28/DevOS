@@ -16,7 +16,14 @@ import { randomUUID } from 'node:crypto';
 import type { TranscriptEvent, TranscriptEventBody } from '../ws-protocol.js';
 import type { Role } from './roles.js';
 import type { Effort } from './roster-reader.js';
-import { contextOccupancy, contextTotalFromResult, crossesThreshold } from './context-watcher.js';
+import {
+  contextOccupancy,
+  contextTotalFromResult,
+  crossesThreshold,
+  DEFAULT_CONTEXT_WINDOW,
+  effectiveWindow,
+  isKnownContextWindow,
+} from './context-watcher.js';
 import {
   defaultQuery,
   type EngineMessage,
@@ -56,6 +63,12 @@ export interface SpawnInput {
   readonly model?: string;
   /** The roster-declared effort level; defaults to DEFAULT_EFFORT when absent (non-Bridge spawns). */
   readonly effort?: Effort;
+  /**
+   * The roster-declared context window in tokens (harness-roles.json `contextWindow`). Authoritative
+   * for sizing the context-recycle check; absent for non-Bridge spawns, which fall back to deriving
+   * the window from the model id.
+   */
+  readonly contextWindow?: number;
 }
 
 export type StateListener = (snapshot: SessionSnapshot) => void;
@@ -68,6 +81,7 @@ export interface ContextUsageSignal {
   readonly sessionId: string;
   readonly projectPath: string;
   readonly workItemId: string | null;
+  /** The model used to derive the window: the SDK-reported resolved model, else the spawn-time model. */
   readonly model: string;
   readonly occupiedTokens: number;
   readonly windowTokens: number;
@@ -160,6 +174,10 @@ interface LiveSession {
   readonly workItemId: string | null;
   /** The roster-declared model id this session was spawned with (defaults to DEFAULT_MODEL). */
   readonly model: string;
+  /** The real model id reported on system/init; null until captured. Used for context-window sizing (falls back to the spawn-time `model`). */
+  resolvedModel: string | null;
+  /** The roster-declared context window (tokens); null for non-Bridge spawns. Authoritative when set. */
+  readonly declaredWindow: number | null;
   status: SessionStatus;
   sdkSessionId: string | null;
   /** Monotonic per-session transcript sequence counter. */
@@ -171,6 +189,8 @@ interface LiveSession {
   readonly permissionToolNames: Map<string, string>;
   /** Latch: true once `onContextUsage` has fired for this session — fires AT MOST ONCE. */
   contextFired: boolean;
+  /** Latch: true once the unknown-window warning has been logged for this session — warns AT MOST ONCE. */
+  windowWarned: boolean;
 }
 
 function isInitMessage(message: EngineMessage): boolean {
@@ -311,15 +331,40 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   ): void => {
     if (s.contextFired) return;
     try {
+      // Window precedence: the roster-declared window is authoritative; otherwise derive it from
+      // the SDK-reported resolved model (falling back to the spawn-time placeholder). The emitted
+      // signal's `model` carries the model used for that derivation.
+      const windowModel = s.resolvedModel ?? s.model;
+      const window = effectiveWindow(s.declaredWindow, windowModel);
+      // Loud-fail once if we are recycling against the guessed 200k default — no declared window
+      // and an unrecognized model. Keeps a future roster/model mismatch from silently recycling
+      // 5x too early instead of at the intended window.
+      if (
+        !s.windowWarned &&
+        s.declaredWindow == null &&
+        window === DEFAULT_CONTEXT_WINDOW &&
+        !isKnownContextWindow(windowModel)
+      ) {
+        s.windowWarned = true;
+        // Strip control chars from the model id before it reaches a terminal (rules/phase-markers.md
+        // control-char contract) — it can carry an untrusted, roster-supplied value.
+        // eslint-disable-next-line no-control-regex
+        const safeModel = windowModel.replace(/[\u0000-\u001F\u007F]/g, ' ').slice(0, 200);
+        console.warn(
+          `[session] no declared or known context window for ${s.id} (model "${safeModel}") — ` +
+            `using ${DEFAULT_CONTEXT_WINDOW}-token default; recycle triggers at 80% of that. ` +
+            `Declare contextWindow in harness-roles.json or add a [1m]-style marker to the model id.`,
+        );
+      }
       const total = contextTotalFromResult(body);
-      if (!crossesThreshold(total, s.model)) return;
+      if (!crossesThreshold(total, window)) return;
       s.contextFired = true;
-      const { occupiedTokens, windowTokens, fraction } = contextOccupancy(total, s.model);
+      const { occupiedTokens, windowTokens, fraction } = contextOccupancy(total, window);
       emitContextUsage({
         sessionId: s.id,
         projectPath: s.projectPath,
         workItemId: s.workItemId,
-        model: s.model,
+        model: windowModel,
         occupiedTokens,
         windowTokens,
         fraction,
@@ -375,6 +420,13 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
             console.error(`[session] failed to persist sdk session id for ${s.id}`, err);
           }
           emit(s);
+        }
+        // Capture the SDK-resolved model from system/init. This message precedes any `result`
+        // in the stream, so `resolvedModel` is set before checkContextUsage runs on a result — a
+        // result that somehow arrived first would size off the spawn-time `model` (or the declared
+        // window, which is authoritative regardless).
+        if (isInitMessage(message) && typeof message.model === 'string' && message.model.length > 0) {
+          s.resolvedModel = message.model;
         }
       }
       setStatus(s, 'ended');
@@ -436,6 +488,8 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       role,
       workItemId: input.workItemId ?? null,
       model,
+      resolvedModel: null,
+      declaredWindow: input.contextWindow ?? null,
       status: 'running',
       sdkSessionId: null,
       seq: 0,
@@ -443,6 +497,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       engine,
       permissionToolNames: new Map(),
       contextFired: false,
+      windowWarned: false,
     };
     live.set(id, session);
     emit(session); // running

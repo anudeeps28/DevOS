@@ -87,6 +87,8 @@ describe('readRoster', () => {
     expect(roster?.roles.reviewer.model).toBe('claude-opus-5[1m]');
     expect(roster?.roles.reviewer.effort).toBe('high');
     expect(roster?.roles.reviewer.phases).toEqual([{ id: 'reviewing', displayName: 'Warden' }]);
+    expect(roster?.roles.builder.contextWindow).toBe(1_000_000);
+    expect(roster?.roles.reviewer.contextWindow).toBe(1_000_000);
     expect(Object.isFrozen(roster)).toBe(true);
     expect(Object.isFrozen(roster?.pipeline)).toBe(true);
     expect(Object.isFrozen(roster?.roles)).toBe(true);
@@ -101,6 +103,35 @@ describe('readRoster', () => {
     expect(roster?.pipeline).toEqual(['builder', 'reviewer']);
     expect(Object.isFrozen(roster)).toBe(true);
     expect(Object.isFrozen(roster?.roles.builder)).toBe(true);
+  });
+
+  it('keeps a valid contextWindow and leaves it undefined when absent (additive, backward-compatible)', () => {
+    const raw = JSON.parse(VALID_ROSTER) as { roles: Record<string, Record<string, unknown>> };
+    const withWindow = {
+      ...raw,
+      roles: {
+        ...raw.roles,
+        builder: { ...raw.roles.builder, contextWindow: 1_000_000 },
+        // reviewer intentionally has no contextWindow — the old shape must still parse.
+      },
+    };
+    const roster = readRoster(makeProjectWithRoster(JSON.stringify(withWindow)));
+    expect(roster?.roles.builder.contextWindow).toBe(1_000_000);
+    expect(roster?.roles.reviewer.contextWindow).toBeUndefined();
+  });
+
+  it('drops an invalid contextWindow (non-positive, non-finite, or non-number) rather than failing', () => {
+    const raw = JSON.parse(VALID_ROSTER) as { roles: Record<string, Record<string, unknown>> };
+    for (const bad of [0, -1, 'lots', null]) {
+      const malformed = {
+        ...raw,
+        roles: { ...raw.roles, builder: { ...raw.roles.builder, contextWindow: bad } },
+      };
+      const roster = readRoster(makeProjectWithRoster(JSON.stringify(malformed)));
+      // The role still parses (drop-don't-throw); the bad window is simply dropped.
+      expect(roster).not.toBeNull();
+      expect(roster?.roles.builder.contextWindow).toBeUndefined();
+    }
   });
 
   it('returns null when the roster file is missing', () => {

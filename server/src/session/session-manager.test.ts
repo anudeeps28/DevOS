@@ -1,7 +1,7 @@
 // Unit tests — SessionManager spawn / multiplex / lifecycle with a DETERMINISTIC
 // FAKE engine. No live Claude. A real in-memory DB + store backs persistence.
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { openDatabase } from '../db/database.js';
 import { createRegistry } from '../registry/registry.js';
 import type { TranscriptEvent } from '../ws-protocol.js';
@@ -894,6 +894,107 @@ describe('SessionManager context usage', () => {
 
     fake.finish();
     await mgr.stopAll();
+  });
+
+  it('sizes the window off the model reported on system/init — no fire at 160k, fires at >=800k', async () => {
+    const store = freshStore();
+    const fake = makeSession();
+    const mgr = createSessionManager({ store, query: () => fake.session });
+    const signals: Parameters<Parameters<typeof mgr.onContextUsage>[0]>[0][] = [];
+    mgr.onContextUsage((signal) => signals.push(signal));
+
+    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'builder' });
+
+    fake.emit({ type: 'system', subtype: 'init', session_id: 'sdk-init-model', model: 'claude-opus-4-8[1m]' });
+    await waitUntil(() => store.get(snap.id)?.sdkSessionId === 'sdk-init-model');
+
+    // 160_000 / 1_000_000 (captured window) = 0.16 — must NOT fire. Under the old buggy
+    // 200k sizing this would be 0.8 and WOULD fire; this is the regression oracle.
+    fake.emit(resultMessage(0.01, 160_000, 20));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(signals).toHaveLength(0);
+
+    // 800_000 / 1_000_000 = 0.8 — crosses threshold.
+    fake.emit(resultMessage(0.02, 800_000, 20));
+    await waitUntil(() => signals.length >= 1);
+
+    expect(signals).toHaveLength(1);
+    expect(signals[0]).toMatchObject({
+      sessionId: snap.id,
+      model: 'claude-opus-4-8[1m]',
+      windowTokens: 1_000_000,
+    });
+    expect(signals[0]?.fraction).toBeGreaterThanOrEqual(0.8);
+
+    fake.finish();
+    await mgr.stopAll();
+  });
+
+  it('sizes off the roster-declared contextWindow — authoritative even with no init model', async () => {
+    const store = freshStore();
+    const fake = makeSession();
+    const mgr = createSessionManager({ store, query: () => fake.session });
+    const signals: Parameters<Parameters<typeof mgr.onContextUsage>[0]>[0][] = [];
+    mgr.onContextUsage((signal) => signals.push(signal));
+
+    // Spawn with a declared 1M window but the placeholder model and NO system/init model —
+    // the declared window alone must drive the recycle sizing.
+    const snap = await mgr.spawn({
+      projectPath: PROJECT,
+      role: 'builder',
+      contextWindow: 1_000_000,
+    });
+
+    fake.emit(resultMessage(0.01, 160_000, 20));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(signals).toHaveLength(0);
+
+    fake.emit(resultMessage(0.02, 800_000, 20));
+    await waitUntil(() => signals.length >= 1);
+
+    expect(signals).toHaveLength(1);
+    expect(signals[0]).toMatchObject({ sessionId: snap.id, windowTokens: 1_000_000 });
+    expect(signals[0]?.fraction).toBeGreaterThanOrEqual(0.8);
+
+    fake.finish();
+    await mgr.stopAll();
+  });
+
+  it('warns AT MOST ONCE when recycling against the guessed 200k default (no window, unknown model)', async () => {
+    const store = freshStore();
+    const fake = makeSession();
+    const mgr = createSessionManager({ store, query: () => fake.session });
+    const signals: Parameters<Parameters<typeof mgr.onContextUsage>[0]>[0][] = [];
+    mgr.onContextUsage((signal) => signals.push(signal));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      // No contextWindow and no system/init model → windowModel is the 'inherit' placeholder,
+      // which resolves to the 200k default and is NOT a known window.
+      const snap = await mgr.spawn({ projectPath: PROJECT, role: 'builder' });
+
+      // Two BELOW-threshold results (100k, 120k of 200k) — each reaches the warn check but must
+      // not fire the recycle signal; the warn latch limits the warning to exactly one.
+      fake.emit(resultMessage(0.01, 100_000, 20));
+      fake.emit(resultMessage(0.01, 120_000, 20));
+      await new Promise((r) => setTimeout(r, 20));
+      expect(signals).toHaveLength(0);
+
+      const windowWarnings = warnSpy.mock.calls.filter((c) =>
+        String(c[0]).includes('no declared or known context window'),
+      );
+      expect(windowWarnings).toHaveLength(1);
+
+      // A crossing result now fires against the 200k default window.
+      fake.emit(resultMessage(0.02, 170_000, 20));
+      await waitUntil(() => signals.length >= 1);
+      expect(signals[0]).toMatchObject({ sessionId: snap.id, windowTokens: 200_000 });
+
+      fake.finish();
+      await mgr.stopAll();
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it('endAtBoundary calls the engine end(); an unknown id is a guarded no-op', async () => {

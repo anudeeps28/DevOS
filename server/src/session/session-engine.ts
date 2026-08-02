@@ -29,6 +29,8 @@ export interface EngineMessage {
   readonly type: string;
   readonly subtype?: string;
   readonly session_id?: string;
+  /** The real resolved model id the SDK reports on system/init. */
+  readonly model?: string;
   // Loose pass-through fields for the transcript normalizer (transcript-events.ts):
   // assistant/user content rides on `message`, result metrics on the rest. All
   // shape-checking happens in the normalizer — the seam stays structural.
