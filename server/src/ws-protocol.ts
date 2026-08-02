@@ -121,6 +121,32 @@ export interface GitStateSnapshot {
   readonly state: GitState;
 }
 
+/** A single skill discovered in a project's `.claude/skills` directory. */
+export interface Skill {
+  readonly name: string;
+  readonly description: string;
+  readonly scope: 'org' | 'local';
+}
+
+/** The skills state of a project as sent to the client. */
+export interface SkillsState {
+  readonly path: string;
+  readonly skills: readonly Skill[];
+}
+
+/** Inbound: request the current skills state for a project path. */
+export interface SkillsMessage {
+  readonly type: 'skills';
+  readonly path: string;
+}
+
+/** Outbound: a skills snapshot for a single project path. */
+export interface SkillsSnapshot {
+  readonly type: 'skills';
+  readonly path: string;
+  readonly state: SkillsState;
+}
+
 /** The top open tracker item for a project, as sent to the client. */
 export interface TrackerTask {
   readonly id: string;
@@ -461,6 +487,7 @@ export type InboundMessage =
   | UnpinMessage
   | DiscoverMessage
   | GitStateMessage
+  | SkillsMessage
   | TrackerStateMessage
   | LifecycleSignalsMessage
   | SessionSpawnMessage
@@ -481,6 +508,7 @@ export type OutboundMessage =
   | RegistryError
   | CandidatesSnapshot
   | GitStateSnapshot
+  | SkillsSnapshot
   | TrackerStateSnapshot
   | LifecycleSignalsSnapshot
   | SessionStateSnapshot
@@ -532,6 +560,20 @@ export function parseInboundMessage(data: unknown): InboundMessage | null {
       return null;
     }
     return Object.freeze<GitStateMessage>({ type: 'git-state', path });
+  }
+
+  // `skills` shares the same non-empty ABSOLUTE-path requirement as git-state.
+  if (type === 'skills') {
+    const { path } = frame;
+    if (
+      typeof path !== 'string' ||
+      path.length === 0 ||
+      path.length > MAX_PATH_LENGTH ||
+      !isAbsolute(path)
+    ) {
+      return null;
+    }
+    return Object.freeze<SkillsMessage>({ type: 'skills', path });
   }
 
   // `tracker-state` shares the same non-empty ABSOLUTE-path requirement as git-state.

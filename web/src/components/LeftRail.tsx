@@ -1,10 +1,11 @@
 import { cn } from '@/lib/utils';
 
 /** The three top-level tabs the app shell switches between. */
-export type TabId = 'projects' | 'fleet' | 'inbox';
+export type TabId = 'projects' | 'skills' | 'fleet' | 'inbox';
 
 const TABS: readonly { readonly id: TabId; readonly label: string }[] = [
   { id: 'projects', label: 'Projects' },
+  { id: 'skills', label: 'Skills' },
   { id: 'fleet', label: 'Fleet' },
   { id: 'inbox', label: 'Inbox' },
 ];

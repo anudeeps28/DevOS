@@ -16,6 +16,7 @@ import {
   type SessionInterruptMessage,
   type SessionPersonasMessage,
   type SessionTranscriptRequestMessage,
+  type SkillsMessage,
   type TranscriptEventBody,
   type UnpinMessage,
 } from './ws-protocol.js';
@@ -136,6 +137,16 @@ describe('parseInboundMessage', () => {
       expect(parseInboundMessage(JSON.stringify({ type: 'git-state' }))).toBeNull();
     });
 
+    it('returns null for a skills frame with a relative, empty, or missing path', () => {
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'skills', path: 'relative/dir' })),
+      ).toBeNull();
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'skills', path: '' })),
+      ).toBeNull();
+      expect(parseInboundMessage(JSON.stringify({ type: 'skills' }))).toBeNull();
+    });
+
     it('returns null for an unknown type', () => {
       expect(
         parseInboundMessage(JSON.stringify({ type: 'frobnicate', path: '/abs' })),
@@ -172,6 +183,41 @@ describe('parseInboundMessage', () => {
       const displayName = 'x'.repeat(512); // exactly MAX_DISPLAY_NAME_LENGTH
       const result = parseInboundMessage(JSON.stringify({ type: 'pin', path, displayName }));
       expect(result).not.toBeNull();
+    });
+  });
+
+  describe('skills frames', () => {
+    it('parses a skills message with an absolute path', () => {
+      const result = parseInboundMessage(
+        JSON.stringify({ type: 'skills', path: '/abs/path' }),
+      );
+
+      expect(result).toEqual<SkillsMessage>({ type: 'skills', path: '/abs/path' });
+      expect(Object.isFrozen(result)).toBe(true);
+    });
+
+    it('returns null for a skills frame with an empty path', () => {
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'skills', path: '' })),
+      ).toBeNull();
+    });
+
+    it('returns null for a skills frame with a relative path', () => {
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'skills', path: 'relative/dir' })),
+      ).toBeNull();
+    });
+
+    it('returns null for a skills frame with an over-long path', () => {
+      const path = '/' + 'a'.repeat(5000); // exceeds MAX_PATH_LENGTH (4096)
+      expect(parseInboundMessage(JSON.stringify({ type: 'skills', path }))).toBeNull();
+    });
+
+    it('does not affect parsing of a non-skills type', () => {
+      const result = parseInboundMessage(
+        JSON.stringify({ type: 'git-state', path: '/abs/path' }),
+      );
+      expect(result).toEqual<GitStateMessage>({ type: 'git-state', path: '/abs/path' });
     });
   });
 

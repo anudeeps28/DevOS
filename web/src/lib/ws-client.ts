@@ -63,6 +63,27 @@ export interface GitState {
 }
 
 /**
+ * A validated skill entry. Mirrors the server's Skill
+ * (server/src/ws-protocol.ts) — duplicated typed contract, no shared package.
+ * Frozen — never mutated after construction.
+ */
+export interface Skill {
+  readonly name: string;
+  readonly description: string;
+  readonly scope: 'org' | 'local';
+}
+
+/**
+ * A validated skills snapshot. Mirrors the server's SkillsState
+ * (server/src/ws-protocol.ts) — duplicated typed contract, no shared package.
+ * Frozen — never mutated after construction.
+ */
+export interface SkillsState {
+  readonly path: string;
+  readonly skills: readonly Skill[];
+}
+
+/**
  * A validated next-task entry. Mirrors the server's TrackerTask
  * (server/src/ws-protocol.ts) — duplicated typed contract, no shared package.
  * Frozen — never mutated after construction.
@@ -350,6 +371,7 @@ export type HeartbeatListener = (heartbeat: Heartbeat) => void;
 export type RegistryListener = (projects: readonly RegistryProject[]) => void;
 export type CandidateListener = (candidates: readonly RegistryCandidate[]) => void;
 export type GitStateListener = (path: string, state: GitState) => void;
+export type SkillsListener = (path: string, state: SkillsState) => void;
 export type TrackerStateListener = (path: string, state: TrackerState) => void;
 export type LifecycleSignalsListener = (path: string, signals: LifecycleSignals) => void;
 export type SessionStateListener = (path: string, session: SessionState) => void;
@@ -387,6 +409,8 @@ export interface WsClient {
   readonly onCandidates: (listener: CandidateListener) => () => void;
   /** Subscribe to validated git-state snapshots. */
   readonly onGitState: (listener: GitStateListener) => () => void;
+  /** Subscribe to validated skills snapshots. */
+  readonly onSkills: (listener: SkillsListener) => () => void;
   /** Subscribe to validated tracker-state snapshots. */
   readonly onTrackerState: (listener: TrackerStateListener) => () => void;
   /** Subscribe to validated lifecycle-signals snapshots. */
@@ -419,6 +443,8 @@ export interface WsClient {
   readonly discover: () => void;
   /** Request the current git state for a project path; no-op (warns) when the socket is not open. */
   readonly requestGitState: (path: string) => void;
+  /** Request the current skills for a project path; no-op (warns) when the socket is not open. */
+  readonly requestSkills: (path: string) => void;
   /** Request the current tracker state for a project path; no-op (warns) when the socket is not open. */
   readonly requestTrackerState: (path: string) => void;
   /** Request the current lifecycle signals for a project path; no-op (warns) when the socket is not open. */
@@ -682,6 +708,75 @@ function parseGitStateSnapshot(data: unknown): { path: string; state: GitState }
   if (typeof frame.path !== 'string' || frame.path.length === 0) return null;
 
   const state = parseGitState(frame.state);
+  if (state === null) return null;
+
+  return Object.freeze({ path: frame.path, state });
+}
+
+/**
+ * Validate a single raw entry against the Skill contract:
+ * `{ name: string, description: string, scope: 'org'|'local' }`.
+ * Returns a frozen Skill, or null for anything malformed.
+ */
+function parseSkill(entry: unknown): Skill | null {
+  if (typeof entry !== 'object' || entry === null) return null;
+
+  const record = entry as Record<string, unknown>;
+  const { name, description, scope } = record;
+
+  if (typeof name !== 'string') return null;
+  if (typeof description !== 'string') return null;
+  if (scope !== 'org' && scope !== 'local') return null;
+
+  return Object.freeze({ name, description, scope });
+}
+
+/**
+ * Validate a single raw entry against the SkillsState contract:
+ * `{ path: string, skills: Skill[] }`.
+ * Returns a frozen SkillsState, or null for anything malformed.
+ */
+function parseSkillsState(entry: unknown): SkillsState | null {
+  if (typeof entry !== 'object' || entry === null) return null;
+
+  const record = entry as Record<string, unknown>;
+  const { path, skills } = record;
+
+  if (typeof path !== 'string' || path.length === 0) return null;
+  if (!Array.isArray(skills)) return null;
+
+  const parsedSkills: Skill[] = [];
+  for (const skillEntry of skills) {
+    const skill = parseSkill(skillEntry);
+    if (skill === null) return null;
+    parsedSkills.push(skill);
+  }
+
+  return Object.freeze({ path, skills: Object.freeze(parsedSkills) });
+}
+
+/**
+ * Validate a raw WS frame against the pinned skills contract:
+ * `{ type: 'skills', path: string, state: SkillsState }`.
+ * Returns a frozen `{ path, state }`, or null for anything malformed.
+ */
+function parseSkillsSnapshot(data: unknown): { path: string; state: SkillsState } | null {
+  if (typeof data !== 'string') return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return null;
+  }
+
+  if (typeof parsed !== 'object' || parsed === null) return null;
+
+  const frame = parsed as Record<string, unknown>;
+  if (frame.type !== 'skills') return null;
+  if (typeof frame.path !== 'string' || frame.path.length === 0) return null;
+
+  const state = parseSkillsState(frame.state);
   if (state === null) return null;
 
   return Object.freeze({ path: frame.path, state });
@@ -1449,6 +1544,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
   const registryListeners = new Set<RegistryListener>();
   const candidateListeners = new Set<CandidateListener>();
   const gitStateListeners = new Set<GitStateListener>();
+  const skillsListeners = new Set<SkillsListener>();
   const trackerStateListeners = new Set<TrackerStateListener>();
   const lifecycleSignalsListeners = new Set<LifecycleSignalsListener>();
   const sessionStateListeners = new Set<SessionStateListener>();
@@ -1493,6 +1589,10 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
 
   function emitGitState(path: string, state: GitState): void {
     for (const listener of gitStateListeners) listener(path, state);
+  }
+
+  function emitSkills(path: string, state: SkillsState): void {
+    for (const listener of skillsListeners) listener(path, state);
   }
 
   function emitTrackerState(path: string, state: TrackerState): void {
@@ -1608,6 +1708,16 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
         return;
       }
       emitGitState(snapshot.path, snapshot.state);
+      return;
+    }
+
+    if (type === 'skills') {
+      const snapshot = parseSkillsSnapshot(data);
+      if (snapshot === null) {
+        console.warn('[ws-client] dropped malformed frame:', data);
+        return;
+      }
+      emitSkills(snapshot.path, snapshot.state);
       return;
     }
 
@@ -1788,6 +1898,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     registryListeners.clear();
     candidateListeners.clear();
     gitStateListeners.clear();
+    skillsListeners.clear();
     trackerStateListeners.clear();
     lifecycleSignalsListeners.clear();
     sessionStateListeners.clear();
@@ -1836,6 +1947,10 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
 
   function requestGitState(path: string): void {
     sendFrame({ type: 'git-state', path });
+  }
+
+  function requestSkills(path: string): void {
+    sendFrame({ type: 'skills', path });
   }
 
   function requestTrackerState(path: string): void {
@@ -1938,6 +2053,12 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
         gitStateListeners.delete(listener);
       };
     },
+    onSkills: (listener) => {
+      skillsListeners.add(listener);
+      return () => {
+        skillsListeners.delete(listener);
+      };
+    },
     onTrackerState: (listener) => {
       trackerStateListeners.add(listener);
       return () => {
@@ -2014,6 +2135,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     unpin,
     discover,
     requestGitState,
+    requestSkills,
     requestTrackerState,
     requestLifecycleSignals,
     requestSessionPersonas,
