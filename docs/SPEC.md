@@ -104,7 +104,7 @@ homework") — is preserved as its own fresh session.
 - **Handoff contract = the harness's existing artifacts** (grill-summary, plan/architecture docs,
   `tasks/stories/<id>/` plans, review reports). No new handoff mechanism.
 - **Role definitions live in the harness, not the OS.** Each project's `.claude/` roster declares the
-  two roles (skills, agent definition, phase labels, **model + effort**); the OS reads and
+  two roles (skills, agent definition, phase labels, **model + effort + context window**); the OS reads and
   orchestrates — **zero role/pipeline logic in DevOS**, mirroring the tracker-adapter pattern (§5).
   Per-project rosters carry the cost policy too (e.g. a budget-tier team declares smaller
   models/windows in *their* roster; no code change). Harness + OS changes ship together.
