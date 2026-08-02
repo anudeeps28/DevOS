@@ -88,6 +88,18 @@ export function windowFor(model: string): number {
  * The effective context window for a session. A roster-declared window (harness-roles.json
  * `contextWindow`) is authoritative and wins; otherwise fall back to `windowFor(model)`. A
  * declared window must be a positive finite number to count — an invalid one is ignored.
+ *
+ * Deliberately NOT validated against the model. A declared window is trusted on the ONLY axis we
+ * can judge model-free: absolute plausibility (finite, positive, <= MAX_CONTEXT_WINDOW). We do not
+ * check whether it MATCHES the model — e.g. a roster declaring 1,000,000 for a model that truly
+ * holds 200,000 is accepted, so the recycle brake fires late and the session can hit the real
+ * limit. Catching that requires a model->window table, which is exactly the coupling SPEC §3.1
+ * moved out of DevOS to make the roster the single source of truth; re-adding it trades that
+ * property away to catch a roster misconfiguration. A too-large declared window is a config error,
+ * mitigated by the absolute ceiling here and surfaced (for the no-window case) via the
+ * ContextConfigWarning inbox signal — not by DevOS second-guessing the roster. Deferred with the
+ * full reasoning in Todoist 6hC5HMRGR59pg748 (revisit if roster-window misconfig becomes a real
+ * incident; likely shape then is roster-reader-side validation, keeping model knowledge out here).
  */
 export function effectiveWindow(declaredWindow: number | null | undefined, model: string): number {
   if (

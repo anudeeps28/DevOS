@@ -91,6 +91,26 @@ export interface ContextUsageSignal {
 /** Fired AT MOST ONCE per session, when its context window occupancy crosses the threshold. */
 export type ContextUsageListener = (signal: ContextUsageSignal) => void;
 
+/**
+ * Fired AT MOST ONCE per session when the context-recycle check falls back to the guessed
+ * 200k default — no roster-declared window and an unrecognized model. Distinct from
+ * `ContextUsageSignal` (a threshold crossing): this is a config problem a human should see,
+ * not a recycle trigger. The `model` is already control-char-stripped and length-capped so a
+ * consumer can render it in a terminal or the Needs-you inbox without re-sanitizing.
+ */
+export interface ContextConfigWarning {
+  readonly sessionId: string;
+  readonly projectPath: string;
+  readonly workItemId: string | null;
+  /** The (sanitized) model id whose window could not be determined. */
+  readonly model: string;
+  /** The default window (tokens) the session is now recycling against. */
+  readonly fallbackWindow: number;
+}
+
+/** Fired AT MOST ONCE per session when it falls back to the guessed default context window. */
+export type ContextConfigWarningListener = (warning: ContextConfigWarning) => void;
+
 /** Fired with each frozen batch of transcript events captured from a live session. */
 export type TranscriptListener = (
   projectPath: string,
@@ -119,6 +139,8 @@ export interface SessionManager {
   readonly onCostUsage: (listener: CostUsageListener) => () => void;
   /** Register a listener fired once per session when context-window occupancy crosses the threshold. */
   readonly onContextUsage: (listener: ContextUsageListener) => () => void;
+  /** Register a listener fired once per session when it falls back to the guessed default window. */
+  readonly onContextConfigWarning: (listener: ContextConfigWarningListener) => () => void;
   /** The live session's buffered transcript (frozen copy), or `[]` if absent/ended. */
   readonly getTranscript: (id: string) => readonly TranscriptEvent[];
   /**
@@ -206,6 +228,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   const permissionRequestListeners = new Set<PermissionRequestListener>();
   const costUsageListeners = new Set<CostUsageListener>();
   const contextUsageListeners = new Set<ContextUsageListener>();
+  const contextConfigWarningListeners = new Set<ContextConfigWarningListener>();
   // Track detached consume loops so stopAll can await their completion (so the final
   // 'ended'/'errored' status persists before the DB is closed on shutdown).
   const consuming = new Set<Promise<void>>();
@@ -269,6 +292,16 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         listener(signal);
       } catch (err) {
         console.error('[session] context usage listener threw', err);
+      }
+    }
+  };
+
+  const emitContextConfigWarning = (warning: ContextConfigWarning): void => {
+    for (const listener of contextConfigWarningListeners) {
+      try {
+        listener(warning);
+      } catch (err) {
+        console.error('[session] context config warning listener threw', err);
       }
     }
   };
@@ -355,6 +388,16 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
             `using ${DEFAULT_CONTEXT_WINDOW}-token default; recycle triggers at 80% of that. ` +
             `Declare contextWindow in harness-roles.json or add a [1m]-style marker to the model id.`,
         );
+        // The console.warn above is a server-stdout breadcrumb no operator watches. Also emit a
+        // signal so the surface a human IS watching (the Bridge's Needs-you inbox) can show it.
+        // The same once-per-session latch (`windowWarned`) gates both, so this can never spam.
+        emitContextConfigWarning({
+          sessionId: s.id,
+          projectPath: s.projectPath,
+          workItemId: s.workItemId,
+          model: safeModel,
+          fallbackWindow: DEFAULT_CONTEXT_WINDOW,
+        });
       }
       const total = contextTotalFromResult(body);
       if (!crossesThreshold(total, window)) return;
@@ -550,6 +593,11 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     return () => contextUsageListeners.delete(listener);
   };
 
+  const onContextConfigWarning = (listener: ContextConfigWarningListener): (() => void) => {
+    contextConfigWarningListeners.add(listener);
+    return () => contextConfigWarningListeners.delete(listener);
+  };
+
   const getTranscript = (id: string): readonly TranscriptEvent[] => {
     const s = live.get(id);
     return s === undefined ? [] : Object.freeze([...s.transcript]);
@@ -682,6 +730,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     onPermissionRequest,
     onCostUsage,
     onContextUsage,
+    onContextConfigWarning,
     getTranscript,
     sendInput,
     interrupt,
