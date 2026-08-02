@@ -966,6 +966,8 @@ describe('SessionManager context usage', () => {
     const mgr = createSessionManager({ store, query: () => fake.session });
     const signals: Parameters<Parameters<typeof mgr.onContextUsage>[0]>[0][] = [];
     mgr.onContextUsage((signal) => signals.push(signal));
+    const configWarnings: Parameters<Parameters<typeof mgr.onContextConfigWarning>[0]>[0][] = [];
+    mgr.onContextConfigWarning((warning) => configWarnings.push(warning));
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     try {
@@ -984,6 +986,15 @@ describe('SessionManager context usage', () => {
         String(c[0]).includes('no declared or known context window'),
       );
       expect(windowWarnings).toHaveLength(1);
+
+      // The human-visible signal fires exactly once too (same latch), carrying the fallback
+      // window and the (sanitized) model — so the Bridge can surface it in the Needs-you inbox.
+      expect(configWarnings).toHaveLength(1);
+      expect(configWarnings[0]).toMatchObject({
+        sessionId: snap.id,
+        model: 'inherit',
+        fallbackWindow: 200_000,
+      });
 
       // A crossing result now fires against the 200k default window.
       fake.emit(resultMessage(0.02, 170_000, 20));

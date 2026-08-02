@@ -20,7 +20,12 @@ import { defaultOpenPr, type OpenPrAdapter } from './pr-adapter.js';
 import { buildResumePrompt } from './resume-prompt.js';
 import type { Role } from './roles.js';
 import { readRoster, type Roster } from './roster-reader.js';
-import type { ContextUsageSignal, SessionManager, SessionSnapshot } from './session-manager.js';
+import type {
+  ContextConfigWarning,
+  ContextUsageSignal,
+  SessionManager,
+  SessionSnapshot,
+} from './session-manager.js';
 
 /** Public surface of the Bridge — one instance drives every pinned project's run. */
 export interface Bridge {
@@ -452,10 +457,56 @@ export function createBridge(deps: BridgeDeps): Bridge {
     );
     const oldId = run.currentSessionId;
     await spawnAndEmit(run, role, role, { prompt });
+    // The safety of ending the old session below rests on spawnAndEmit having overwritten
+    // `currentSessionId` with the NEW session — so the old session's later `ended` no longer
+    // correlates to this run (see the block comment above). But spawnAndEmit SWALLOWS a spawn
+    // failure (logs, never throws), leaving `currentSessionId` still pointing at the old
+    // session. If we then ended it, its `ended` would correlate, hit handleEnded with a
+    // non-escalated gate, and advance the pipeline onto half-finished work — the exact hazard
+    // the cap-hit path guards against with an escalated gate. Detect the failed respawn (no
+    // overwrite) and escalate the same way instead of silently advancing.
+    if (run.currentSessionId === oldId) {
+      run.gate = 'escalated';
+      run.inbox.push(
+        Object.freeze<BridgeInboxItem>({
+          stage: stageAt(run.pipeline, run.index) ?? '',
+          kind: 'escalation',
+          reason: 'context-recycle respawn failed to start — no successor session; needs a human.',
+          ts: Date.now(),
+        }),
+      );
+      emit(run);
+    }
     if (oldId !== null) sessionManager.endAtBoundary(oldId);
   };
 
   sessionManager.onContextUsage((signal: ContextUsageSignal) => void handleContextUsage(signal));
+
+  // A session fell back to the guessed default context window (no roster-declared window and an
+  // unrecognized model). This is a config problem — the recycle brake may fire far too early —
+  // that only reaches the server's stdout otherwise. Surface it in the Needs-you inbox so a human
+  // sees it. Advisory only: it does NOT change the run's gate (an otherwise-healthy run keeps
+  // going), and the SessionManager's once-per-session latch means it can be pushed at most once.
+  const handleContextConfigWarning = (warning: ContextConfigWarning): void => {
+    const run = findRunBySessionId(warning.sessionId);
+    if (run === null) return;
+    run.inbox.push(
+      Object.freeze<BridgeInboxItem>({
+        stage: stageAt(run.pipeline, run.index) ?? '',
+        kind: 'escalation',
+        reason:
+          `No declared or known context window for model "${warning.model}" — recycling against ` +
+          `the ${warning.fallbackWindow}-token default (may trigger far too early). Declare ` +
+          `contextWindow in harness-roles.json or add a [1m]-style marker to the model id.`,
+        ts: Date.now(),
+      }),
+    );
+    emit(run);
+  };
+
+  sessionManager.onContextConfigWarning((warning: ContextConfigWarning) =>
+    handleContextConfigWarning(warning),
+  );
 
   const start = (projectPath: string, workItemId?: string): void => {
     const roster = resolveRoster(projectPath);

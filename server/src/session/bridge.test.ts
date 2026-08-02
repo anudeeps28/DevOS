@@ -648,6 +648,89 @@ describe('Bridge context-recycle respawn', () => {
     expect(bridge.getState(PROJECT)?.sessionId).toBe(stateBeforeOldEnd?.sessionId);
     expect(bridge.getState(PROJECT)?.gate).not.toBe('done');
   });
+
+  it('a FAILED respawn escalates instead of ending the old session and advancing the pipeline', async () => {
+    // A query fn that succeeds for the first spawn (builder) but throws on the second (the
+    // context-recycle respawn) — so spawnAndEmit swallows the failure and currentSessionId is
+    // never overwritten. Without the guard, ending the old session would advance the pipeline.
+    const dispensed: ReturnType<typeof makeSession>[] = [];
+    const calls: SpawnParams[] = [];
+    const query: QueryFn = (params) => {
+      calls.push(params);
+      if (calls.length === 2) throw new Error('spawn failed');
+      const fake = makeSession();
+      dispensed.push(fake);
+      return fake.session;
+    };
+    const db = openDatabase(':memory:');
+    const registry = createRegistry(db);
+    registry.pin(PROJECT);
+    registry.setPrefs(PROJECT, { auto_advance: true }); // so a stray advance WOULD spawn the reviewer
+    const store = createSessionStore(db);
+    const sessionManager = createSessionManager({ store, query });
+    const bridge = createBridge({ sessionManager, registry, resolveRoster: () => ROSTER_BIG_WINDOW });
+
+    bridge.start(PROJECT, 'WORK-CTX-FAIL');
+    await waitUntil(() => calls.length === 1);
+    const oldSession = dispensed[0];
+    if (oldSession === undefined) throw new Error('no first session');
+    oldSession.emitInit('sdk-builder-fail-1');
+    const firstSessionId = bridge.getState(PROJECT)?.sessionId;
+
+    // Crosses 80% of the 1M window → respawn attempt (call #2) throws.
+    oldSession.emit(resultMessage(850_000));
+
+    await waitUntil(() => bridge.getState(PROJECT)?.gate === 'escalated');
+    expect(calls).toHaveLength(2); // the failed respawn attempt, and no more
+    // currentSessionId still points at the old session (the failed spawn never overwrote it).
+    expect(bridge.getState(PROJECT)?.sessionId).toBe(firstSessionId);
+    expect(bridge.getInbox(PROJECT)).toHaveLength(1);
+    expect(bridge.getInbox(PROJECT)[0]).toMatchObject({ kind: 'escalation' });
+    expect(bridge.getInbox(PROJECT)[0]?.reason).toContain('respawn failed');
+
+    // The old session was ended at a boundary; its natural `ended` must NOT advance the
+    // pipeline — the escalated gate guards it, so no reviewer spawn appears.
+    await waitUntil(() => oldSession.ended());
+    await new Promise((r) => setTimeout(r, 50));
+    expect(calls).toHaveLength(2);
+    expect(bridge.getState(PROJECT)?.gate).toBe('escalated');
+  });
+
+  it('an unknown/guessed context window surfaces a once-only advisory in the Needs-you inbox', async () => {
+    // ROSTER's builder model 'claude-opus-5[1m]' IS a known window; use a roster whose builder
+    // has no declared window and an unrecognized model so the fallback-warning path fires.
+    const roster: Roster = Object.freeze({
+      schemaVersion: 2,
+      pipeline: Object.freeze(['builder', 'reviewer'] as const) as readonly Role[],
+      roles: Object.freeze({
+        builder: { ...ROLE_DEF('builder'), model: 'mystery-model' },
+        reviewer: ROLE_DEF('reviewer'),
+      }),
+    } as Roster);
+    const { sessionManager, registry, queryFactory } = freshEnv();
+    const bridge = createBridge({ sessionManager, registry, resolveRoster: () => roster });
+
+    bridge.start(PROJECT, 'WORK-CTX-WARN');
+    await waitUntil(() => queryFactory.calls.length === 1);
+    const builder = queryFactory.sessionAt(0);
+    builder.emitInit('sdk-builder-warn-1');
+
+    // Two BELOW-threshold results against the guessed 200k default: the advisory is pushed once,
+    // no recycle respawn happens, and the run's gate is untouched (advisory, not a halt).
+    builder.emit(resultMessage(100_000));
+    builder.emit(resultMessage(120_000));
+
+    await waitUntil(() => bridge.getInbox(PROJECT).length === 1);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(bridge.getInbox(PROJECT)).toHaveLength(1);
+    expect(bridge.getInbox(PROJECT)[0]).toMatchObject({ kind: 'escalation', stage: 'builder' });
+    expect(bridge.getInbox(PROJECT)[0]?.reason).toContain('mystery-model');
+    expect(bridge.getInbox(PROJECT)[0]?.reason).toContain('200000');
+    expect(queryFactory.calls).toHaveLength(1); // no respawn
+    expect(bridge.getState(PROJECT)?.gate).toBe('running'); // advisory does not change the gate
+
+    builder.finish();
+  });
 });
 
 describe('Bridge default handoff readers (tasks/stories/<id>/ contract)', () => {

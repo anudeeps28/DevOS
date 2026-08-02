@@ -350,6 +350,7 @@ async function startGateway(options: HarnessOptions = {}): Promise<GatewayHarnes
       return Promise.resolve();
     },
     onContextUsage: () => () => {},
+    onContextConfigWarning: () => () => {},
     endAtBoundary: () => {},
     stopAll: () => Promise.resolve(),
   });
