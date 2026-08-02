@@ -70,6 +70,7 @@
     "hooks/tracker-sync.js",
     "rules/autonomous-mode.md",
     "rules/code-style.md",
+    "rules/deferrals.md",
     "rules/documentation.md",
     "rules/git-worktrees.md",
     "rules/next-task.md",
@@ -349,6 +350,6 @@
     "trackers/lib/retry.sh"
   ],
   "installedAt": "2026-07-19T00:33:09.516Z",
-  "updatedAt": "2026-07-31T20:30:58.116Z",
+  "updatedAt": "2026-08-02T15:42:11.793Z",
   "trackerMirror": true
 }

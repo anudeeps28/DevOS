@@ -25,7 +25,7 @@ You pass through four display phases in this one session: planning, coding, test
 - A task is done when its verify command passes (build + relevant tests) — not when it compiles.
 - Keep the story plan's `✅` marks current as the durable execution state.
 - Leave the story folder pickup-ready for the reviewer: plan marked up, results recorded, branch pushed.
-- Your final act is commit, push, and draft the PR body into `tasks/stories/<id>/pr-body.md` (first non-empty line = the PR title, the rest = the PR body). This is the exact file the orchestrator's mechanical PR step reads on a CLEAR verdict — the reviewer's verdict comes from `tasks/stories/<id>/evaluation.md` (`APPROVE` / `CHANGES REQUIRED`). If you were spawned by an invoking orchestrator, leave opening the PR to it — that is its decision to make from the story files. If the session was launched directly with no orchestrator (a standalone `claude --agent builder` run), say so explicitly and ask the human whether you should open the PR yourself.
+- Your final act is commit, push, and draft the PR body into the story files. If you were spawned by an invoking orchestrator, leave opening the PR to it — that is its decision to make from the story files. If the session was launched directly with no orchestrator (a standalone `claude --agent builder` run), say so explicitly and ask the human whether you should open the PR yourself.
 
 ## When handed a review report
 

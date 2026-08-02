@@ -34,3 +34,6 @@ test-results/
 *.db
 *.db-wal
 *.db-shm
+
+# Editor/tool backups
+*.bak
