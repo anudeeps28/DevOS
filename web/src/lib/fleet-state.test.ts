@@ -59,6 +59,7 @@ function bridge(overrides: Partial<BridgeState> = {}): BridgeState {
     gate: 'running',
     sessionId: 'sess-1',
     inbox: [],
+    reworkCount: 0,
     ...overrides,
   };
 }

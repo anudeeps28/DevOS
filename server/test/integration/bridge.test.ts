@@ -89,6 +89,23 @@ function makeFakeSession(sdkId: string): EngineSession {
   });
 }
 
+// A fake session that yields `system/init` then throws — an `errored` end, so the
+// Bridge takes the rework path (with a failure report present) instead of `ended`.
+function makeErroringSession(sdkId: string): EngineSession {
+  async function* gen(): AsyncGenerator<EngineMessage> {
+    yield { type: 'system', subtype: 'init', session_id: sdkId };
+    throw new Error('boom');
+  }
+
+  return Object.assign(gen(), {
+    interrupt: async (): Promise<unknown> => undefined,
+    send: async (): Promise<void> => {},
+    onPermissionRequest: (): void => {},
+    resolvePermission: (): void => {},
+    end: (): void => {},
+  });
+}
+
 function makeFakeEngine(): { query: QueryFn; calls: SpawnParams[] } {
   const calls: SpawnParams[] = [];
   let counter = 0;
@@ -96,6 +113,19 @@ function makeFakeEngine(): { query: QueryFn; calls: SpawnParams[] } {
     calls.push(params);
     counter += 1;
     return makeFakeSession(`sdk-${counter}`);
+  };
+  return { query, calls };
+}
+
+// Errors on the FIRST spawn only (the builder), then hands out clean sessions —
+// so the run reworks exactly once and settles at `awaiting-approval` on the retry.
+function makeOnceErroringEngine(): { query: QueryFn; calls: SpawnParams[] } {
+  const calls: SpawnParams[] = [];
+  let counter = 0;
+  const query: QueryFn = (params) => {
+    calls.push(params);
+    counter += 1;
+    return counter === 1 ? makeErroringSession(`sdk-${counter}`) : makeFakeSession(`sdk-${counter}`);
   };
   return { query, calls };
 }
@@ -219,6 +249,14 @@ function makeProjectDir(): string {
   return path;
 }
 
+// Drops `.claude/failure-reports/<stage>.md` into a project dir — the default
+// `readFailureReport` source — so an errored session takes the rework path.
+function writeFailureReport(projectPath: string, stage: string, body: string): void {
+  const dir = join(projectPath, '.claude', 'failure-reports');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${stage}.md`), body, 'utf8');
+}
+
 interface RunningServer {
   readonly instance: import('../../src/index.js').DevOsServer;
   readonly url: string;
@@ -291,6 +329,31 @@ describe('Bridge pipeline over the live WS transport', () => {
     expect(engine.calls).toHaveLength(2);
     expect(engine.calls[1]?.cwd).toBe(project);
     expect(engine.calls[1]?.role).toBe('reviewer');
+  }, 15000);
+
+  it('reworkCount (wire) — a real emitted bridge-state frame carries reworkCount and reflects it after a rework', async () => {
+    const project = makeProjectDir();
+    writeFailureReport(project, 'builder', 'FIX THE BUILD');
+    const engine = makeOnceErroringEngine();
+    const server = await startServer(makeTmpDbPath(), engine.query);
+    server.instance.registry.pin(project);
+
+    const client = await connect(server.url);
+    const reworking = client.waitForBridgeState(
+      (f) => f.path === project && f.gate === 'reworking',
+      5000,
+    );
+    client.send({ type: 'bridge-start', path: project });
+    const reworkFrame = await reworking;
+
+    expect(reworkFrame.reworkCount).toBe(1);
+    expect(engine.calls).toHaveLength(2); // errored builder, then the reworked retry
+    expect(engine.calls[1]?.role).toBe('builder');
+
+    // Every frame seen so far carries a reworkCount field.
+    for (const frame of client.seen()) {
+      expect(typeof frame.reworkCount).toBe('number');
+    }
   }, 15000);
 
   it('AC-access — an unpinned/out-of-roots bridge-start is dropped; the socket stays up', async () => {

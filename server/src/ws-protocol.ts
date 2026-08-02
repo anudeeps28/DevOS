@@ -241,6 +241,22 @@ export interface WorkItemSessionAnchor {
   readonly createdAt: number;
 }
 
+/** Inbound: request the roster-ordered persona timeline for a pinned project path. */
+export interface RosterTimelineRequestMessage {
+  readonly type: 'roster-timeline';
+  readonly path: string;
+}
+
+/** Outbound: a roster-timeline snapshot for a single project path. */
+export interface RosterTimelineSnapshot {
+  readonly type: 'roster-timeline';
+  readonly path: string;
+  readonly roles: readonly {
+    readonly role: string;
+    readonly phases: readonly { readonly phase: string; readonly persona: string }[];
+  }[];
+}
+
 /** Inbound: request the current owned-session anchors for a work item of a pinned project path. */
 export interface WorkItemSessionsRequestMessage {
   readonly type: 'work-item-sessions-request';
@@ -403,6 +419,7 @@ export interface BridgeStateSnapshot {
   readonly gate: BridgeGate;
   readonly sessionId: string | null;
   readonly inbox: readonly BridgeInboxItem[];
+  readonly reworkCount: number;
 }
 
 /**
@@ -455,7 +472,8 @@ export type InboundMessage =
   | GateApproveMessage
   | BridgeInterruptMessage
   | SessionPersonasMessage
-  | WorkItemSessionsRequestMessage;
+  | WorkItemSessionsRequestMessage
+  | RosterTimelineRequestMessage;
 
 /** Every registry message the server emits to a client. */
 export type OutboundMessage =
@@ -473,7 +491,8 @@ export type OutboundMessage =
   | HookBusLivenessSnapshot
   | SessionPersonasSnapshot
   | CostUsageSnapshot
-  | WorkItemSessionsSnapshot;
+  | WorkItemSessionsSnapshot
+  | RosterTimelineSnapshot;
 
 /**
  * Validate a raw WS frame against the inbound contract. Branches on `type` first:
@@ -555,6 +574,20 @@ export function parseInboundMessage(data: unknown): InboundMessage | null {
       return null;
     }
     return Object.freeze<SessionPersonasMessage>({ type: 'session-personas', path });
+  }
+
+  // `roster-timeline` shares the same non-empty ABSOLUTE-path requirement as session-personas.
+  if (type === 'roster-timeline') {
+    const { path } = frame;
+    if (
+      typeof path !== 'string' ||
+      path.length === 0 ||
+      path.length > MAX_PATH_LENGTH ||
+      !isAbsolute(path)
+    ) {
+      return null;
+    }
+    return Object.freeze<RosterTimelineRequestMessage>({ type: 'roster-timeline', path });
   }
 
   // `work-item-sessions-request` requires a non-empty ABSOLUTE path (like the read

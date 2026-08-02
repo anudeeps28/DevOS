@@ -20,6 +20,8 @@ import type { Bridge } from './session/bridge.js';
 import type { CostLedgerStore } from './session/cost-ledger-store.js';
 import { readSessionPersonas } from './session/persona-reader.js';
 import { isValidRole } from './session/roles.js';
+import { readRoster } from './session/roster-reader.js';
+import { buildRosterTimeline } from './session/roster-timeline.js';
 import type { SessionManager } from './session/session-manager.js';
 import type { SessionStore } from './session/session-store.js';
 import { readTrackerState } from './tracker/tracker-reader.js';
@@ -80,6 +82,12 @@ const WORK_ITEM_SESSIONS_MIN_INTERVAL_MS = 200;
 // accepted request reads the live buffer fresh via `getTranscript`. The window only
 // drops rapid-fire repeats of one sessionId on a single socket.
 const SESSION_TRANSCRIPT_REQUEST_MIN_INTERVAL_MS = 200;
+
+// Minimum interval between two `roster-timeline` reads on the SAME socket. This is
+// a FLOOD-GUARD ONLY, never a cache: every accepted request always does a fresh
+// `readRoster` read (the roster is never memoized server-side). The window only
+// drops rapid-fire repeats of the SAME path on a single socket.
+const ROSTER_TIMELINE_MIN_INTERVAL_MS = 200;
 
 // Upper bound on the number of distinct paths a single socket's per-PATH
 // flood-guard Map may retain. Without this a malicious client could request an
@@ -486,6 +494,12 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
     // (re)connect; a per-socket scalar would drop every session after the first.
     const lastTranscriptRequestAt = new Map<string, number>();
 
+    // Per-socket, per-PATH flood-guard for `roster-timeline` — see
+    // ROSTER_TIMELINE_MIN_INTERVAL_MS. Keyed by path (not a single scalar) because a
+    // single socket fans out one read per pinned project; a per-socket scalar would
+    // drop the fan-out.
+    const lastRosterTimelineAt = new Map<string, number>();
+
     const heartbeat = createHeartbeat({
       intervalMs,
       emit: (message) => sendFrame(socket, message),
@@ -643,6 +657,31 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
           sendFrame(socket, { type: 'session-personas', path: message.path, personas });
         } catch (err) {
           console.error('[ws] session-personas read failed', err);
+        }
+        return;
+      }
+
+      // Roster-timeline read: reply to the requesting socket only (never broadcast).
+      // The whole flow is guarded so a read failure never crashes the gateway.
+      if (message.type === 'roster-timeline') {
+        // Access control: only read pinned projects (see isPinnedPath).
+        if (!isPinnedPath(message.path)) return;
+        // Flood-guard: drop repeats of the SAME path within the min-interval on
+        // this socket. Distinct paths (the per-project fan-out) always pass.
+        const now = Date.now();
+        const last = lastRosterTimelineAt.get(message.path) ?? 0;
+        if (now - last < ROSTER_TIMELINE_MIN_INTERVAL_MS) return;
+        pruneFloodGuard(lastRosterTimelineAt, now, ROSTER_TIMELINE_MIN_INTERVAL_MS);
+        lastRosterTimelineAt.set(message.path, now);
+
+        try {
+          sendFrame(socket, {
+            type: 'roster-timeline',
+            path: message.path,
+            roles: buildRosterTimeline(readRoster(message.path)),
+          });
+        } catch (err) {
+          console.error('[ws] roster-timeline read failed', err);
         }
         return;
       }

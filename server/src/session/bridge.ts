@@ -196,6 +196,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
       gate: run.gate,
       sessionId: run.currentSessionId,
       inbox: Object.freeze([...run.inbox]),
+      reworkCount: run.reworkCount,
     });
 
   const emit = (run: BridgeRun): void => {

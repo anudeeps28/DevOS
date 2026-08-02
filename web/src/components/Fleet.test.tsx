@@ -1,5 +1,5 @@
-import { render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { fireEvent, render, screen } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
 
 import { Fleet } from '@/components/Fleet';
 import type { FleetLane, SessionLane } from '@/lib/fleet-state';
@@ -76,5 +76,14 @@ describe('Fleet', () => {
     render(<Fleet lanes={[fleetLane({ sessions: [sessionLane({ subagents: [] })] })]} />);
 
     expect(screen.getByTestId('fleet-subagents')).toHaveTextContent('no inner subagents');
+  });
+
+  it('calls onOpenItem with the workItemId and projectPath when a lane is clicked', () => {
+    const onOpenItem = vi.fn();
+    render(<Fleet lanes={[fleetLane()]} onOpenItem={onOpenItem} />);
+
+    fireEvent.click(screen.getByTestId('fleet-workitem'));
+
+    expect(onOpenItem).toHaveBeenCalledWith('wi-1', '/abs/repo');
   });
 });
