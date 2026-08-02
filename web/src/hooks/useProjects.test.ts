@@ -21,6 +21,8 @@ import type {
   SessionState,
   SessionStateListener,
   SessionTranscriptListener,
+  SkillsListener,
+  SkillsState,
   StatusListener,
   TrackerState,
   TrackerStateListener,
@@ -38,6 +40,7 @@ function makeFakeClient() {
   let candidateListener: CandidateListener | null = null;
   let statusListener: StatusListener | null = null;
   let gitStateListener: GitStateListener | null = null;
+  let skillsListener: SkillsListener | null = null;
   let trackerStateListener: TrackerStateListener | null = null;
   let lifecycleSignalsListener: LifecycleSignalsListener | null = null;
   let sessionStateListener: SessionStateListener | null = null;
@@ -49,6 +52,7 @@ function makeFakeClient() {
   const unpin = vi.fn();
   const discover = vi.fn();
   const requestGitState = vi.fn();
+  const requestSkills = vi.fn();
   const requestTrackerState = vi.fn();
   const requestLifecycleSignals = vi.fn();
   const requestSessionPersonas = vi.fn();
@@ -89,6 +93,12 @@ function makeFakeClient() {
       gitStateListener = listener;
       return () => {
         gitStateListener = null;
+      };
+    },
+    onSkills: (listener) => {
+      skillsListener = listener;
+      return () => {
+        skillsListener = null;
       };
     },
     onTrackerState: (listener) => {
@@ -141,6 +151,7 @@ function makeFakeClient() {
     unpin,
     discover,
     requestGitState,
+    requestSkills,
     requestTrackerState,
     requestLifecycleSignals,
     requestSessionPersonas,
@@ -162,6 +173,7 @@ function makeFakeClient() {
     unpin,
     discover,
     requestGitState,
+    requestSkills,
     requestTrackerState,
     requestLifecycleSignals,
     requestSessionPersonas,
@@ -182,6 +194,7 @@ function makeFakeClient() {
     emitStatus: (status: ConnectionStatus) => statusListener?.(status),
     emitGitState: (path: string, state: GitState) =>
       gitStateListener?.(path, state),
+    emitSkills: (path: string, state: SkillsState) => skillsListener?.(path, state),
     emitTrackerState: (path: string, state: TrackerState) =>
       trackerStateListener?.(path, state),
     emitLifecycleSignals: (path: string, signals: LifecycleSignals) =>
@@ -269,6 +282,13 @@ function sampleGitState(path: string): GitState {
     ahead: 0,
     behind: 0,
     upstream: 'origin/main',
+  };
+}
+
+function sampleSkillsState(path: string): SkillsState {
+  return {
+    path,
+    skills: [{ name: 'plan', description: 'Plan a story', scope: 'org' }],
   };
 }
 
@@ -403,6 +423,44 @@ describe('useProjects', () => {
     expect(fake.requestGitState).toHaveBeenCalledWith('/abs/path');
   });
 
+  it('starts with an empty skills map', () => {
+    const fake = makeFakeClient();
+    const { result } = renderHook(() =>
+      useProjects({ createClient: () => fake.client }),
+    );
+
+    expect(result.current.skills).toEqual({});
+  });
+
+  it('folds an emitted skills snapshot into skills keyed by path', () => {
+    const fake = makeFakeClient();
+    const { result } = renderHook(() =>
+      useProjects({ createClient: () => fake.client }),
+    );
+
+    const stateOne = sampleSkillsState('/abs/one');
+    act(() => fake.emitSkills('/abs/one', stateOne));
+    expect(result.current.skills).toEqual({ '/abs/one': stateOne.skills });
+
+    const stateTwo = sampleSkillsState('/abs/two');
+    act(() => fake.emitSkills('/abs/two', stateTwo));
+    expect(result.current.skills).toEqual({
+      '/abs/one': stateOne.skills,
+      '/abs/two': stateTwo.skills,
+    });
+  });
+
+  it('delegates requestSkills to the underlying client', () => {
+    const fake = makeFakeClient();
+    const { result } = renderHook(() =>
+      useProjects({ createClient: () => fake.client }),
+    );
+
+    act(() => result.current.requestSkills('/abs/path'));
+
+    expect(fake.requestSkills).toHaveBeenCalledWith('/abs/path');
+  });
+
   it('folds session-state snapshots into sessions keyed by path, upserting by id', () => {
     const fake = makeFakeClient();
     const { result } = renderHook(() =>
@@ -454,6 +512,9 @@ describe('useProjects', () => {
     expect(fake.requestGitState).toHaveBeenCalledWith('/abs/one');
     expect(fake.requestGitState).toHaveBeenCalledWith('/abs/two');
     expect(fake.requestGitState).toHaveBeenCalledTimes(2);
+    expect(fake.requestSkills).toHaveBeenCalledWith('/abs/one');
+    expect(fake.requestSkills).toHaveBeenCalledWith('/abs/two');
+    expect(fake.requestSkills).toHaveBeenCalledTimes(2);
   });
 
   it('requests git-state for known projects on connect', () => {
@@ -464,12 +525,16 @@ describe('useProjects', () => {
       fake.emitRegistry([sampleProject('/abs/one'), sampleProject('/abs/two')]),
     );
     fake.requestGitState.mockClear();
+    fake.requestSkills.mockClear();
 
     act(() => fake.emitStatus('connected'));
 
     expect(fake.requestGitState).toHaveBeenCalledWith('/abs/one');
     expect(fake.requestGitState).toHaveBeenCalledWith('/abs/two');
     expect(fake.requestGitState).toHaveBeenCalledTimes(2);
+    expect(fake.requestSkills).toHaveBeenCalledWith('/abs/one');
+    expect(fake.requestSkills).toHaveBeenCalledWith('/abs/two');
+    expect(fake.requestSkills).toHaveBeenCalledTimes(2);
   });
 
   it('starts with an empty trackerStates map', () => {

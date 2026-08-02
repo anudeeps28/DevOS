@@ -12,6 +12,7 @@ import {
   type RegistryProject,
   type SessionPersona,
   type SessionState,
+  type Skill,
   type TrackerState,
   type TranscriptEvent,
   type WorkItemSessionAnchor,
@@ -86,6 +87,10 @@ export interface UseProjectsResult {
   readonly gitStates: Record<string, GitState>;
   /** Request a fresh git-state read for a project path; delegates to the live client. */
   readonly requestGitState: (path: string) => void;
+  /** Latest skills snapshots keyed by absolute project path; empty until the first arrives. */
+  readonly skills: Record<string, readonly Skill[]>;
+  /** Request a fresh skills read for a project path; delegates to the live client. */
+  readonly requestSkills: (path: string) => void;
   /** Latest tracker-state snapshots keyed by absolute project path; empty until the first arrives. */
   readonly trackerStates: Record<string, TrackerState>;
   /** Request a fresh tracker-state read for a project path; delegates to the live client. */
@@ -148,6 +153,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
   const [projects, setProjects] = useState<readonly RegistryProject[]>([]);
   const [candidates, setCandidates] = useState<readonly RegistryCandidate[]>([]);
   const [gitStates, setGitStates] = useState<Record<string, GitState>>({});
+  const [skills, setSkills] = useState<Record<string, readonly Skill[]>>({});
   const [trackerStates, setTrackerStates] = useState<Record<string, TrackerState>>({});
   const [lifecycleSignals, setLifecycleSignals] = useState<Record<string, LifecycleSignals>>({});
   const [sessions, setSessions] = useState<Record<string, readonly SessionState[]>>({});
@@ -208,6 +214,10 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     // Immutable fold: a git-state snapshot replaces the map with a new object.
     const offGitState = client.onGitState((path, state) =>
       setGitStates((prev) => ({ ...prev, [path]: state })),
+    );
+    // Immutable fold: a skills snapshot replaces the map with a new object.
+    const offSkills = client.onSkills((path, state) =>
+      setSkills((prev) => ({ ...prev, [path]: state.skills })),
     );
     // Immutable fold: a tracker-state snapshot replaces the map with a new object.
     const offTrackerState = client.onTrackerState((path, state) =>
@@ -297,6 +307,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
       client.discover();
       for (const project of projectsRef.current) {
         client.requestGitState(project.path);
+        client.requestSkills(project.path);
         client.requestTrackerState(project.path);
         client.requestLifecycleSignals(project.path);
         client.requestSessionPersonas(project.path);
@@ -314,6 +325,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
       offRegistry();
       offCandidates();
       offGitState();
+      offSkills();
       offTrackerState();
       offLifecycleSignals();
       offSessionState();
@@ -339,6 +351,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     if (client === null) return;
     for (const project of projects) {
       client.requestGitState(project.path);
+      client.requestSkills(project.path);
       client.requestTrackerState(project.path);
       client.requestLifecycleSignals(project.path);
       client.requestSessionPersonas(project.path);
@@ -359,6 +372,10 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
 
   function requestGitState(path: string): void {
     clientRef.current?.requestGitState(path);
+  }
+
+  function requestSkills(path: string): void {
+    clientRef.current?.requestSkills(path);
   }
 
   function requestTrackerState(path: string): void {
@@ -423,6 +440,8 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     discover,
     gitStates,
     requestGitState,
+    skills,
+    requestSkills,
     trackerStates,
     requestTrackerState,
     lifecycleSignals,

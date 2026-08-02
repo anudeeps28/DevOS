@@ -8,6 +8,7 @@ import { HookBusIndicator } from '@/components/HookBusIndicator';
 import { LeftRail, type TabId } from '@/components/LeftRail';
 import { NeedsYouInbox } from '@/components/NeedsYouInbox';
 import { ProjectPin } from '@/components/ProjectPin';
+import { SkillsPanel } from '@/components/SkillsPanel';
 import { TeamRoom } from '@/components/TeamRoom';
 import { useHeartbeat } from '@/hooks/useHeartbeat';
 import { useProjects } from '@/hooks/useProjects';
@@ -30,6 +31,8 @@ function App() {
     discover,
     gitStates,
     requestGitState,
+    skills,
+    requestSkills,
     trackerStates,
     requestTrackerState,
     lifecycleSignals,
@@ -90,6 +93,9 @@ function App() {
                 connected={status === 'connected'}
               />
             </>
+          )}
+          {tab === 'skills' && (
+            <SkillsPanel projects={projects} skills={skills} requestSkills={requestSkills} />
           )}
           {tab === 'fleet' && (
             <Fleet

@@ -22,6 +22,7 @@ import { readSessionPersonas } from './session/persona-reader.js';
 import { isValidRole } from './session/roles.js';
 import type { SessionManager } from './session/session-manager.js';
 import type { SessionStore } from './session/session-store.js';
+import { readSkills } from './skills/skills-reader.js';
 import { readTrackerState } from './tracker/tracker-reader.js';
 import {
   buildAllowedOrigins,
@@ -50,6 +51,12 @@ const DISCOVER_MIN_INTERVAL_MS = 500;
 // `readGitState` read — git state is never memoized server-side. The window only
 // drops rapid-fire repeats on a single socket.
 const GIT_STATE_MIN_INTERVAL_MS = 200;
+
+// Minimum interval between two `skills` reads on the SAME socket. This is a
+// FLOOD-GUARD ONLY, never a cache: every accepted request always does a fresh
+// `readSkills` read — skills state is never memoized server-side. The window only
+// drops rapid-fire repeats on a single socket.
+const SKILLS_MIN_INTERVAL_MS = 200;
 
 // Minimum interval between two `tracker-state` reads on the SAME socket. This is a
 // FLOOD-GUARD ONLY, never a cache: every accepted request always does a fresh
@@ -455,6 +462,13 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
     // repeats of the SAME path on the same socket.
     const lastGitStateAt = new Map<string, number>();
 
+    // Per-socket, per-PATH flood-guard for `skills` — see
+    // SKILLS_MIN_INTERVAL_MS. Keyed by path (not a single scalar) because a
+    // client fans out one request per pinned project in a burst: a per-socket
+    // scalar would drop every project after the first. This only drops rapid
+    // repeats of the SAME path on the same socket.
+    const lastSkillsAt = new Map<string, number>();
+
     // Per-socket, per-PATH flood-guard for `tracker-state` — see
     // TRACKER_STATE_MIN_INTERVAL_MS. Keyed by path (not a single scalar) because a
     // client fans out one request per pinned project in a burst: a per-socket
@@ -571,6 +585,28 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
           sendFrame(socket, { type: 'git-state', path: message.path, state });
         } catch (err) {
           console.error('[ws] git-state read failed', err);
+        }
+        return;
+      }
+
+      // Skills read: reply to the requesting socket only (never broadcast).
+      // The whole flow is guarded so a read failure never crashes the gateway.
+      if (message.type === 'skills') {
+        // Access control: only read pinned projects (see isPinnedPath).
+        if (!isPinnedPath(message.path)) return;
+        // Flood-guard: drop repeats of the SAME path within the min-interval on
+        // this socket. Distinct paths (the per-project fan-out) always pass.
+        const now = Date.now();
+        const last = lastSkillsAt.get(message.path) ?? 0;
+        if (now - last < SKILLS_MIN_INTERVAL_MS) return;
+        pruneFloodGuard(lastSkillsAt, now, SKILLS_MIN_INTERVAL_MS);
+        lastSkillsAt.set(message.path, now);
+
+        try {
+          const state = readSkills(message.path);
+          sendFrame(socket, { type: 'skills', path: message.path, state });
+        } catch (err) {
+          console.error('[ws] skills read failed', err);
         }
         return;
       }
