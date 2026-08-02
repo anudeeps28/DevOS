@@ -81,6 +81,7 @@ export interface ContextUsageSignal {
   readonly sessionId: string;
   readonly projectPath: string;
   readonly workItemId: string | null;
+  /** The model used to derive the window: the SDK-reported resolved model, else the spawn-time model. */
   readonly model: string;
   readonly occupiedTokens: number;
   readonly windowTokens: number;
@@ -345,8 +346,12 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         !isKnownContextWindow(windowModel)
       ) {
         s.windowWarned = true;
+        // Strip control chars from the model id before it reaches a terminal (rules/phase-markers.md
+        // control-char contract) — it can carry an untrusted, roster-supplied value.
+        // eslint-disable-next-line no-control-regex
+        const safeModel = windowModel.replace(/[\u0000-\u001F\u007F]/g, ' ').slice(0, 200);
         console.warn(
-          `[session] no declared or known context window for ${s.id} (model "${windowModel}") — ` +
+          `[session] no declared or known context window for ${s.id} (model "${safeModel}") — ` +
             `using ${DEFAULT_CONTEXT_WINDOW}-token default; recycle triggers at 80% of that. ` +
             `Declare contextWindow in harness-roles.json or add a [1m]-style marker to the model id.`,
         );
@@ -416,6 +421,10 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
           }
           emit(s);
         }
+        // Capture the SDK-resolved model from system/init. This message precedes any `result`
+        // in the stream, so `resolvedModel` is set before checkContextUsage runs on a result — a
+        // result that somehow arrived first would size off the spawn-time `model` (or the declared
+        // window, which is authoritative regardless).
         if (isInitMessage(message) && typeof message.model === 'string' && message.model.length > 0) {
           s.resolvedModel = message.model;
         }

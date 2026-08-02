@@ -1,7 +1,7 @@
 // Unit tests — SessionManager spawn / multiplex / lifecycle with a DETERMINISTIC
 // FAKE engine. No live Claude. A real in-memory DB + store backs persistence.
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { openDatabase } from '../db/database.js';
 import { createRegistry } from '../registry/registry.js';
 import type { TranscriptEvent } from '../ws-protocol.js';
@@ -958,6 +958,43 @@ describe('SessionManager context usage', () => {
 
     fake.finish();
     await mgr.stopAll();
+  });
+
+  it('warns AT MOST ONCE when recycling against the guessed 200k default (no window, unknown model)', async () => {
+    const store = freshStore();
+    const fake = makeSession();
+    const mgr = createSessionManager({ store, query: () => fake.session });
+    const signals: Parameters<Parameters<typeof mgr.onContextUsage>[0]>[0][] = [];
+    mgr.onContextUsage((signal) => signals.push(signal));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      // No contextWindow and no system/init model → windowModel is the 'inherit' placeholder,
+      // which resolves to the 200k default and is NOT a known window.
+      const snap = await mgr.spawn({ projectPath: PROJECT, role: 'builder' });
+
+      // Two BELOW-threshold results (100k, 120k of 200k) — each reaches the warn check but must
+      // not fire the recycle signal; the warn latch limits the warning to exactly one.
+      fake.emit(resultMessage(0.01, 100_000, 20));
+      fake.emit(resultMessage(0.01, 120_000, 20));
+      await new Promise((r) => setTimeout(r, 20));
+      expect(signals).toHaveLength(0);
+
+      const windowWarnings = warnSpy.mock.calls.filter((c) =>
+        String(c[0]).includes('no declared or known context window'),
+      );
+      expect(windowWarnings).toHaveLength(1);
+
+      // A crossing result now fires against the 200k default window.
+      fake.emit(resultMessage(0.02, 170_000, 20));
+      await waitUntil(() => signals.length >= 1);
+      expect(signals[0]).toMatchObject({ sessionId: snap.id, windowTokens: 200_000 });
+
+      fake.finish();
+      await mgr.stopAll();
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it('endAtBoundary calls the engine end(); an unknown id is a guarded no-op', async () => {

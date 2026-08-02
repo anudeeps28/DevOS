@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
   CONTEXT_THRESHOLD,
   DEFAULT_CONTEXT_WINDOW,
+  MAX_CONTEXT_WINDOW,
   contextOccupancy,
   contextTotalFromResult,
   crossesThreshold,
@@ -104,6 +105,14 @@ describe('effectiveWindow', () => {
     expect(effectiveWindow(0, 'inherit')).toBe(DEFAULT_CONTEXT_WINDOW);
     expect(effectiveWindow(-5, 'inherit')).toBe(DEFAULT_CONTEXT_WINDOW);
     expect(effectiveWindow(Number.NaN, 'claude-opus-4-8[1m]')).toBe(1_000_000);
+  });
+
+  it('rejects a declared window above the ceiling — cannot disable the recycle brake', () => {
+    // An absurd declared window would push the threshold so high it never fires; treat it as invalid
+    // and fall back to the model-derived (bounded) window instead.
+    expect(effectiveWindow(MAX_CONTEXT_WINDOW, 'inherit')).toBe(MAX_CONTEXT_WINDOW);
+    expect(effectiveWindow(MAX_CONTEXT_WINDOW + 1, 'inherit')).toBe(DEFAULT_CONTEXT_WINDOW);
+    expect(effectiveWindow(1e308, 'claude-opus-5[1m]')).toBe(1_000_000);
   });
 });
 

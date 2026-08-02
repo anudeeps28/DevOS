@@ -7,18 +7,25 @@
 export const DEFAULT_CONTEXT_WINDOW = 200_000;
 
 /**
- * Exact-id context window overrides. Takes precedence over the generic `[Nm]` parse below, so
- * this map is only needed for ids that do NOT already advertise a bracketed `[Nm]` hint.
+ * Exact-id context window overrides — a seam for a model id whose window is NOT derivable from a
+ * bracketed `[Nm]` hint. Checked before the `[Nm]` parse. Currently empty: every known 1M model id
+ * (`claude-opus-4-8[1m]`, `claude-opus-5[1m]`, …) already advertises `[1m]`, so the generic rule
+ * below covers them without a hardcoded entry.
  */
-const MODEL_CONTEXT_WINDOWS: Readonly<Record<string, number>> = {
-  'claude-opus-4-8[1m]': 1_000_000,
-};
+const MODEL_CONTEXT_WINDOWS: Readonly<Record<string, number>> = {};
 
 /** Matches a trailing `[<N>m]` context-window hint, e.g. `claude-opus-5[1m]` → N million tokens. */
 const MILLION_CONTEXT_HINT = /\[(\d+)m\]$/i;
 
 /** Upper bound on the parsed `[Nm]` million-token hint — rejects absurd ids that would disable recycling. */
 const MAX_MILLION_HINT = 100;
+
+/**
+ * Upper bound on any resolved context window (tokens). A window larger than this pushes the recycle
+ * threshold so high it never fires — silently disabling the runaway-context brake — so a declared
+ * window above this ceiling is treated as invalid. Mirrors the `[Nm]` marker's `MAX_MILLION_HINT` cap.
+ */
+export const MAX_CONTEXT_WINDOW = MAX_MILLION_HINT * 1_000_000;
 
 /** Fraction of the context window occupied at which callers should warn. */
 export const CONTEXT_THRESHOLD = 0.8;
@@ -83,7 +90,12 @@ export function windowFor(model: string): number {
  * declared window must be a positive finite number to count — an invalid one is ignored.
  */
 export function effectiveWindow(declaredWindow: number | null | undefined, model: string): number {
-  if (declaredWindow != null && Number.isFinite(declaredWindow) && declaredWindow > 0) {
+  if (
+    declaredWindow != null &&
+    Number.isFinite(declaredWindow) &&
+    declaredWindow > 0 &&
+    declaredWindow <= MAX_CONTEXT_WINDOW
+  ) {
     return declaredWindow;
   }
   return windowFor(model);
