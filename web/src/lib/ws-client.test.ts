@@ -12,6 +12,7 @@ import {
   type LifecycleSignals,
   type RegistryCandidate,
   type RegistryProject,
+  type RosterTimeline,
   type SessionPersona,
   type SessionState,
   type TrackerState,
@@ -1071,6 +1072,101 @@ describe('ws-client session-personas frames', () => {
   });
 });
 
+describe('ws-client roster-timeline frames', () => {
+  beforeEach(() => {
+    FakeSocket.instances = [];
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function rosterTimelineFrame(path: string, roles: unknown): string {
+    return JSON.stringify({ type: 'roster-timeline', path, roles });
+  }
+
+  function makeRosterTimelineClient() {
+    const received: { path: string; timeline: RosterTimeline }[] = [];
+    const client = createWsClient({
+      url: 'ws://localhost/ws',
+      createWebSocket: (url) => new FakeSocket(url),
+    });
+    client.onRosterTimeline((path, timeline) => received.push({ path, timeline }));
+    const socket = FakeSocket.instances[0]!;
+    socket.open();
+    return { client, received, socket };
+  }
+
+  it('delivers a valid roster-timeline snapshot with the correct path and frozen roles', () => {
+    const { received, socket } = makeRosterTimelineClient();
+    const roles = [
+      {
+        role: 'builder',
+        phases: [
+          { phase: 'planning', persona: 'Navigator' },
+          { phase: 'coding', persona: 'Shipwright' },
+        ],
+      },
+      { role: 'reviewer', phases: [{ phase: 'reviewing', persona: 'Warden' }] },
+    ];
+
+    socket.message(rosterTimelineFrame('/abs/repo', roles));
+
+    expect(received).toHaveLength(1);
+    expect(received[0]!.path).toBe('/abs/repo');
+    expect(received[0]!.timeline).toEqual({ path: '/abs/repo', roles });
+    expect(Object.isFrozen(received[0]!.timeline)).toBe(true);
+    expect(Object.isFrozen(received[0]!.timeline.roles)).toBe(true);
+    expect(Object.isFrozen(received[0]!.timeline.roles[0])).toBe(true);
+    expect(Object.isFrozen(received[0]!.timeline.roles[0]!.phases[0])).toBe(true);
+  });
+
+  it('drops malformed roster-timeline frames without emitting to listeners', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { received, socket } = makeRosterTimelineClient();
+
+    // path missing.
+    expect(() =>
+      socket.message(
+        JSON.stringify({
+          type: 'roster-timeline',
+          roles: [{ role: 'builder', phases: [] }],
+        }),
+      ),
+    ).not.toThrow();
+    // roles not an array.
+    expect(() => socket.message(rosterTimelineFrame('/abs/repo', {}))).not.toThrow();
+    // a role missing its phases array.
+    expect(() =>
+      socket.message(rosterTimelineFrame('/abs/repo', [{ role: 'builder' }])),
+    ).not.toThrow();
+    // a phase entry missing its persona.
+    expect(() =>
+      socket.message(
+        rosterTimelineFrame('/abs/repo', [
+          { role: 'builder', phases: [{ phase: 'coding' }] },
+        ]),
+      ),
+    ).not.toThrow();
+
+    expect(received).toEqual([]);
+    expect(warn).toHaveBeenCalled();
+  });
+
+  it('requestRosterTimeline() sends a roster-timeline frame once the socket is OPEN', () => {
+    const client = createWsClient({
+      url: 'ws://localhost/ws',
+      createWebSocket: (url) => new FakeSocket(url),
+    });
+    const socket = FakeSocket.instances[0]!;
+    socket.open();
+
+    client.requestRosterTimeline('/abs/repo');
+
+    expect(socket.sent).toEqual([JSON.stringify({ type: 'roster-timeline', path: '/abs/repo' })]);
+  });
+});
+
 /** Stamp a transcript event body with sessionId/seq/ts for fixture frames. */
 function stamped(body: Record<string, unknown>, seq: number): Record<string, unknown> {
   return { ...body, sessionId: 'sess-1', seq, ts: 1700000000000 + seq };
@@ -1350,8 +1446,27 @@ describe('ws-client session-transcript frames', () => {
       gate: 'awaiting-approval',
       sessionId: 'sess-1',
       inbox: [{ stage: 'implement', kind: 'question', reason: 'need input', ts: 123 }],
+      reworkCount: 0,
     });
     expect(Object.isFrozen(received[0]!.state)).toBe(true);
+  });
+
+  it('preserves a present reworkCount on a bridge-state frame', () => {
+    const { received, socket } = makeBridgeStateClient();
+    const frame = {
+      type: 'bridge-state',
+      path: '/abs/repo',
+      stage: 'implement',
+      gate: 'reworking',
+      sessionId: 'sess-1',
+      inbox: [],
+      reworkCount: 2,
+    };
+
+    socket.message(JSON.stringify(frame));
+
+    expect(received).toHaveLength(1);
+    expect(received[0]!.state.reworkCount).toBe(2);
   });
 
   it('drops a malformed bridge-state frame without emitting to listeners', () => {

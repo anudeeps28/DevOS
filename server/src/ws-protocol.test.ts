@@ -11,6 +11,7 @@ import {
   type GitStateMessage,
   type PermissionDecisionMessage,
   type PinMessage,
+  type RosterTimelineRequestMessage,
   type SessionInputMessage,
   type SessionInterruptMessage,
   type SessionPersonasMessage,
@@ -624,6 +625,31 @@ describe('parseInboundMessage', () => {
       ).toBeNull();
       expect(
         parseInboundMessage(JSON.stringify({ type: 'session-personas', path: 'rel/dir' })),
+      ).toBeNull();
+    });
+  });
+
+  describe('roster-timeline frames', () => {
+    it('accepts a roster-timeline message with an absolute path, frozen', () => {
+      const result = parseInboundMessage(
+        JSON.stringify({ type: 'roster-timeline', path: '/abs/project' }),
+      );
+      expect(result).toEqual<RosterTimelineRequestMessage>({
+        type: 'roster-timeline',
+        path: '/abs/project',
+      });
+      expect(Object.isFrozen(result)).toBe(true);
+    });
+
+    it('rejects a roster-timeline message with a missing, empty, or relative path', () => {
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'roster-timeline' })),
+      ).toBeNull();
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'roster-timeline', path: '' })),
+      ).toBeNull();
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'roster-timeline', path: 'rel/dir' })),
       ).toBeNull();
     });
   });

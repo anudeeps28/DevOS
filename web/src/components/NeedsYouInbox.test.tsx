@@ -11,6 +11,7 @@ function bridgeState(overrides: Partial<BridgeState> = {}): BridgeState {
     gate: 'awaiting-approval',
     sessionId: 'sess-1',
     inbox: [],
+    reworkCount: 0,
     ...overrides,
   };
 }

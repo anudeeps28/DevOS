@@ -9,9 +9,11 @@ import { LeftRail, type TabId } from '@/components/LeftRail';
 import { NeedsYouInbox } from '@/components/NeedsYouInbox';
 import { ProjectPin } from '@/components/ProjectPin';
 import { TeamRoom } from '@/components/TeamRoom';
+import { WorkItemDetail } from '@/components/WorkItemDetail';
 import { useHeartbeat } from '@/hooks/useHeartbeat';
 import { useProjects } from '@/hooks/useProjects';
 import { deriveFleet } from '@/lib/fleet-state';
+import { derivePipelineTimeline } from '@/lib/pipeline-timeline';
 
 // Minimal centered shell: the live heartbeat + connection indicator, driven by
 // the reconnecting WS client through useHeartbeat, plus the pin/unpin affordance
@@ -22,6 +24,7 @@ import { deriveFleet } from '@/lib/fleet-state';
 function App() {
   const { status, heartbeat } = useHeartbeat();
   const [tab, setTab] = useState<TabId>('projects');
+  const [selected, setSelected] = useState<{ workItemId: string; path: string } | null>(null);
   const {
     projects,
     candidates,
@@ -37,6 +40,7 @@ function App() {
     sessions,
     sessionPersonas,
     bridgeStates,
+    rosterTimelines,
     approveGate,
     spawnSession,
     transcripts,
@@ -59,9 +63,30 @@ function App() {
       <Heartbeat heartbeat={heartbeat} />
       <CostToday costToday={costToday} />
       <div className="flex w-full max-w-4xl flex-row gap-6">
-        <LeftRail active={tab} onSelect={setTab} />
+        <LeftRail
+          active={tab}
+          onSelect={(next) => {
+            // Leaving the Work-item Detail overlay when the user picks a tab —
+            // otherwise Detail keeps covering the shell and the tab click looks inert.
+            setSelected(null);
+            setTab(next);
+          }}
+        />
         <div className="flex flex-1 flex-col items-center gap-8">
-          {tab === 'projects' && (
+          {selected !== null ? (
+            <WorkItemDetail
+              workItemId={selected.workItemId}
+              model={derivePipelineTimeline({
+                rosterTimeline: rosterTimelines[selected.path],
+                sessionPersonas: sessionPersonas[selected.path] ?? [],
+                workItemId: selected.workItemId,
+                bridgeState: bridgeStates[selected.path],
+              })}
+              onBack={() => setSelected(null)}
+            />
+          ) : (
+            <>
+              {tab === 'projects' && (
             <>
               <ProjectPin
                 projects={projects}
@@ -101,6 +126,7 @@ function App() {
                 foreignNeedsYou,
                 bridgeStates,
               })}
+              onOpenItem={(workItemId, path) => setSelected({ workItemId, path })}
             />
           )}
           {tab === 'inbox' && (
@@ -113,6 +139,8 @@ function App() {
               }
               foreignItems={foreignNeedsYou}
             />
+          )}
+            </>
           )}
         </div>
       </div>

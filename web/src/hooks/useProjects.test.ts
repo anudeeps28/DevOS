@@ -16,6 +16,8 @@ import type {
   RegistryCandidate,
   RegistryListener,
   RegistryProject,
+  RosterTimeline,
+  RosterTimelineListener,
   SessionPersona,
   SessionPersonasListener,
   SessionState,
@@ -45,6 +47,7 @@ function makeFakeClient() {
   let bridgeStateListener: BridgeStateListener | null = null;
   let sessionTranscriptListener: SessionTranscriptListener | null = null;
   let costUsageListener: CostUsageListener | null = null;
+  let rosterTimelineListener: RosterTimelineListener | null = null;
   const pin = vi.fn();
   const unpin = vi.fn();
   const discover = vi.fn();
@@ -52,6 +55,7 @@ function makeFakeClient() {
   const requestTrackerState = vi.fn();
   const requestLifecycleSignals = vi.fn();
   const requestSessionPersonas = vi.fn();
+  const requestRosterTimeline = vi.fn();
   const requestWorkItemSessions = vi.fn();
   const spawnSession = vi.fn();
   const requestTranscript = vi.fn();
@@ -137,6 +141,12 @@ function makeFakeClient() {
         costUsageListener = null;
       };
     },
+    onRosterTimeline: (listener) => {
+      rosterTimelineListener = listener;
+      return () => {
+        rosterTimelineListener = null;
+      };
+    },
     pin,
     unpin,
     discover,
@@ -144,6 +154,7 @@ function makeFakeClient() {
     requestTrackerState,
     requestLifecycleSignals,
     requestSessionPersonas,
+    requestRosterTimeline,
     requestWorkItemSessions,
     spawnSession,
     requestTranscript,
@@ -165,6 +176,7 @@ function makeFakeClient() {
     requestTrackerState,
     requestLifecycleSignals,
     requestSessionPersonas,
+    requestRosterTimeline,
     requestWorkItemSessions,
     spawnSession,
     requestTranscript,
@@ -198,6 +210,8 @@ function makeFakeClient() {
       events: readonly TranscriptEvent[],
     ) => sessionTranscriptListener?.(path, sessionId, events),
     emitCostUsage: (usage: CostUsage) => costUsageListener?.(usage),
+    emitRosterTimeline: (path: string, timeline: RosterTimeline) =>
+      rosterTimelineListener?.(path, timeline),
   };
 }
 
@@ -242,6 +256,22 @@ function sampleBridgeState(path: string): BridgeState {
     gate: 'running',
     sessionId: 'sess-1',
     inbox: [],
+    reworkCount: 0,
+  };
+}
+
+function sampleRosterTimeline(path: string): RosterTimeline {
+  return {
+    path,
+    roles: [
+      {
+        role: 'builder',
+        phases: [
+          { phase: 'planning', persona: 'Navigator' },
+          { phase: 'coding', persona: 'Shipwright' },
+        ],
+      },
+    ],
   };
 }
 
@@ -864,6 +894,35 @@ describe('useProjects', () => {
       '/abs/one': stateOne,
       '/abs/two': stateTwo,
     });
+  });
+
+  it('folds an emitted roster-timeline into rosterTimelines keyed by path', () => {
+    const fake = makeFakeClient();
+    const { result } = renderHook(() =>
+      useProjects({ createClient: () => fake.client }),
+    );
+
+    const timelineOne = sampleRosterTimeline('/abs/one');
+    act(() => fake.emitRosterTimeline('/abs/one', timelineOne));
+    expect(result.current.rosterTimelines).toEqual({ '/abs/one': timelineOne });
+
+    const timelineTwo = sampleRosterTimeline('/abs/two');
+    act(() => fake.emitRosterTimeline('/abs/two', timelineTwo));
+    expect(result.current.rosterTimelines).toEqual({
+      '/abs/one': timelineOne,
+      '/abs/two': timelineTwo,
+    });
+  });
+
+  it('delegates requestRosterTimeline to the underlying client', () => {
+    const fake = makeFakeClient();
+    const { result } = renderHook(() =>
+      useProjects({ createClient: () => fake.client }),
+    );
+
+    act(() => result.current.requestRosterTimeline('/abs/path'));
+
+    expect(fake.requestRosterTimeline).toHaveBeenCalledWith('/abs/path');
   });
 
   it('approveGate delegates to client.sendGateApprove with the path', () => {

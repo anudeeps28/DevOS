@@ -218,6 +218,7 @@ export interface BridgeState {
   readonly gate: 'running' | 'awaiting-approval' | 'reworking' | 'escalated' | 'done';
   readonly sessionId: string | null;
   readonly inbox: readonly BridgeInboxItem[];
+  readonly reworkCount: number;
 }
 
 /**
@@ -269,6 +270,38 @@ export interface CostUsage {
   readonly inputTokensToday: number;
   readonly outputTokensToday: number;
   readonly sinceEpochMs: number;
+}
+
+/**
+ * One roster phase entry within a role's timeline: the phase id and its
+ * persona display name. Mirrors the server's RosterTimelineSnapshot entry
+ * shape (server/src/ws-protocol.ts) — duplicated typed contract, no shared
+ * package. Frozen — never mutated after construction.
+ */
+export interface RosterTimelineStage {
+  readonly phase: string;
+  readonly persona: string;
+}
+
+/**
+ * One role's ordered phase timeline. Mirrors the server's
+ * RosterTimelineSnapshot entry shape (server/src/ws-protocol.ts) —
+ * duplicated typed contract, no shared package. Frozen — never mutated
+ * after construction.
+ */
+export interface RosterTimelineRole {
+  readonly role: string;
+  readonly phases: readonly RosterTimelineStage[];
+}
+
+/**
+ * A validated roster-timeline snapshot. Mirrors the server's
+ * RosterTimelineSnapshot (server/src/ws-protocol.ts) — duplicated typed
+ * contract, no shared package. Frozen — never mutated after construction.
+ */
+export interface RosterTimeline {
+  readonly path: string;
+  readonly roles: readonly RosterTimelineRole[];
 }
 
 /** The slice of the WebSocket API this client depends on (keeps fakes tiny). */
@@ -339,6 +372,7 @@ export type PermissionRequestListener = (request: PermissionRequest) => void;
 export type ForeignNeedsYouListener = (item: ForeignNeedsYou) => void;
 export type HookBusLivenessListener = (state: HookBusLiveness) => void;
 export type CostUsageListener = (usage: CostUsage) => void;
+export type RosterTimelineListener = (path: string, timeline: RosterTimeline) => void;
 
 /** Public, framework-agnostic client surface. */
 export interface WsClient {
@@ -375,6 +409,8 @@ export interface WsClient {
   readonly onHookBusLiveness: (listener: HookBusLivenessListener) => () => void;
   /** Subscribe to validated cost/usage snapshots. */
   readonly onCostUsage: (listener: CostUsageListener) => () => void;
+  /** Subscribe to validated roster-timeline snapshots. */
+  readonly onRosterTimeline: (listener: RosterTimelineListener) => () => void;
   /** Pin a project by absolute path; no-op (warns) when the socket is not open. */
   readonly pin: (path: string, opts?: { displayName?: string; uiPrefs?: unknown }) => void;
   /** Unpin a project by absolute path; no-op (warns) when the socket is not open. */
@@ -389,6 +425,8 @@ export interface WsClient {
   readonly requestLifecycleSignals: (path: string) => void;
   /** Request the current session-personas join for a project path; no-op (warns) when the socket is not open. */
   readonly requestSessionPersonas: (path: string) => void;
+  /** Request the current roster-timeline join for a project path; no-op (warns) when the socket is not open. */
+  readonly requestRosterTimeline: (path: string) => void;
   /** Request the current owned-session anchors for a work item; no-op (warns) when the socket is not open. */
   readonly requestWorkItemSessions: (path: string, workItemId: string) => void;
   /** Spawn an owned session for a pinned project + role; no-op (warns) when the socket is not open. */
@@ -861,6 +899,79 @@ function parseSessionPersonasSnapshot(
 }
 
 /**
+ * Validate a single raw entry against the RosterTimelineStage contract:
+ * `{ phase: string, persona: string }`.
+ * Returns a frozen RosterTimelineStage, or null for anything malformed.
+ */
+function parseRosterTimelineStage(entry: unknown): RosterTimelineStage | null {
+  if (typeof entry !== 'object' || entry === null) return null;
+
+  const record = entry as Record<string, unknown>;
+  const { phase, persona } = record;
+
+  if (typeof phase !== 'string') return null;
+  if (typeof persona !== 'string') return null;
+
+  return Object.freeze({ phase, persona });
+}
+
+/**
+ * Validate a single raw entry against the RosterTimelineRole contract:
+ * `{ role: string, phases: RosterTimelineStage[] }`.
+ * Returns a frozen RosterTimelineRole, or null for anything malformed.
+ */
+function parseRosterTimelineRole(entry: unknown): RosterTimelineRole | null {
+  if (typeof entry !== 'object' || entry === null) return null;
+
+  const record = entry as Record<string, unknown>;
+  const { role, phases } = record;
+
+  if (typeof role !== 'string') return null;
+  if (!Array.isArray(phases)) return null;
+
+  const parsedPhases: RosterTimelineStage[] = [];
+  for (const phaseEntry of phases) {
+    const stage = parseRosterTimelineStage(phaseEntry);
+    if (stage === null) return null;
+    parsedPhases.push(stage);
+  }
+
+  return Object.freeze({ role, phases: Object.freeze(parsedPhases) });
+}
+
+/**
+ * Validate a raw WS frame against the pinned roster-timeline contract:
+ * `{ type: 'roster-timeline', path: string, roles: RosterTimelineRole[] }`.
+ * Returns a frozen RosterTimeline, or null for anything malformed.
+ */
+function parseRosterTimelineSnapshot(data: unknown): RosterTimeline | null {
+  if (typeof data !== 'string') return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return null;
+  }
+
+  if (typeof parsed !== 'object' || parsed === null) return null;
+
+  const frame = parsed as Record<string, unknown>;
+  if (frame.type !== 'roster-timeline') return null;
+  if (typeof frame.path !== 'string' || frame.path.length === 0) return null;
+  if (!Array.isArray(frame.roles)) return null;
+
+  const roles: RosterTimelineRole[] = [];
+  for (const entry of frame.roles) {
+    const role = parseRosterTimelineRole(entry);
+    if (role === null) return null;
+    roles.push(role);
+  }
+
+  return Object.freeze({ path: frame.path, roles: Object.freeze(roles) });
+}
+
+/**
  * Validate a single raw entry against the WorkItemSessionAnchor contract:
  * `{ id: string, role: string|null, status: string|null, sdkSessionId: string|null,
  *    currentStage: string|null, createdAt: <finite number> }`.
@@ -1135,7 +1246,7 @@ function parseBridgeState(data: unknown): BridgeState | null {
   const frame = parsed as Record<string, unknown>;
   if (frame.type !== 'bridge-state') return null;
 
-  const { path, stage, gate, sessionId, inbox } = frame;
+  const { path, stage, gate, sessionId, inbox, reworkCount: rawReworkCount } = frame;
 
   if (typeof path !== 'string' || path.length === 0) return null;
   if (typeof stage !== 'string') return null;
@@ -1158,7 +1269,14 @@ function parseBridgeState(data: unknown): BridgeState | null {
     items.push(item);
   }
 
-  return Object.freeze({ path, stage, gate, sessionId, inbox: Object.freeze(items) });
+  // Clamp to a non-negative integer: a hostile/garbled frame (negative, huge, or
+  // fractional) can't produce a nonsensical loop badge. Missing/non-finite → 0.
+  const reworkCount =
+    typeof rawReworkCount === 'number' && Number.isFinite(rawReworkCount)
+      ? Math.max(0, Math.trunc(rawReworkCount))
+      : 0;
+
+  return Object.freeze({ path, stage, gate, sessionId, inbox: Object.freeze(items), reworkCount });
 }
 
 /**
@@ -1342,6 +1460,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
   const foreignNeedsYouListeners = new Set<ForeignNeedsYouListener>();
   const hookBusLivenessListeners = new Set<HookBusLivenessListener>();
   const costUsageListeners = new Set<CostUsageListener>();
+  const rosterTimelineListeners = new Set<RosterTimelineListener>();
 
   let state: ClientState = {
     status: 'connecting',
@@ -1426,6 +1545,10 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
 
   function emitCostUsage(usage: CostUsage): void {
     for (const listener of costUsageListeners) listener(usage);
+  }
+
+  function emitRosterTimeline(path: string, timeline: RosterTimeline): void {
+    for (const listener of rosterTimelineListeners) listener(path, timeline);
   }
 
   // Write a frame only when the socket is OPEN; otherwise drop + warn (never throw).
@@ -1598,6 +1721,16 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
       return;
     }
 
+    if (type === 'roster-timeline') {
+      const timeline = parseRosterTimelineSnapshot(data);
+      if (timeline === null) {
+        console.warn('[ws-client] dropped malformed frame:', data);
+        return;
+      }
+      emitRosterTimeline(timeline.path, timeline);
+      return;
+    }
+
     // Never throw into the app — drop and warn.
     console.warn('[ws-client] dropped malformed frame:', data);
   }
@@ -1666,6 +1799,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     foreignNeedsYouListeners.clear();
     hookBusLivenessListeners.clear();
     costUsageListeners.clear();
+    rosterTimelineListeners.clear();
 
     if (state.reconnectHandle !== null) {
       timers.clearTimeout(state.reconnectHandle);
@@ -1714,6 +1848,10 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
 
   function requestSessionPersonas(path: string): void {
     sendFrame({ type: 'session-personas', path });
+  }
+
+  function requestRosterTimeline(path: string): void {
+    sendFrame({ type: 'roster-timeline', path });
   }
 
   function requestWorkItemSessions(path: string, workItemId: string): void {
@@ -1866,6 +2004,12 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
         costUsageListeners.delete(listener);
       };
     },
+    onRosterTimeline: (listener) => {
+      rosterTimelineListeners.add(listener);
+      return () => {
+        rosterTimelineListeners.delete(listener);
+      };
+    },
     pin,
     unpin,
     discover,
@@ -1873,6 +2017,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     requestTrackerState,
     requestLifecycleSignals,
     requestSessionPersonas,
+    requestRosterTimeline,
     requestWorkItemSessions,
     spawnSession,
     requestTranscript,

@@ -10,6 +10,7 @@ import {
   type PermissionRequest,
   type RegistryCandidate,
   type RegistryProject,
+  type RosterTimeline,
   type SessionPersona,
   type SessionState,
   type TrackerState,
@@ -100,6 +101,10 @@ export interface UseProjectsResult {
   readonly sessionPersonas: Record<string, readonly SessionPersona[]>;
   /** Request a fresh session-personas join for a project path; delegates to the live client. */
   readonly requestSessionPersonas: (path: string) => void;
+  /** Latest roster-timeline snapshots keyed by absolute project path; empty until the first arrives. */
+  readonly rosterTimelines: Record<string, RosterTimeline>;
+  /** Request a fresh roster-timeline read for a project path; delegates to the live client. */
+  readonly requestRosterTimeline: (path: string) => void;
   /** Latest owned-session anchors keyed by work item id; empty until the first snapshot arrives. */
   readonly workItemSessions: Record<string, readonly WorkItemSessionAnchor[]>;
   /** Request the current owned-session anchors for a work item; delegates to the live client. */
@@ -158,6 +163,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     Record<string, readonly WorkItemSessionAnchor[]>
   >({});
   const [bridgeStates, setBridgeStates] = useState<Record<string, BridgeState>>({});
+  const [rosterTimelines, setRosterTimelines] = useState<Record<string, RosterTimeline>>({});
   const [transcripts, setTranscripts] = useState<Record<string, readonly TranscriptEvent[]>>({});
   const [pendingPermissions, setPendingPermissions] = useState<
     Record<string, readonly PermissionRequest[]>
@@ -250,6 +256,10 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     const offBridgeState = client.onBridgeState((path, bridgeState) =>
       setBridgeStates((prev) => ({ ...prev, [path]: bridgeState })),
     );
+    // Immutable fold: a roster-timeline snapshot replaces the map with a new object.
+    const offRosterTimeline = client.onRosterTimeline((path, timeline) =>
+      setRosterTimelines((prev) => ({ ...prev, [path]: timeline })),
+    );
     // Immutable fold: a permission request upserts by requestId within the session id.
     const offPermissionRequest = client.onPermissionRequest((req) =>
       setPendingPermissions((prev) => {
@@ -300,6 +310,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
         client.requestTrackerState(project.path);
         client.requestLifecycleSignals(project.path);
         client.requestSessionPersonas(project.path);
+        client.requestRosterTimeline(project.path);
       }
       // Backfill transcripts for known live sessions not yet requested on
       // this connection.
@@ -320,6 +331,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
       offSessionPersonas();
       offWorkItemSessions();
       offBridgeState();
+      offRosterTimeline();
       offSessionTranscript();
       offPermissionRequest();
       offForeignNeedsYou();
@@ -342,6 +354,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
       client.requestTrackerState(project.path);
       client.requestLifecycleSignals(project.path);
       client.requestSessionPersonas(project.path);
+      client.requestRosterTimeline(project.path);
     }
   }, [projects]);
 
@@ -371,6 +384,10 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
 
   function requestSessionPersonas(path: string): void {
     clientRef.current?.requestSessionPersonas(path);
+  }
+
+  function requestRosterTimeline(path: string): void {
+    clientRef.current?.requestRosterTimeline(path);
   }
 
   function requestWorkItemSessions(path: string, workItemId: string): void {
@@ -430,6 +447,8 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     sessions,
     sessionPersonas,
     requestSessionPersonas,
+    rosterTimelines,
+    requestRosterTimeline,
     workItemSessions,
     requestWorkItemSessions,
     bridgeStates,

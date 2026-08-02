@@ -288,7 +288,7 @@ describe('Bridge', () => {
     expect(bridge.getInbox(PROJECT)).toHaveLength(1); // the interrupt item, no escalation added
   });
 
-  it('AC4 — errored + a failure report respawns builder with prompt === report', async () => {
+  it('AC4 — errored + a failure report respawns builder with prompt === report; reworkCount ticks up', async () => {
     const { sessionManager, registry, queryFactory } = freshEnv();
     const bridge = createBridge({
       sessionManager,
@@ -296,9 +296,11 @@ describe('Bridge', () => {
       resolveRoster: () => ROSTER,
       readFailureReport: () => 'FIX THE BUILD',
     });
+    const states = collectStates(bridge);
 
     bridge.start(PROJECT);
     await waitUntil(() => queryFactory.calls.length === 1);
+    expect(bridge.getState(PROJECT)?.reworkCount).toBe(0);
 
     const builder = queryFactory.sessionAt(0);
     builder.emitInit('sdk-builder-4');
@@ -308,6 +310,8 @@ describe('Bridge', () => {
     expect(queryFactory.calls[1]?.role).toBe('builder');
     expect(queryFactory.calls[1]?.prompt).toBe('FIX THE BUILD');
     expect(bridge.getState(PROJECT)?.gate).toBe('reworking');
+    expect(bridge.getState(PROJECT)?.reworkCount).toBe(1);
+    expect(states.some((s) => s.reworkCount === 1)).toBe(true);
   });
 
   it('AC4 — errored + no failure report escalates without respawning', async () => {

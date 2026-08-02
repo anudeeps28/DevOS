@@ -59,7 +59,13 @@ function SessionRow({ session }: { session: SessionLane }): JSX.Element {
  * sessions, each session holding its own (always-present) subagent lane.
  * All state is derived upstream by `deriveFleet`; this component only renders.
  */
-export function Fleet({ lanes }: { lanes: readonly FleetLane[] }): JSX.Element {
+export function Fleet({
+  lanes,
+  onOpenItem,
+}: {
+  lanes: readonly FleetLane[];
+  onOpenItem?: (workItemId: string, projectPath: string) => void;
+}): JSX.Element {
   if (lanes.length === 0) {
     return (
       <p
@@ -78,6 +84,23 @@ export function Fleet({ lanes }: { lanes: readonly FleetLane[] }): JSX.Element {
           key={lane.workItemId}
           data-testid="fleet-workitem"
           data-workitem={lane.workItemId}
+          role={onOpenItem !== undefined ? 'button' : undefined}
+          tabIndex={onOpenItem !== undefined ? 0 : undefined}
+          onClick={
+            onOpenItem !== undefined
+              ? () => onOpenItem(lane.workItemId, lane.projectPath)
+              : undefined
+          }
+          onKeyDown={
+            onOpenItem !== undefined
+              ? (event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    onOpenItem(lane.workItemId, lane.projectPath);
+                  }
+                }
+              : undefined
+          }
           className="flex flex-col gap-2 rounded-lg border border-border bg-background p-3"
         >
           <span className="text-xs font-medium uppercase tracking-widest text-muted-foreground">
