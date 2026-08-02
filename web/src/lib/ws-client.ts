@@ -181,7 +181,7 @@ export type TranscriptEventBody =
       readonly kind: 'permission';
       readonly requestId: string;
       readonly toolName: string;
-      readonly decision: 'allow' | 'deny';
+      readonly decision: 'allow' | 'deny' | 'allow-always';
     };
 
 /**
@@ -409,7 +409,7 @@ export interface WsClient {
   readonly sendPermissionDecision: (
     sessionId: string,
     requestId: string,
-    decision: 'allow' | 'deny',
+    decision: 'allow' | 'deny' | 'allow-always',
   ) => void;
   /** Tear down: cancels reconnects, closes the socket, drops subscribers. */
   readonly close: () => void;
@@ -1043,7 +1043,7 @@ function parseTranscriptEvent(entry: unknown): TranscriptEvent | null {
     const { requestId, toolName, decision } = record;
     if (typeof requestId !== 'string' || requestId.length === 0) return null;
     if (typeof toolName !== 'string') return null;
-    if (decision !== 'allow' && decision !== 'deny') return null;
+    if (decision !== 'allow' && decision !== 'deny' && decision !== 'allow-always') return null;
     return Object.freeze<TranscriptEvent>({
       kind: 'permission',
       requestId,
@@ -1760,7 +1760,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
   function sendPermissionDecision(
     sessionId: string,
     requestId: string,
-    decision: 'allow' | 'deny',
+    decision: 'allow' | 'deny' | 'allow-always',
   ): void {
     sendFrame({ type: 'permission-decision', sessionId, requestId, decision });
   }

@@ -1,11 +1,18 @@
 // Unit tests — `createInputStream` in isolation. NEVER imports the real
 // `@anthropic-ai/claude-agent-sdk`; the queue logic is pure and structural.
+// EXCEPTION: the AC5 live probe at the bottom of this file imports `defaultQuery`
+// (the real-SDK adapter) but is skipped unless DEVOS_LIVE_SDK=1 — see live-sdk-smoke.test.ts
+// for the established pattern this mirrors.
 
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   buildSessionOptions,
   createInputStream,
   createPermissionBroker,
+  defaultQuery,
   MAX_PENDING_INPUTS,
   MAX_PENDING_PERMISSIONS,
 } from './session-engine.js';
@@ -198,6 +205,96 @@ describe('createPermissionBroker', () => {
   });
 });
 
+describe('createPermissionBroker — allow-always (AC1/AC2/AC3)', () => {
+  it('AC1: resolve(requestId, "allow-always") resolves to an allow carrying an addRules updatedPermissions for that tool, no ruleContent', async () => {
+    const broker = createPermissionBroker();
+    const controller = new AbortController();
+    const promise = broker.canUseTool(
+      'Bash',
+      { command: 'ls' },
+      { requestId: 'req-always', signal: controller.signal } as never,
+    );
+
+    broker.resolve('req-always', 'allow-always');
+    const result = await promise;
+
+    expect(result).toEqual<PermissionResult>({
+      behavior: 'allow',
+      updatedPermissions: [
+        { type: 'addRules', rules: [{ toolName: 'Bash' }], behavior: 'allow', destination: 'session' },
+      ],
+    });
+    const withRules = result as { updatedPermissions: Array<{ rules: Array<Record<string, unknown>> }> };
+    expect(withRules.updatedPermissions[0]?.rules[0]).not.toHaveProperty('ruleContent');
+    expect(result).not.toHaveProperty('permissionMode');
+  });
+
+  it('AC2 (regression): resolve(requestId, "allow") still resolves to {behavior:"allow"} with no updatedPermissions', async () => {
+    const broker = createPermissionBroker();
+    const controller = new AbortController();
+    const promise = broker.canUseTool(
+      'Bash',
+      {},
+      { requestId: 'req-allow-regress', signal: controller.signal } as never,
+    );
+
+    broker.resolve('req-allow-regress', 'allow');
+    const result = await promise;
+
+    expect(result).toEqual<PermissionResult>({ behavior: 'allow' });
+    expect(result).not.toHaveProperty('updatedPermissions');
+  });
+
+  it('AC2 (regression): resolve(requestId, "deny") still resolves to {behavior:"deny", message:"Denied by operator"}', async () => {
+    const broker = createPermissionBroker();
+    const controller = new AbortController();
+    const promise = broker.canUseTool(
+      'Bash',
+      {},
+      { requestId: 'req-deny-regress', signal: controller.signal } as never,
+    );
+
+    broker.resolve('req-deny-regress', 'deny');
+    const result = await promise;
+
+    expect(result).toEqual<PermissionResult>({ behavior: 'deny', message: 'Denied by operator' });
+  });
+
+  it('AC3: the always-allow resolve result carries no permissionMode key', async () => {
+    const broker = createPermissionBroker();
+    const controller = new AbortController();
+    const promise = broker.canUseTool(
+      'Bash',
+      {},
+      { requestId: 'req-no-mode', signal: controller.signal } as never,
+    );
+
+    broker.resolve('req-no-mode', 'allow-always');
+    const result = await promise;
+
+    expect('permissionMode' in (result ?? {})).toBe(false);
+  });
+
+  it('prune/cap: a second resolve() for an already-resolved (pruned) requestId is a no-op', async () => {
+    const broker = createPermissionBroker();
+    const controller = new AbortController();
+    const promise = broker.canUseTool(
+      'Bash',
+      {},
+      { requestId: 'req-prune', signal: controller.signal } as never,
+    );
+
+    broker.resolve('req-prune', 'allow-always');
+    const result = await promise;
+    expect(result?.behavior).toBe('allow');
+
+    // The requestId was pruned on first resolve — a repeat call (e.g. a second tab's
+    // click) must not throw and must not settle anything new.
+    expect(() => broker.resolve('req-prune', 'deny')).not.toThrow();
+    expect(() => broker.denyAll()).not.toThrow();
+  });
+});
+
 describe('buildSessionOptions — AC3 no-bypass regression', () => {
   it('returns Options with a canUseTool function and NO bypass permissionMode', () => {
     const broker = createPermissionBroker();
@@ -226,4 +323,49 @@ describe('buildSessionOptions — AC2a model/effort pass-through', () => {
     expect(options.systemPrompt).toBeDefined();
     expect(typeof options.canUseTool).toBe('function');
   });
+});
+
+// AC5 — LIVE Agent-SDK probe for allow-always (opt-in, human-accepted). Mirrors
+// server/test/integration/live-sdk-smoke.test.ts: skipped unless DEVOS_LIVE_SDK=1, so
+// it NEVER runs in CI and never calls the live SDK by default. Run it once by hand:
+//
+//   DEVOS_LIVE_SDK=1 npx vitest run server/src/session/session-engine.test.ts
+const LIVE = process.env.DEVOS_LIVE_SDK === '1';
+
+describe.skipIf(!LIVE)('live Agent-SDK "allow-always" (AC5)', () => {
+  it('answering the first permission request with "allow-always" auto-approves a repeated same-tool call without a second prompt', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'devos-live-allow-always-'));
+    try {
+      const session = defaultQuery({
+        cwd,
+        role: 'builder',
+        model: 'claude-opus-5[1m]',
+        effort: 'medium',
+        prompt: 'Run the shell command `echo hello` twice in a row using the Bash tool, then stop.',
+      });
+
+      const permissionRequestIds: string[] = [];
+      session.onPermissionRequest((req) => {
+        permissionRequestIds.push(req.requestId);
+        const decision = permissionRequestIds.length === 1 ? 'allow-always' : 'allow';
+        session.resolvePermission(req.requestId, decision);
+      });
+
+      const deadline = Date.now() + 90_000;
+      for await (const message of session) {
+        if (message.type === 'result') break;
+        if (Date.now() > deadline) break;
+      }
+
+      try {
+        await session.interrupt();
+      } catch {
+        // session already ended — nothing to interrupt
+      }
+
+      expect(permissionRequestIds).toHaveLength(1);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  }, 120_000);
 });

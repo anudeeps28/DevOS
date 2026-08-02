@@ -14,6 +14,7 @@ import {
   type CanUseTool,
   type Options,
   type PermissionResult,
+  type PermissionUpdate,
   type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
 import type { Role } from './roles.js';
@@ -142,7 +143,7 @@ export interface EnginePermissionRequest {
   readonly input: string;
 }
 
-export type PermissionDecision = 'allow' | 'deny';
+export type PermissionDecision = 'allow' | 'deny' | 'allow-always';
 
 /**
  * Bound on the un-resolved permission queue: a compromised/misbehaving session could
@@ -164,7 +165,7 @@ export interface PermissionBroker {
  * pattern: `canUseTool` parks a resolver per requestId, `resolve` looks it up and
  * settles it, `denyAll` fails closed on teardown. */
 export function createPermissionBroker(): PermissionBroker {
-  const pending = new Map<string, (result: PermissionResult) => void>();
+  const pending = new Map<string, { resolve: (result: PermissionResult) => void; toolName: string }>();
   let listener: ((req: EnginePermissionRequest) => void) | null = null;
 
   const canUseTool: CanUseTool = (toolName, input, opts) =>
@@ -173,14 +174,14 @@ export function createPermissionBroker(): PermissionBroker {
         resolve({ behavior: 'deny', message: 'permission queue full' });
         return;
       }
-      pending.set(opts.requestId, resolve);
+      pending.set(opts.requestId, { resolve, toolName });
       opts.signal?.addEventListener(
         'abort',
         () => {
           const r = pending.get(opts.requestId);
           if (r !== undefined) {
             pending.delete(opts.requestId);
-            r({ behavior: 'deny', message: 'aborted' });
+            r.resolve({ behavior: 'deny', message: 'aborted' });
           }
         },
         // Auto-remove after firing so a fired abort handler doesn't linger on the signal.
@@ -204,15 +205,27 @@ export function createPermissionBroker(): PermissionBroker {
       const r = pending.get(requestId);
       if (r === undefined) return;
       pending.delete(requestId);
-      r(
-        decision === 'allow'
-          ? { behavior: 'allow' }
-          : { behavior: 'deny', message: 'Denied by operator' },
-      );
+      if (decision === 'deny') {
+        r.resolve({ behavior: 'deny', message: 'Denied by operator' });
+        return;
+      }
+      if (decision === 'allow-always') {
+        const updatedPermissions: PermissionUpdate[] = [
+          {
+            type: 'addRules',
+            rules: [{ toolName: r.toolName }],
+            behavior: 'allow',
+            destination: 'session',
+          },
+        ];
+        r.resolve({ behavior: 'allow', updatedPermissions });
+        return;
+      }
+      r.resolve({ behavior: 'allow' });
     },
     denyAll: (): void => {
       for (const r of pending.values()) {
-        r({ behavior: 'deny', message: 'session ended' });
+        r.resolve({ behavior: 'deny', message: 'session ended' });
       }
       pending.clear();
     },

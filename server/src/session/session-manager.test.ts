@@ -766,6 +766,58 @@ describe('SessionManager permission relay', () => {
     fake.finish();
     await mgr.stopAll();
   });
+
+  it('AC4: resolvePermission with "allow-always" calls through to the engine and emits a permission audit event carrying that decision', async () => {
+    const store = freshStore();
+    const fake = makeSession();
+    const mgr = createSessionManager({ store, query: () => fake.session });
+    const received: TranscriptEvent[] = [];
+    mgr.onTranscript((_path, _id, events) => received.push(...events));
+
+    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'builder' });
+    fake.emitPermissionRequest({
+      requestId: 'req-always',
+      toolUseId: 'tu-always',
+      toolName: 'Bash',
+      title: null,
+      input: '{}',
+    });
+
+    mgr.resolvePermission(snap.id, 'req-always', 'allow-always');
+
+    expect(fake.resolvePermissionCalls()).toEqual([{ requestId: 'req-always', decision: 'allow-always' }]);
+    const auditEvent = received.find((e) => e.kind === 'permission');
+    expect(auditEvent).toMatchObject({
+      kind: 'permission',
+      requestId: 'req-always',
+      toolName: 'Bash',
+      decision: 'allow-always',
+      sessionId: snap.id,
+    });
+    expect(Object.isFrozen(auditEvent)).toBe(true);
+
+    fake.finish();
+    await mgr.stopAll();
+  });
+
+  it('AC4 (regression): resolvePermission with "allow-always" for an unknown/stale requestId is an idempotent no-op (no phantom audit)', async () => {
+    const store = freshStore();
+    const fake = makeSession();
+    const mgr = createSessionManager({ store, query: () => fake.session });
+    const received: TranscriptEvent[] = [];
+    mgr.onTranscript((_path, _id, events) => received.push(...events));
+
+    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'builder' });
+    // No request was ever raised for 'ghost-req-always' — a forged/stale decision must
+    // NOT reach the engine and must NOT inject a phantom permission audit event.
+    mgr.resolvePermission(snap.id, 'ghost-req-always', 'allow-always');
+
+    expect(fake.resolvePermissionCalls()).toEqual([]);
+    expect(received.some((e) => e.kind === 'permission')).toBe(false);
+
+    fake.finish();
+    await mgr.stopAll();
+  });
 });
 
 describe('SessionManager cost usage', () => {

@@ -153,6 +153,33 @@ describe('NeedsYouInbox', () => {
     expect(onPermissionDecision).toHaveBeenCalledWith('s1', 'req9', 'deny');
   });
 
+  it('calls onPermissionDecision with "allow-always" when the Always allow button is clicked', () => {
+    const onPermissionDecision = vi.fn();
+    const permission: PermissionRequest = {
+      path: '/abs/repo',
+      sessionId: 's1',
+      requestId: 'req9',
+      toolUseId: 'tu-9',
+      toolName: 'Write',
+      title: 'Write to config.json',
+      input: '{"file":"config.json"}',
+    };
+    render(
+      <NeedsYouInbox
+        bridgeStates={[]}
+        onApprove={() => {}}
+        permissions={[permission]}
+        onPermissionDecision={onPermissionDecision}
+      />,
+    );
+
+    const alwaysButton = screen.getByTestId('needs-you-permission-always-req9');
+    expect(alwaysButton).toHaveTextContent('Always allow');
+    fireEvent.click(alwaysButton);
+
+    expect(onPermissionDecision).toHaveBeenCalledWith('s1', 'req9', 'allow-always');
+  });
+
   it('does not show the empty-state message when permissions are present but the inbox is empty', () => {
     const permission: PermissionRequest = {
       path: '/abs/repo',

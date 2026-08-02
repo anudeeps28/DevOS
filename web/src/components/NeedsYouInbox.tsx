@@ -30,7 +30,11 @@ export function NeedsYouInbox({
   bridgeStates: readonly BridgeState[];
   onApprove: (path: string) => void;
   permissions?: readonly PermissionRequest[];
-  onPermissionDecision?: (sessionId: string, requestId: string, decision: 'allow' | 'deny') => void;
+  onPermissionDecision?: (
+    sessionId: string,
+    requestId: string,
+    decision: 'allow' | 'deny' | 'allow-always',
+  ) => void;
   foreignItems?: readonly ForeignNeedsYou[];
 }): JSX.Element {
   const inboxItems = bridgeStates.flatMap((state) => state.inbox.map((item) => ({ item, path: state.path })));
@@ -85,6 +89,14 @@ export function NeedsYouInbox({
                   className="rounded-md border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-accent"
                 >
                   Deny
+                </button>
+                <button
+                  type="button"
+                  data-testid={`needs-you-permission-always-${request.requestId}`}
+                  onClick={() => onPermissionDecision(request.sessionId, request.requestId, 'allow-always')}
+                  className="rounded-md border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-accent"
+                >
+                  Always allow
                 </button>
               </div>
             </li>

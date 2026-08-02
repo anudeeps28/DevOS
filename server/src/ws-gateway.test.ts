@@ -840,6 +840,41 @@ describe('ws-gateway permission routing', () => {
     await settle();
     expect(client.permissionRequestFrames()).toEqual([]);
   });
+
+  it('routes a permission-decision with decision "allow-always" for a pinned session to resolvePermission(id, requestId, "allow-always")', async () => {
+    const harness = await startGateway({
+      pinnedPaths: [PROJECT_PATH],
+      sessions: { [SESSION_ID]: liveSnapshot(SESSION_ID, PROJECT_PATH) },
+    });
+    const client = await openClient(harness.url);
+
+    client.send({
+      type: 'permission-decision',
+      sessionId: SESSION_ID,
+      requestId: 'req-1',
+      decision: 'allow-always',
+    });
+
+    await settle();
+    expect(harness.permissionCalls()).toEqual([
+      { sessionId: SESSION_ID, requestId: 'req-1', decision: 'allow-always' },
+    ]);
+  });
+
+  it('is a no-op for "allow-always" on an unknown/unpinned session (fails closed)', async () => {
+    const harness = await startGateway({ pinnedPaths: [] }); // no live sessions, nothing pinned
+    const client = await openClient(harness.url);
+
+    client.send({
+      type: 'permission-decision',
+      sessionId: 'no-such-session',
+      requestId: 'req-1',
+      decision: 'allow-always',
+    });
+
+    await settle();
+    expect(harness.permissionCalls()).toEqual([]);
+  });
 });
 
 describe('ws-gateway session-state broadcast', () => {
