@@ -23,7 +23,7 @@ function PermissionCard({
   onDecide,
 }: {
   request: PermissionRequest;
-  onDecide: (decision: 'allow' | 'deny') => void;
+  onDecide: (decision: 'allow' | 'deny' | 'allow-always') => void;
 }): JSX.Element {
   return (
     <div
@@ -52,6 +52,14 @@ function PermissionCard({
           className="rounded-md border border-border px-3 py-1 text-xs font-medium text-muted-foreground hover:text-foreground"
         >
           Deny
+        </button>
+        <button
+          data-testid={`permission-always-${request.requestId}`}
+          type="button"
+          onClick={() => onDecide('allow-always')}
+          className="rounded-md border border-border px-3 py-1 text-xs font-medium text-muted-foreground hover:text-foreground"
+        >
+          Always allow
         </button>
       </div>
     </div>
@@ -228,7 +236,11 @@ export function TeamRoom({
   sendSessionInput: (sessionId: string, text: string) => void;
   interruptSession: (sessionId: string) => void;
   pendingPermissions?: Record<string, readonly PermissionRequest[]>;
-  resolvePermission?: (sessionId: string, requestId: string, decision: 'allow' | 'deny') => void;
+  resolvePermission?: (
+    sessionId: string,
+    requestId: string,
+    decision: 'allow' | 'deny' | 'allow-always',
+  ) => void;
   workItemSessions?: Record<string, readonly WorkItemSessionAnchor[]>;
   requestWorkItemSessions?: (path: string, workItemId: string) => void;
   connected?: boolean;

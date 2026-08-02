@@ -307,7 +307,7 @@ export type TranscriptEventBody =
       readonly kind: 'permission';
       readonly requestId: string;
       readonly toolName: string;
-      readonly decision: 'allow' | 'deny';
+      readonly decision: 'allow' | 'deny' | 'allow-always';
     };
 
 /** A transcript event body stamped with its session identity + ordering. */
@@ -361,7 +361,7 @@ export interface PermissionDecisionMessage {
   readonly type: 'permission-decision';
   readonly sessionId: string;
   readonly requestId: string;
-  readonly decision: 'allow' | 'deny';
+  readonly decision: 'allow' | 'deny' | 'allow-always';
 }
 
 /** Inbound: start (or resume) a Bridge run for a pinned project path. */
@@ -666,7 +666,7 @@ export function parseInboundMessage(data: unknown): InboundMessage | null {
   }
 
   // `permission-decision` carries a session id (like session-interrupt) plus a
-  // request id and a decision that must be exactly 'allow' or 'deny'.
+  // request id and a decision that must be exactly 'allow', 'deny', or 'allow-always'.
   if (type === 'permission-decision') {
     const { sessionId, requestId, decision } = frame;
     if (
@@ -683,7 +683,7 @@ export function parseInboundMessage(data: unknown): InboundMessage | null {
     ) {
       return null;
     }
-    if (decision !== 'allow' && decision !== 'deny') {
+    if (decision !== 'allow' && decision !== 'deny' && decision !== 'allow-always') {
       return null;
     }
     return Object.freeze<PermissionDecisionMessage>({

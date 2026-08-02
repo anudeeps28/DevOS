@@ -569,6 +569,38 @@ describe('parseInboundMessage', () => {
         ),
       ).toBeNull();
     });
+
+    it('accepts a well-formed permission-decision with decision "allow-always", frozen', () => {
+      const result = parseInboundMessage(
+        JSON.stringify({
+          type: 'permission-decision',
+          sessionId: 'sess-1',
+          requestId: 'req-1',
+          decision: 'allow-always',
+        }),
+      );
+
+      expect(result).toEqual<PermissionDecisionMessage>({
+        type: 'permission-decision',
+        sessionId: 'sess-1',
+        requestId: 'req-1',
+        decision: 'allow-always',
+      });
+      expect(Object.isFrozen(result)).toBe(true);
+    });
+
+    it('rejects decision "always" (not the actual allow-always literal)', () => {
+      expect(
+        parseInboundMessage(
+          JSON.stringify({
+            type: 'permission-decision',
+            sessionId: 'sess-1',
+            requestId: 'req-1',
+            decision: 'always',
+          }),
+        ),
+      ).toBeNull();
+    });
   });
 
   describe('session-personas frames', () => {

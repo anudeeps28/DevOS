@@ -17,7 +17,11 @@ function renderRoom(
     sendSessionInput?: (sessionId: string, text: string) => void;
     interruptSession?: (sessionId: string) => void;
     pendingPermissions?: Record<string, readonly PermissionRequest[]>;
-    resolvePermission?: (sessionId: string, requestId: string, decision: 'allow' | 'deny') => void;
+    resolvePermission?: (
+      sessionId: string,
+      requestId: string,
+      decision: 'allow' | 'deny' | 'allow-always',
+    ) => void;
     workItemSessions?: Record<string, readonly WorkItemSessionAnchor[]>;
   } = {},
 ): void {
@@ -277,6 +281,30 @@ describe('TeamRoom', () => {
     fireEvent.click(screen.getByTestId('permission-deny-req1'));
 
     expect(resolvePermission).toHaveBeenCalledWith('sess-1', 'req1', 'deny');
+  });
+
+  it('clicking Always allow on a permission card resolves it with "allow-always"', () => {
+    const resolvePermission = vi.fn();
+    const request: PermissionRequest = {
+      path: '/abs/one',
+      sessionId: 'sess-1',
+      requestId: 'req1',
+      toolUseId: 'tu-1',
+      toolName: 'Bash',
+      title: 'Run shell command',
+      input: '{"command":"ls"}',
+    };
+    renderRoom(
+      { '/abs/one': [runningSession('sess-1')] },
+      {},
+      { pendingPermissions: { 'sess-1': [request] }, resolvePermission },
+    );
+
+    const alwaysButton = screen.getByTestId('permission-always-req1');
+    expect(alwaysButton).toHaveTextContent('Always allow');
+    fireEvent.click(alwaysButton);
+
+    expect(resolvePermission).toHaveBeenCalledWith('sess-1', 'req1', 'allow-always');
   });
 
   it('renders no permission card when pendingPermissions is empty', () => {

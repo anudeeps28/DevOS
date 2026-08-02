@@ -124,7 +124,7 @@ export interface UseProjectsResult {
   readonly resolvePermission: (
     sessionId: string,
     requestId: string,
-    decision: 'allow' | 'deny',
+    decision: 'allow' | 'deny' | 'allow-always',
   ) => void;
   /** Foreign-session needs-you signals, deduped by session id; cleared items are removed. */
   readonly foreignNeedsYou: readonly ForeignNeedsYou[];
@@ -401,7 +401,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
   function resolvePermission(
     sessionId: string,
     requestId: string,
-    decision: 'allow' | 'deny',
+    decision: 'allow' | 'deny' | 'allow-always',
   ): void {
     clientRef.current?.sendPermissionDecision(sessionId, requestId, decision);
     setPendingPermissions((prev) => {

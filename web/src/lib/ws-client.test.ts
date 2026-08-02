@@ -1386,6 +1386,81 @@ describe('ws-client session-transcript frames', () => {
       JSON.stringify({ type: 'bridge-interrupt', path: '/abs/repo', reason: 'stop please' }),
     ]);
   });
+
+  it('sendPermissionDecision() sends a permission-decision frame with "allow-always" once the socket is OPEN', () => {
+    const { client, socket } = makeBridgeStateClient();
+
+    client.sendPermissionDecision('sess-1', 'req9', 'allow-always');
+
+    expect(socket.sent).toEqual([
+      JSON.stringify({
+        type: 'permission-decision',
+        sessionId: 'sess-1',
+        requestId: 'req9',
+        decision: 'allow-always',
+      }),
+    ]);
+  });
+
+  it('sendPermissionDecision() sends "allow" and "deny" frames unchanged', () => {
+    const { client, socket } = makeBridgeStateClient();
+
+    client.sendPermissionDecision('sess-1', 'req9', 'allow');
+    client.sendPermissionDecision('sess-1', 'req9', 'deny');
+
+    expect(socket.sent).toEqual([
+      JSON.stringify({ type: 'permission-decision', sessionId: 'sess-1', requestId: 'req9', decision: 'allow' }),
+      JSON.stringify({ type: 'permission-decision', sessionId: 'sess-1', requestId: 'req9', decision: 'deny' }),
+    ]);
+  });
+
+  it('drops (and warns) when sendPermissionDecision() is called before the socket is OPEN', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const client = createWsClient({
+      url: 'ws://localhost/ws',
+      createWebSocket: (url) => new FakeSocket(url),
+    });
+    const socket = FakeSocket.instances[0]!;
+    // NOTE: socket is still CONNECTING (readyState 0) — never opened.
+
+    client.sendPermissionDecision('sess-1', 'req9', 'allow-always');
+
+    expect(socket.sent).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('parses a "permission" transcript event carrying decision "allow-always"', () => {
+    const { received, socket } = makeTranscriptClient();
+
+    socket.message(
+      transcriptFrame([
+        stamped({ kind: 'permission', requestId: 'req9', toolName: 'Write', decision: 'allow-always' }, 0),
+      ]),
+    );
+
+    expect(received).toHaveLength(1);
+    expect(received[0]!.events[0]).toMatchObject({
+      kind: 'permission',
+      requestId: 'req9',
+      toolName: 'Write',
+      decision: 'allow-always',
+    });
+    expect(Object.isFrozen(received[0]!.events[0])).toBe(true);
+  });
+
+  it('drops a "permission" transcript event carrying an unknown decision string', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { received, socket } = makeTranscriptClient();
+
+    socket.message(
+      transcriptFrame([
+        stamped({ kind: 'permission', requestId: 'req9', toolName: 'Write', decision: 'maybe-later' }, 0),
+      ]),
+    );
+
+    expect(received).toEqual([]);
+    expect(warn).toHaveBeenCalled();
+  });
 });
 
 /** A well-formed foreign-session needs-you frame body. */
