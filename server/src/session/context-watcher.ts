@@ -44,14 +44,29 @@ function clampNonNegativeFinite(value: number): number {
   return value;
 }
 
-/** Resolves the context window size for a model, falling back to the default. */
+/**
+ * Whether this model's context window is known from real information — an exact-id override or
+ * the `[Nm]` marker — rather than the silent 200k default. Used to warn once when a session
+ * would otherwise recycle against a guessed window (see `effectiveWindow`).
+ */
+export function isKnownContextWindow(model: string): boolean {
+  if (MODEL_CONTEXT_WINDOWS[model] !== undefined) return true;
+  const match = MILLION_CONTEXT_HINT.exec(model);
+  if (match === null) return false;
+  const millions = Number(match[1]);
+  return Number.isFinite(millions) && millions > 0 && millions <= MAX_MILLION_HINT;
+}
+
+/**
+ * Resolves the context window size for a model id, falling back to the default.
+ * Precedence: exact-id override → `[Nm]` marker (e.g. `claude-opus-5[1m]` → N million) → default.
+ * This is only a fallback for sessions with no roster-declared window — see `effectiveWindow`.
+ */
 export function windowFor(model: string): number {
   const override = MODEL_CONTEXT_WINDOWS[model];
   if (override !== undefined) {
     return override;
   }
-  // The `[Nm]` family rule: any model id ending in a bracketed `[<N>m]` hint (e.g.
-  // `claude-opus-4-8[1m]`, `claude-opus-5[1m]`) advertises an N-million-token window.
   const match = MILLION_CONTEXT_HINT.exec(model);
   if (match !== null) {
     const millions = Number(match[1]);
@@ -62,21 +77,32 @@ export function windowFor(model: string): number {
   return DEFAULT_CONTEXT_WINDOW;
 }
 
-/** Computes context window occupancy for a settled token total against a model's window. */
-export function contextOccupancy(totalTokens: number, model: string): ContextOccupancy {
+/**
+ * The effective context window for a session. A roster-declared window (harness-roles.json
+ * `contextWindow`) is authoritative and wins; otherwise fall back to `windowFor(model)`. A
+ * declared window must be a positive finite number to count — an invalid one is ignored.
+ */
+export function effectiveWindow(declaredWindow: number | null | undefined, model: string): number {
+  if (declaredWindow != null && Number.isFinite(declaredWindow) && declaredWindow > 0) {
+    return declaredWindow;
+  }
+  return windowFor(model);
+}
+
+/** Computes context window occupancy for a settled token total against an explicit window size. */
+export function contextOccupancy(totalTokens: number, windowTokens: number): ContextOccupancy {
   const occupiedTokens = clampNonNegativeFinite(totalTokens);
-  const windowTokens = windowFor(model);
   const fraction = occupiedTokens / windowTokens;
   return { occupiedTokens, windowTokens, fraction };
 }
 
-/** True when the occupied fraction of the context window is at or above the threshold. */
+/** True when the occupied fraction of the given window is at or above the threshold. */
 export function crossesThreshold(
   totalTokens: number,
-  model: string,
+  windowTokens: number,
   threshold: number = CONTEXT_THRESHOLD,
 ): boolean {
-  const { fraction } = contextOccupancy(totalTokens, model);
+  const { fraction } = contextOccupancy(totalTokens, windowTokens);
   return fraction >= threshold;
 }
 

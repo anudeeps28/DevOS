@@ -41,6 +41,13 @@ export interface RoleDef {
   readonly agent: string;
   readonly model: string;
   readonly effort: Effort;
+  /**
+   * The model's context window in tokens (optional, additive). Authoritative for this role's
+   * sessions — the context-recycle check sizes off it rather than guessing from the model id.
+   * Omitted or invalid (non-positive / non-finite) → the reader drops it and the consumer falls
+   * back to deriving the window from the model.
+   */
+  readonly contextWindow?: number;
   readonly producesArtifacts: readonly string[];
 }
 
@@ -87,7 +94,8 @@ function isEffort(raw: unknown): raw is Effort {
 function parseRoleDef(raw: unknown): RoleDef | null {
   if (!isPlainObject(raw)) return null;
 
-  const { displayName, phases, skills, agent, model, effort, producesArtifacts } = raw;
+  const { displayName, phases, skills, agent, model, effort, contextWindow, producesArtifacts } =
+    raw;
 
   if (typeof displayName !== 'string') return null;
   if (!isPhaseArray(phases)) return null;
@@ -97,6 +105,11 @@ function parseRoleDef(raw: unknown): RoleDef | null {
   if (!isEffort(effort)) return null;
   if (!isStringArray(producesArtifacts)) return null;
 
+  // `contextWindow` is optional and additive: keep it only when it is a positive finite number,
+  // otherwise drop it (drop-don't-throw) so an older or malformed roster still parses.
+  const hasValidWindow =
+    typeof contextWindow === 'number' && Number.isFinite(contextWindow) && contextWindow > 0;
+
   return Object.freeze<RoleDef>({
     displayName,
     phases: Object.freeze(phases.map((phase) => Object.freeze({ ...phase }))),
@@ -104,6 +117,7 @@ function parseRoleDef(raw: unknown): RoleDef | null {
     agent,
     model,
     effort,
+    ...(hasValidWindow ? { contextWindow } : {}),
     producesArtifacts: Object.freeze([...producesArtifacts]),
   });
 }

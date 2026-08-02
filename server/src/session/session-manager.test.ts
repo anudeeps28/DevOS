@@ -930,6 +930,36 @@ describe('SessionManager context usage', () => {
     await mgr.stopAll();
   });
 
+  it('sizes off the roster-declared contextWindow — authoritative even with no init model', async () => {
+    const store = freshStore();
+    const fake = makeSession();
+    const mgr = createSessionManager({ store, query: () => fake.session });
+    const signals: Parameters<Parameters<typeof mgr.onContextUsage>[0]>[0][] = [];
+    mgr.onContextUsage((signal) => signals.push(signal));
+
+    // Spawn with a declared 1M window but the placeholder model and NO system/init model —
+    // the declared window alone must drive the recycle sizing.
+    const snap = await mgr.spawn({
+      projectPath: PROJECT,
+      role: 'builder',
+      contextWindow: 1_000_000,
+    });
+
+    fake.emit(resultMessage(0.01, 160_000, 20));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(signals).toHaveLength(0);
+
+    fake.emit(resultMessage(0.02, 800_000, 20));
+    await waitUntil(() => signals.length >= 1);
+
+    expect(signals).toHaveLength(1);
+    expect(signals[0]).toMatchObject({ sessionId: snap.id, windowTokens: 1_000_000 });
+    expect(signals[0]?.fraction).toBeGreaterThanOrEqual(0.8);
+
+    fake.finish();
+    await mgr.stopAll();
+  });
+
   it('endAtBoundary calls the engine end(); an unknown id is a guarded no-op', async () => {
     const store = freshStore();
     const fake = makeSession();

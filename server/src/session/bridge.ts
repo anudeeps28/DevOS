@@ -238,6 +238,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
         currentStage: stage,
         ...(run.workItemId !== undefined ? { workItemId: run.workItemId } : {}),
         ...(roleDef !== undefined ? { model: roleDef.model, effort: roleDef.effort } : {}),
+        ...(roleDef?.contextWindow !== undefined ? { contextWindow: roleDef.contextWindow } : {}),
         ...(opts?.prompt !== undefined ? { prompt: opts.prompt } : {}),
       });
       run.currentSessionId = snap.id;
