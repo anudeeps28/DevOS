@@ -274,6 +274,33 @@ path` — the first surface that actually starts an agent, so its gate is strict
 - **Role is allowlist-validated** (validated at the boundary and re-checked at dispatch against the
   roster). **Concurrency** is bounded by the session-spawn semaphore (§5).
 
+### Agent action approval (realized — PR #17)
+
+The "`canUseTool` permission cards" row above is realized as a **permission broker** that bridges an owned
+headless session's Agent SDK `canUseTool` callback to the browser as an allow/deny card. It gates
+individual *tool calls* (the shell/file actions an agent takes), complementary to the connection- and
+spawn-level gates above:
+
+- **The broker parks the decision.** `createPermissionBroker` (behind the sole-SDK-import `EngineSession`
+  seam) holds a Promise per `requestId` until the human answers — the SDK turn blocks on it. Outstanding
+  requests are bounded at **`MAX_PENDING_PERMISSIONS = 256`** and the broker **fails closed** — over-cap
+  and session abort each resolve to `deny`, iteration teardown `denyAll`s the rest — rather than hanging a
+  turn or silently allowing.
+- **No `permissionMode` — this is the brake.** `buildSessionOptions` sets `canUseTool` and deliberately
+  sets **no `permissionMode`**; the SDK default is **not** auto-approve. That is what makes the row's
+  "runaway-agent brake" true in code — every risky tool call reaches a human by default, not just in
+  intent.
+- **Fail-closed up-channel.** `permission-request` (outbound, `isPinnedPath`-gated broadcast) and
+  `permission-decision` (inbound, resolved via `get(id) → isPinnedPath`) mirror the steer/interrupt
+  up-channel (PR #16). A `permission` audit event is recorded on the transcript **in memory only, never
+  persisted** (consistent with "stores no secrets" below). Timeout policy is **indefinite block** — the
+  card pauses until answered; there is no auto-deny timer in V1.
+
+A later **session-scoped standing allow** ("always allow this tool", PR #30) extends the decision set with
+`updatedPermissions` addRules so an approved tool stops re-prompting for the rest of that session — still
+in-memory, never persisted, no `permissionMode`. Its tool-wide blast radius is documented separately
+(Todoist `6hC5jxPr79G9GHM8`).
+
 ### Data classification
 
 | Classification | Examples | At rest | In transit | Access |
