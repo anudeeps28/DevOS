@@ -142,7 +142,7 @@ export function NeedsYouInbox({
                   <>
                     {entry.item.chips.map((chip, chipIndex) => (
                       <button
-                        key={chip}
+                        key={`${chip}-${chipIndex}`}
                         type="button"
                         data-testid={`needs-you-chip-${index}-${chipIndex}`}
                         onClick={() => onAnswerQuestion(entry.path, chip)}

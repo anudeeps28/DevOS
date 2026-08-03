@@ -400,6 +400,24 @@ describe('createQuestionBroker', () => {
     broker.answer(req?.requestId as string, 'ok');
   });
 
+  it('strips control characters and caps the length of the question text', async () => {
+    const broker = createQuestionBroker();
+    const requests: Array<{ requestId: string; question: string }> = [];
+    broker.onRequest((req) => requests.push(req));
+
+    const rawQuestion = String.fromCharCode(1) + 'pick' + String.fromCharCode(27) + 'one' + 'x'.repeat(5000);
+    void invokeAskOperator(broker, { question: rawQuestion });
+    await Promise.resolve();
+
+    const req = requests[0];
+    expect(req?.question.startsWith(' pick one')).toBe(true);
+    expect(req?.question.includes(String.fromCharCode(1))).toBe(false);
+    expect(req?.question.includes(String.fromCharCode(27))).toBe(false);
+    expect((req?.question.length ?? 0)).toBeLessThanOrEqual(4096);
+
+    broker.answer(req?.requestId as string, 'ok');
+  });
+
   it('over-cap: the next ask_operator call resolves immediately with an error result (queue full)', async () => {
     const broker = createQuestionBroker();
     const requests: Array<{ requestId: string }> = [];

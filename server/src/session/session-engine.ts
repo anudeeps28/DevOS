@@ -258,6 +258,8 @@ export const MAX_PENDING_QUESTIONS = 256;
 /** Cap on the number of quick-reply chips carried by one question, and the length of each. */
 const MAX_CHIPS = 8;
 const MAX_CHIP_LENGTH = 512;
+/** Cap on the agent-supplied question text (mirrors the chip-length discipline). */
+const MAX_QUESTION_LENGTH = 4096;
 
 // Built from char codes (not a regex literal) so no control-char escape appears in source.
 const CONTROL_CHAR_CLASS = '[' + String.fromCharCode(0) + '-' + String.fromCharCode(31) + String.fromCharCode(127) + ']';
@@ -267,6 +269,13 @@ const SANITIZE_REGEX = new RegExp(CONTROL_CHAR_CLASS, 'g');
 function sanitizeChips(chips: readonly string[] | undefined): readonly string[] {
   if (chips === undefined) return [];
   return chips.slice(0, MAX_CHIPS).map((chip) => truncate(chip.replace(SANITIZE_REGEX, ' '), MAX_CHIP_LENGTH));
+}
+
+/** Strip control chars and cap length on the agent-supplied question text — the same
+ * boundary hygiene applied to chips (both are agent-controlled and broadcast to every
+ * client for display in the inbox). */
+function sanitizeQuestion(question: string): string {
+  return truncate(question.replace(SANITIZE_REGEX, ' '), MAX_QUESTION_LENGTH);
 }
 
 /** One session's question broker: bridges the in-process `ask_operator` MCP tool to a
@@ -299,7 +308,7 @@ export function createQuestionBroker(): QuestionBroker {
         pending.set(requestId, { resolve });
         listener?.({
           requestId,
-          question: args.question,
+          question: sanitizeQuestion(args.question),
           chips: sanitizeChips(args.chips),
         });
       }),
