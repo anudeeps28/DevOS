@@ -229,6 +229,8 @@ interface GatewayHarness {
     readonly requestId: string;
     readonly decision: PermissionDecision;
   }[];
+  /** Every `bridge.requestChanges(path, notes)` the gateway forwarded. */
+  readonly requestChangesCalls: () => readonly { readonly path: string; readonly notes: string }[];
   readonly close: () => Promise<void>;
 }
 
@@ -355,13 +357,19 @@ async function startGateway(options: HarnessOptions = {}): Promise<GatewayHarnes
     stopAll: () => Promise.resolve(),
   });
 
+  const requestChangesCalls: { readonly path: string; readonly notes: string }[] = [];
+
   const bridge: Bridge = Object.freeze({
     start: () => {},
     approveGate: () => {},
     interrupt: () => {},
+    requestChanges: (path: string, notes: string) => {
+      requestChangesCalls.push({ path, notes });
+    },
     onState: () => () => {},
     getState: () => null,
     getInbox: () => [],
+    stopAll: () => {},
   });
 
   const costLedger: CostLedgerStore = Object.freeze({
@@ -429,6 +437,7 @@ async function startGateway(options: HarnessOptions = {}): Promise<GatewayHarnes
       }
     },
     permissionCalls: () => [...permissionCalls],
+    requestChangesCalls: () => [...requestChangesCalls],
     close: async () => {
       await gateway.close();
       await new Promise<void>((resolve) => {
@@ -747,6 +756,30 @@ describe('ws-gateway steer + interrupt routing', () => {
     await settle();
     expect(harness.steerCalls()).toEqual([]);
     expect(harness.interruptCalls()).toEqual([]);
+  });
+});
+
+describe('ws-gateway gate-request-changes routing', () => {
+  it('routes a gate-request-changes for a pinned path to bridge.requestChanges(path, sanitizedNotes)', async () => {
+    const harness = await startGateway({ pinnedPaths: [PROJECT_PATH] });
+    const client = await openClient(harness.url);
+
+    client.send({ type: 'gate-request-changes', path: PROJECT_PATH, notes: 'please fix the tests' });
+
+    await settle();
+    expect(harness.requestChangesCalls()).toEqual([
+      { path: PROJECT_PATH, notes: 'please fix the tests' },
+    ]);
+  });
+
+  it('is a no-op for an unpinned path (fails closed)', async () => {
+    const harness = await startGateway({ pinnedPaths: [] }); // PROJECT_PATH is NOT pinned
+    const client = await openClient(harness.url);
+
+    client.send({ type: 'gate-request-changes', path: PROJECT_PATH, notes: 'please fix the tests' });
+
+    await settle();
+    expect(harness.requestChangesCalls()).toEqual([]);
   });
 });
 

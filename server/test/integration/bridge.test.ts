@@ -355,37 +355,62 @@ afterEach(async () => {
 });
 
 describe('Bridge pipeline over the live WS transport', () => {
-  it('AC1 — bridge-start spawns builder only, then gate-approve spawns reviewer', async () => {
+  it('plan-gate OFF (default, no pref) — bridge-start spawns builder, ended auto-advances to reviewer with no awaiting-approval broadcast', async () => {
     const project = makeProjectDir();
     const engine = makeFakeEngine();
     const server = await startServer(makeTmpDbPath(), engine.query);
-    server.instance.registry.pin(project); // auto_advance defaults OFF
+    server.instance.registry.pin(project); // no plan_gate / auto_advance pref set
 
     const client = await connect(server.url);
-    const awaitingApproval = client.waitForBridgeState(
-      (f) => f.path === project && f.gate === 'awaiting-approval',
-      5000,
-    );
-    client.send({ type: 'bridge-start', path: project });
-    await awaitingApproval;
-
-    // Only the first pipeline role (builder) was spawned so far — the next role
-    // must NOT be auto-spawned while auto_advance is off.
-    expect(engine.calls).toHaveLength(1);
-    expect(engine.calls[0]?.cwd).toBe(project);
-    expect(engine.calls[0]?.role).toBe('builder');
-
     const reviewerSpawned = client.waitForBridgeState(
       (f) => f.path === project && f.stage === 'reviewer',
       5000,
     );
-    client.send({ type: 'gate-approve', path: project });
+    client.send({ type: 'bridge-start', path: project });
     await reviewerSpawned;
 
-    // gate-approve advanced the pipeline to the SECOND role (reviewer).
+    // The builder's clean `ended` auto-advanced straight to the reviewer — both roles
+    // were spawned without any human gate-approve.
     expect(engine.calls).toHaveLength(2);
+    expect(engine.calls[0]?.cwd).toBe(project);
+    expect(engine.calls[0]?.role).toBe('builder');
     expect(engine.calls[1]?.cwd).toBe(project);
     expect(engine.calls[1]?.role).toBe('reviewer');
+    // No awaiting-approval frame was broadcast for the builder→reviewer auto-advance.
+    expect(client.seen().some((f) => f.stage === 'builder' && f.gate === 'awaiting-approval')).toBe(false);
+  }, 15000);
+
+  it('gate-request-changes over WS reaches bridge.requestChanges without crashing the socket (no-op absent an active plan-gate pause)', async () => {
+    // LIMITATION: `createServer` does not expose an injectable phase-watcher, so this
+    // integration harness cannot drive a real plan-gate pause (`planGatePending`) —
+    // that path is covered by the unit tests in `bridge.test.ts` ("Bridge plan gate").
+    // This test only exercises the WS routing path: the message parses, reaches
+    // `bridge.requestChanges`, and — since no run is plan-gate-pending — is a safe
+    // no-op that neither spawns anything nor disrupts the pipeline already in flight.
+    const project = makeProjectDir();
+    const engine = makeFakeEngine();
+    const server = await startServer(makeTmpDbPath(), engine.query);
+    server.instance.registry.pin(project);
+
+    const client = await connect(server.url);
+    const reviewerSpawned = client.waitForBridgeState(
+      (f) => f.path === project && f.stage === 'reviewer',
+      5000,
+    );
+    client.send({ type: 'bridge-start', path: project });
+    await reviewerSpawned;
+    expect(engine.calls).toHaveLength(2);
+
+    client.send({ type: 'gate-request-changes', path: project, notes: 'please add X' });
+
+    // The socket stays healthy afterward and no additional spawn was triggered by the
+    // no-op route.
+    const finalState = client.waitForBridgeState(
+      (f) => f.path === project && f.gate === 'awaiting-approval',
+      5000,
+    );
+    await finalState;
+    expect(engine.calls).toHaveLength(2);
   }, 15000);
 
   it('reworkCount (wire) — a real emitted bridge-state frame carries reworkCount and reflects it after a rework', async () => {
@@ -404,8 +429,17 @@ describe('Bridge pipeline over the live WS transport', () => {
     const reworkFrame = await reworking;
 
     expect(reworkFrame.reworkCount).toBe(1);
-    expect(engine.calls).toHaveLength(2); // errored builder, then the reworked retry
     expect(engine.calls[1]?.role).toBe('builder');
+
+    // The reworked builder's retry ends cleanly too and (no plan_gate/auto_advance
+    // pref set) auto-advances straight to the reviewer.
+    const reviewerSpawned = client.waitForBridgeState(
+      (f) => f.path === project && f.stage === 'reviewer',
+      5000,
+    );
+    await reviewerSpawned;
+    expect(engine.calls).toHaveLength(3); // errored builder, the reworked retry, then the reviewer
+    expect(engine.calls[2]?.role).toBe('reviewer');
 
     // Every frame seen so far carries a reworkCount field.
     for (const frame of client.seen()) {
@@ -428,16 +462,19 @@ describe('Bridge pipeline over the live WS transport', () => {
     // Give the server a beat, then confirm a valid bridge-start on the pinned path
     // still works — the earlier drop must not have wedged the socket/gateway.
     const valid = client.waitForBridgeState(
-      (f) => f.path === pinned && f.gate === 'awaiting-approval',
+      (f) => f.path === pinned && f.stage === 'reviewer',
       5000,
     );
     client.send({ type: 'bridge-start', path: pinned });
     await valid;
 
-    // The foreign bridge-start never reached the engine — only the pinned one did.
-    expect(engine.calls).toHaveLength(1);
+    // The foreign bridge-start never reached the engine — only the pinned one did,
+    // and (no plan_gate/auto_advance pref set) its builder auto-advanced to reviewer.
+    expect(engine.calls).toHaveLength(2);
     expect(engine.calls[0]?.cwd).toBe(pinned);
     expect(engine.calls[0]?.role).toBe('builder');
+    expect(engine.calls[1]?.cwd).toBe(pinned);
+    expect(engine.calls[1]?.role).toBe('reviewer');
   }, 15000);
 
   it('assign work — bridge-start with a workItemId spawns the builder stamped with that work item', async () => {
@@ -447,6 +484,9 @@ describe('Bridge pipeline over the live WS transport', () => {
     server.instance.registry.pin(project);
 
     const client = await connect(server.url);
+    // No plan_gate/auto_advance pref set, so the builder auto-advances to the reviewer;
+    // the reviewer's null verdict (no evaluation.md for this work item) then defers to
+    // a human, settling at awaiting-approval.
     const bridgeStarted = client.waitForBridgeState(
       (f) => f.path === project && f.gate === 'awaiting-approval',
       5000,
@@ -461,8 +501,10 @@ describe('Bridge pipeline over the live WS transport', () => {
     const sessionFrame = await sessionStarted;
 
     expect(sessionFrame.session.workItemId).toBe('WI-assign-1');
-    expect(engine.calls).toHaveLength(1);
+    expect(engine.calls).toHaveLength(2);
     expect(engine.calls[0]?.cwd).toBe(project);
     expect(engine.calls[0]?.role).toBe('builder');
+    expect(engine.calls[1]?.cwd).toBe(project);
+    expect(engine.calls[1]?.role).toBe('reviewer');
   }, 15000);
 });

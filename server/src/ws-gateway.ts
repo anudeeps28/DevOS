@@ -899,6 +899,18 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
         return;
       }
 
+      // Gate request-changes: send a paused Bridge run back to coding for a pinned
+      // project (fails closed, mirrors gate-approve).
+      if (message.type === 'gate-request-changes') {
+        if (!isPinnedPath(message.path)) return;
+        try {
+          options.bridge.requestChanges(message.path, message.notes);
+        } catch (err) {
+          console.error('[ws] gate-request-changes failed', err);
+        }
+        return;
+      }
+
       // Bridge interrupt: pause a running Bridge run for a pinned project (fails closed).
       if (message.type === 'bridge-interrupt') {
         if (!isPinnedPath(message.path)) return;
