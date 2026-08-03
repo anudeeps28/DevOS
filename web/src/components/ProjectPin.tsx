@@ -273,7 +273,7 @@ export type ProjectPinProps = Pick<
   | 'requestLifecycleSignals'
   | 'sessions'
   | 'spawnSession'
->;
+> & { readonly onAssignWork: (path: string, workItemId: string) => void };
 
 /**
  * Project discovery + pin management. Renders three regions:
@@ -297,6 +297,7 @@ export function ProjectPin({
   requestLifecycleSignals,
   sessions,
   spawnSession,
+  onAssignWork,
 }: ProjectPinProps) {
   const [path, setPath] = useState('');
 
@@ -439,6 +440,29 @@ export function ProjectPin({
                     trackerState={trackerStates[project.path]}
                   />
                 </div>
+                {(() => {
+                  const trackerState = trackerStates[project.path];
+                  const eligible =
+                    trackerState !== undefined &&
+                    trackerState.reachable === true &&
+                    trackerState.tracker !== null &&
+                    trackerState.nextTask !== null;
+                  return (
+                    <button
+                      data-testid={`assign-work-${project.path}`}
+                      type="button"
+                      data-eligible={String(eligible)}
+                      disabled={!eligible}
+                      onClick={() => {
+                        const nextTask = trackerState?.nextTask;
+                        if (nextTask) onAssignWork(project.path, nextTask.id);
+                      }}
+                      className="rounded-md border border-border px-2 py-0.5 text-xs font-medium text-muted-foreground hover:text-foreground disabled:opacity-50"
+                    >
+                      Assign work
+                    </button>
+                  );
+                })()}
               </li>
             ))}
           </ul>

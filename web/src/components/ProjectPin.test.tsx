@@ -21,6 +21,7 @@ const requestGitState = vi.fn();
 const requestTrackerState = vi.fn();
 const requestLifecycleSignals = vi.fn();
 const spawnSession = vi.fn();
+const onAssignWork = vi.fn();
 let projects: readonly RegistryProject[] = [];
 let candidates: readonly RegistryCandidate[] = [];
 let gitStates: Record<string, GitState> = {};
@@ -45,6 +46,7 @@ function renderPin() {
       requestLifecycleSignals={requestLifecycleSignals}
       sessions={sessions}
       spawnSession={spawnSession}
+      onAssignWork={onAssignWork}
     />,
   );
 }
@@ -119,6 +121,7 @@ describe('ProjectPin', () => {
     requestTrackerState.mockReset();
     requestLifecycleSignals.mockReset();
     spawnSession.mockReset();
+    onAssignWork.mockReset();
   });
 
   afterEach(() => {
@@ -475,6 +478,84 @@ describe('ProjectPin', () => {
       fireEvent.click(screen.getByTestId('session-spawn-/abs/one'));
 
       expect(spawnSession).toHaveBeenCalledWith('/abs/one', 'builder');
+    });
+  });
+
+  describe('assign work', () => {
+    it('enables assign-work and fires onAssignWork with the next task id when eligible', () => {
+      projects = [sampleProject('/abs/one')];
+      trackerStates = { '/abs/one': sampleTrackerState('/abs/one') };
+      renderPin();
+
+      const button = screen.getByTestId('assign-work-/abs/one');
+      expect(button).toBeEnabled();
+
+      fireEvent.click(button);
+
+      expect(onAssignWork).toHaveBeenCalledTimes(1);
+      expect(onAssignWork).toHaveBeenCalledWith('/abs/one', '1');
+    });
+
+    it('disables assign-work and fires nothing when there is no next task', () => {
+      projects = [sampleProject('/abs/one')];
+      trackerStates = {
+        '/abs/one': sampleTrackerState('/abs/one', { nextTask: null }),
+      };
+      renderPin();
+
+      const button = screen.getByTestId('assign-work-/abs/one');
+      expect(button).toBeDisabled();
+
+      fireEvent.click(button);
+
+      expect(onAssignWork).not.toHaveBeenCalled();
+    });
+
+    it('disables assign-work and fires nothing when no tracker is configured', () => {
+      projects = [sampleProject('/abs/one')];
+      trackerStates = {
+        '/abs/one': sampleTrackerState('/abs/one', { tracker: null, nextTask: null }),
+      };
+      renderPin();
+
+      const button = screen.getByTestId('assign-work-/abs/one');
+      expect(button).toBeDisabled();
+
+      fireEvent.click(button);
+
+      expect(onAssignWork).not.toHaveBeenCalled();
+    });
+
+    it('disables assign-work and fires nothing when the tracker is unreachable', () => {
+      projects = [sampleProject('/abs/one')];
+      trackerStates = {
+        '/abs/one': sampleTrackerState('/abs/one', {
+          reachable: false,
+          tracker: null,
+          nextTask: null,
+        }),
+      };
+      renderPin();
+
+      const button = screen.getByTestId('assign-work-/abs/one');
+      expect(button).toBeDisabled();
+
+      fireEvent.click(button);
+
+      expect(onAssignWork).not.toHaveBeenCalled();
+    });
+
+    it('disables assign-work and fires nothing while the tracker snapshot is still loading (undefined)', () => {
+      projects = [sampleProject('/abs/one')];
+      // trackerStates intentionally empty → undefined snapshot for this path.
+      renderPin();
+
+      const button = screen.getByTestId('assign-work-/abs/one');
+      expect(button).toBeDisabled();
+
+      fireEvent.click(button);
+
+      expect(onAssignWork).not.toHaveBeenCalled();
     });
   });
 });
