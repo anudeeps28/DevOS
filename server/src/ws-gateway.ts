@@ -265,6 +265,108 @@ function sendFleetFixture(socket: WebSocket): void {
   sendFrame(socket, transcript);
 }
 
+// Deterministic canned board fixture for e2e — gated on DEVOS_E2E_BOARD_FIXTURE so it
+// NEVER runs unless explicitly opted into. One pinned fixture path: five builder work
+// items, one per phase (planning/coding/testing/reviewing/shipping), a sixth loop-back
+// item sitting in coding, a seventh merged item whose bridge-state carries the `done`
+// gate, and an eighth item with no session — surfaced only via tracker-state as the
+// next queued task. Enough for the Board's Kanban columns (Queued/Planning/Coding/
+// Testing/Reviewing/Shipping) to render every column without a live SDK.
+const BOARD_FIXTURE_PATH = '/tmp/devos-e2e-board-fixture';
+const BOARD_FIXTURE_PLAN_SESSION_ID = 'e2e-fixture-board-plan';
+const BOARD_FIXTURE_CODE_SESSION_ID = 'e2e-fixture-board-code';
+const BOARD_FIXTURE_TEST_SESSION_ID = 'e2e-fixture-board-test';
+const BOARD_FIXTURE_REVIEW_SESSION_ID = 'e2e-fixture-board-review';
+const BOARD_FIXTURE_PR_SESSION_ID = 'e2e-fixture-board-pr';
+const BOARD_FIXTURE_LOOP_SESSION_ID = 'e2e-fixture-board-loop';
+const BOARD_FIXTURE_MERGED_SESSION_ID = 'e2e-fixture-board-merged';
+
+/** Send the deterministic canned board fixture frames to one freshly-connected client. */
+function sendBoardFixture(socket: WebSocket): void {
+  const items: readonly {
+    readonly workItemId: string;
+    readonly sessionId: string;
+    readonly phase: 'planning' | 'coding' | 'testing' | 'reviewing' | 'shipping';
+    readonly persona: string;
+  }[] = [
+    { workItemId: 'WI-PLAN', sessionId: BOARD_FIXTURE_PLAN_SESSION_ID, phase: 'planning', persona: 'Navigator' },
+    { workItemId: 'WI-CODE', sessionId: BOARD_FIXTURE_CODE_SESSION_ID, phase: 'coding', persona: 'Shipwright' },
+    { workItemId: 'WI-TEST', sessionId: BOARD_FIXTURE_TEST_SESSION_ID, phase: 'testing', persona: 'Lookout' },
+    { workItemId: 'WI-REVIEW', sessionId: BOARD_FIXTURE_REVIEW_SESSION_ID, phase: 'reviewing', persona: 'Warden' },
+    { workItemId: 'WI-PR', sessionId: BOARD_FIXTURE_PR_SESSION_ID, phase: 'shipping', persona: 'Harbormaster' },
+    { workItemId: 'WI-LOOP', sessionId: BOARD_FIXTURE_LOOP_SESSION_ID, phase: 'coding', persona: 'Shipwright' },
+    { workItemId: 'WI-MERGED', sessionId: BOARD_FIXTURE_MERGED_SESSION_ID, phase: 'shipping', persona: 'Harbormaster' },
+  ];
+
+  // NOTE: the client folds a `session-personas` frame as a FULL per-path
+  // snapshot (see foldPersonas in useProjects.ts) — sending one frame per item
+  // would have each later frame silently drop the earlier items' personas. So
+  // every session-state frame is sent individually (upserted by session id),
+  // but ALL personas are sent together in a single combined frame, mirroring
+  // sendFleetFixture's pattern above.
+  for (const item of items) {
+    const session: OutboundMessage = {
+      type: 'session-state',
+      path: BOARD_FIXTURE_PATH,
+      session: {
+        id: item.sessionId,
+        projectPath: BOARD_FIXTURE_PATH,
+        role: 'builder',
+        status: 'running',
+        sdkSessionId: null,
+        workItemId: item.workItemId,
+        rateLimited: false,
+      },
+    };
+    sendFrame(socket, session);
+  }
+
+  const personas: OutboundMessage = {
+    type: 'session-personas',
+    path: BOARD_FIXTURE_PATH,
+    personas: items.map((item) => ({
+      sessionId: item.sessionId,
+      workItemId: item.workItemId,
+      role: 'builder' as const,
+      phase: item.phase,
+      persona: item.persona,
+    })),
+  };
+  sendFrame(socket, personas);
+
+  // WI-MERGED's bridge run carries the `done` gate — only one bridge-state is
+  // possible per path, so this is the single bridge frame for the fixture.
+  const bridgeState: OutboundMessage = {
+    type: 'bridge-state',
+    path: BOARD_FIXTURE_PATH,
+    stage: 'shipping',
+    gate: 'done',
+    sessionId: BOARD_FIXTURE_MERGED_SESSION_ID,
+    inbox: [],
+    reworkCount: 0,
+  };
+  sendFrame(socket, bridgeState);
+
+  // WI-QUEUED has no session/persona — it surfaces only via tracker-state's
+  // nextTask, so it lands in the Queued column.
+  const trackerState: OutboundMessage = {
+    type: 'tracker-state',
+    path: BOARD_FIXTURE_PATH,
+    state: {
+      path: BOARD_FIXTURE_PATH,
+      reachable: true,
+      tracker: 'todoist',
+      nextTask: {
+        id: 'WI-QUEUED',
+        title: 'Queued task title',
+        priority: 1,
+        url: null,
+      },
+    },
+  };
+  sendFrame(socket, trackerState);
+}
+
 // Deterministic canned inbox fixture for e2e — gated on DEVOS_E2E_INBOX_FIXTURE so it
 // NEVER runs unless explicitly opted into. Seeds blocked items ACROSS TWO fixture
 // project paths, plus a permission request and a foreign-session signal, each with a
@@ -637,6 +739,11 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
     // e2e fixture: only when explicitly opted into via env — never runs otherwise.
     if (process.env['DEVOS_E2E_INBOX_FIXTURE'] === '1') {
       sendInboxFixture(socket);
+    }
+
+    // e2e fixture: only when explicitly opted into via env — never runs otherwise.
+    if (process.env['DEVOS_E2E_BOARD_FIXTURE'] === '1') {
+      sendBoardFixture(socket);
     }
 
     // e2e fixture: a single deterministic non-zero cost-usage frame so the e2e can
