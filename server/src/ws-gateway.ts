@@ -11,6 +11,7 @@ import { sep } from 'node:path';
 import { WebSocket, WebSocketServer } from 'ws';
 import { HEARTBEAT_INTERVAL_MS, WS_PATH } from './config.js';
 import { scanCandidates } from './discovery/scanner.js';
+import { readEvidence } from './evidence/evidence-reader.js';
 import { readGitState } from './git/git-state-reader.js';
 import { createHeartbeat, type HeartbeatMessage } from './heartbeat.js';
 import type { HookBus } from './hooks/hook-bus.js';
@@ -95,6 +96,12 @@ const SESSION_TRANSCRIPT_REQUEST_MIN_INTERVAL_MS = 200;
 // `readRoster` read (the roster is never memoized server-side). The window only
 // drops rapid-fire repeats of the SAME path on a single socket.
 const ROSTER_TIMELINE_MIN_INTERVAL_MS = 200;
+
+// Minimum interval between two `evidence-request` reads for the SAME (path,
+// workItemId) pair on the SAME socket. This is a FLOOD-GUARD ONLY, never a cache:
+// every accepted request always does a fresh `readEvidence` read. The window only
+// drops rapid-fire repeats of the SAME key on a single socket.
+const EVIDENCE_MIN_INTERVAL_MS = 200;
 
 // Upper bound on the number of distinct paths a single socket's per-PATH
 // flood-guard Map may retain. Without this a malicious client could request an
@@ -460,6 +467,37 @@ function sendInboxFixture(socket: WebSocket): void {
   sendFrame(socket, foreignNeedsYou);
 }
 
+// Deterministic canned evidence fixture for e2e — gated on DEVOS_E2E_EVIDENCE_FIXTURE
+// so it NEVER runs unless explicitly opted into. Pinned to the SAME path + work item
+// as the fleet fixture (FLEET_FIXTURE_PATH / FLEET_FIXTURE_WORK_ITEM_ID above) so an
+// e2e spec that opens the work-item Detail via the fleet fixture can also drive the
+// Evidence tabs through a real WS round-trip: a couple of changed files, a non-empty
+// test-results summary, a PR summary, and a mix of Draft/Final artifacts.
+export const EVIDENCE_FIXTURE_PATH = FLEET_FIXTURE_PATH;
+export const EVIDENCE_FIXTURE_WORK_ITEM_ID = FLEET_FIXTURE_WORK_ITEM_ID;
+
+/** The deterministic canned evidence fixture snapshot. */
+function evidenceFixtureSnapshot(): OutboundMessage {
+  return {
+    type: 'evidence',
+    path: EVIDENCE_FIXTURE_PATH,
+    workItemId: EVIDENCE_FIXTURE_WORK_ITEM_ID,
+    evidence: {
+      filesChanged: [
+        { path: 'web/src/components/EvidenceTabs.tsx', status: 'A' },
+        { path: 'server/src/evidence/evidence-reader.ts', status: 'A' },
+      ],
+      testResults: { summary: '12 passed, 0 failed' },
+      prSummary: 'Add Evidence tabs surfacing changed files, test results, and artifacts.',
+      artifacts: [
+        { name: 'brief.md', state: 'Final' },
+        { name: 'plan.md', state: 'Final' },
+        { name: 'evaluation.md', state: 'Draft' },
+      ],
+    },
+  };
+}
+
 export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGateway {
   const intervalMs = options.intervalMs ?? HEARTBEAT_INTERVAL_MS;
   const { registry } = options;
@@ -709,6 +747,12 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
     // single socket fans out one read per pinned project; a per-socket scalar would
     // drop the fan-out.
     const lastRosterTimelineAt = new Map<string, number>();
+
+    // Per-socket, per-KEY flood-guard for `evidence-request` — see
+    // EVIDENCE_MIN_INTERVAL_MS. Keyed by `path workItemId` (not a single scalar)
+    // because a client fans out one request per pinned work item; a per-socket
+    // scalar would drop the fan-out.
+    const lastEvidenceAt = new Map<string, number>();
 
     const heartbeat = createHeartbeat({
       intervalMs,
@@ -961,6 +1005,47 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
           });
         } catch (err) {
           console.error('[ws] work-item-sessions read failed', err);
+        }
+        return;
+      }
+
+      // Evidence read: reply to the requesting socket only (never broadcast).
+      // The whole flow is guarded so a read failure never crashes the gateway.
+      if (message.type === 'evidence-request') {
+        // Access control: only read pinned projects (see isPinnedPath).
+        if (!isPinnedPath(message.path)) return;
+
+        // e2e fixture: only when explicitly opted into via env AND the request
+        // matches the fixture's pinned path + work item — never runs otherwise.
+        if (
+          process.env['DEVOS_E2E_EVIDENCE_FIXTURE'] === '1' &&
+          message.path === EVIDENCE_FIXTURE_PATH &&
+          message.workItemId === EVIDENCE_FIXTURE_WORK_ITEM_ID
+        ) {
+          sendFrame(socket, evidenceFixtureSnapshot());
+          return;
+        }
+
+        // Flood-guard: drop repeats of the SAME (path, workItemId) key within the
+        // min-interval on this socket. Distinct keys (the per-work-item fan-out)
+        // always pass.
+        const key = `${message.path} ${message.workItemId}`;
+        const now = Date.now();
+        const last = lastEvidenceAt.get(key) ?? 0;
+        if (now - last < EVIDENCE_MIN_INTERVAL_MS) return;
+        pruneFloodGuard(lastEvidenceAt, now, EVIDENCE_MIN_INTERVAL_MS);
+        lastEvidenceAt.set(key, now);
+
+        try {
+          const evidence = await readEvidence(message.path, message.workItemId);
+          sendFrame(socket, {
+            type: 'evidence',
+            path: message.path,
+            workItemId: message.workItemId,
+            evidence,
+          });
+        } catch (err) {
+          console.error('[ws] evidence read failed', err);
         }
         return;
       }

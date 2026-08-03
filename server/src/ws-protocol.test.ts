@@ -9,6 +9,7 @@ import {
   type BridgeStartMessage,
   type DiscoverMessage,
   type EscalationChoiceMessage,
+  type EvidenceRequestMessage,
   type GateApproveMessage,
   type GateRequestChangesMessage,
   type GitStateMessage,
@@ -772,6 +773,59 @@ describe('parseInboundMessage', () => {
       expect(
         parseInboundMessage(JSON.stringify({ type: 'roster-timeline', path: 'rel/dir' })),
       ).toBeNull();
+    });
+  });
+
+  describe('evidence-request frames', () => {
+    it('accepts a well-formed evidence-request, frozen', () => {
+      const result = parseInboundMessage(
+        JSON.stringify({ type: 'evidence-request', path: '/abs/project', workItemId: 'WI-1' }),
+      );
+      expect(result).toEqual<EvidenceRequestMessage>({
+        type: 'evidence-request',
+        path: '/abs/project',
+        workItemId: 'WI-1',
+      });
+      expect(Object.isFrozen(result)).toBe(true);
+    });
+
+    it('rejects an evidence-request with a missing, empty, or relative path', () => {
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'evidence-request', workItemId: 'WI-1' })),
+      ).toBeNull();
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'evidence-request', path: '', workItemId: 'WI-1' }),
+        ),
+      ).toBeNull();
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'evidence-request', path: 'rel/dir', workItemId: 'WI-1' }),
+        ),
+      ).toBeNull();
+    });
+
+    it('rejects an evidence-request with a missing, empty, non-string, or unsafe workItemId', () => {
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'evidence-request', path: '/abs/project' })),
+      ).toBeNull();
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'evidence-request', path: '/abs/project', workItemId: '' }),
+        ),
+      ).toBeNull();
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'evidence-request', path: '/abs/project', workItemId: 42 }),
+        ),
+      ).toBeNull();
+      for (const workItemId of ['../x', '../../../../etc', 'a/b', '..', '.hidden', 'WI 1']) {
+        expect(
+          parseInboundMessage(
+            JSON.stringify({ type: 'evidence-request', path: '/abs/project', workItemId }),
+          ),
+        ).toBeNull();
+      }
     });
   });
 

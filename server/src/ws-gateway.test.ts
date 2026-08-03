@@ -185,6 +185,13 @@ interface WorkItemSessionsFrame {
   readonly sessions: readonly WorkItemSessionAnchor[];
 }
 
+interface EvidenceFrame {
+  readonly type: 'evidence';
+  readonly path: string;
+  readonly workItemId: string;
+  readonly evidence: unknown;
+}
+
 interface HarnessOptions {
   readonly pinnedPaths?: readonly string[];
   readonly sessions?: Readonly<Record<string, SessionSnapshot>>;
@@ -262,6 +269,10 @@ interface TestClient {
   readonly workItemSessionsFrames: () => readonly WorkItemSessionsFrame[];
   /** Resolve once at least `count` work-item-sessions frames arrived; reject on timeout. */
   readonly waitForWorkItemSessionsCount: (count: number, timeoutMs?: number) => Promise<void>;
+  /** Every `evidence` frame seen so far. */
+  readonly evidenceFrames: () => readonly EvidenceFrame[];
+  /** Resolve once at least `count` evidence frames arrived; reject on timeout. */
+  readonly waitForEvidenceCount: (count: number, timeoutMs?: number) => Promise<void>;
   /** Every `cost-usage` frame seen so far. */
   readonly costUsageFrames: () => readonly CostUsageFrame[];
   /** Resolve once at least `count` cost-usage frames arrived; reject on timeout. */
@@ -482,6 +493,7 @@ function openClient(url: string, openTimeoutMs = 3000): Promise<TestClient> {
     const stateFrames: SessionStateFrame[] = [];
     const personasFrames: SessionPersonasFrame[] = [];
     const workItemSessionsFrames: WorkItemSessionsFrame[] = [];
+    const evidenceFrames: EvidenceFrame[] = [];
     const costUsageFrames: CostUsageFrame[] = [];
     let opened = false;
 
@@ -559,6 +571,12 @@ function openClient(url: string, openTimeoutMs = 3000): Promise<TestClient> {
       } else if (
         typeof parsed === 'object' &&
         parsed !== null &&
+        (parsed as { type?: unknown }).type === 'evidence'
+      ) {
+        evidenceFrames.push(parsed as EvidenceFrame);
+      } else if (
+        typeof parsed === 'object' &&
+        parsed !== null &&
         (parsed as { type?: unknown }).type === 'cost-usage'
       ) {
         costUsageFrames.push(parsed as CostUsageFrame);
@@ -603,6 +621,9 @@ function openClient(url: string, openTimeoutMs = 3000): Promise<TestClient> {
         workItemSessionsFrames: () => [...workItemSessionsFrames],
         waitForWorkItemSessionsCount: (count: number, timeoutMs = 3000) =>
           waitForCount(() => workItemSessionsFrames.length, 'work-item-sessions', count, timeoutMs),
+        evidenceFrames: () => [...evidenceFrames],
+        waitForEvidenceCount: (count: number, timeoutMs = 3000) =>
+          waitForCount(() => evidenceFrames.length, 'evidence', count, timeoutMs),
         costUsageFrames: () => [...costUsageFrames],
         waitForCostUsageCount: (count: number, timeoutMs = 3000) =>
           waitForCount(() => costUsageFrames.length, 'cost-usage', count, timeoutMs),
@@ -1088,6 +1109,57 @@ describe('ws-gateway work-item-sessions routing', () => {
 
     await settle();
     expect(client.workItemSessionsFrames()).toHaveLength(0);
+  });
+});
+
+describe('ws-gateway evidence routing', () => {
+  it('replies to an evidence-request on the requesting socket only', async () => {
+    const harness = await startGateway({ pinnedPaths: [PROJECT_PATH] });
+    const requester = await openClient(harness.url);
+    const bystander = await openClient(harness.url);
+
+    requester.send({ type: 'evidence-request', path: PROJECT_PATH, workItemId: WORK_ITEM_ID });
+
+    await requester.waitForEvidenceCount(1);
+    const frame = requester.evidenceFrames()[0];
+    expect(frame).toMatchObject({ type: 'evidence', path: PROJECT_PATH, workItemId: WORK_ITEM_ID });
+    await settle();
+    expect(bystander.evidenceFrames()).toHaveLength(0);
+  });
+
+  it('sends no frame when the requested path is not pinned (fails closed)', async () => {
+    const harness = await startGateway({ pinnedPaths: [] }); // path NOT pinned
+    const client = await openClient(harness.url);
+
+    client.send({ type: 'evidence-request', path: PROJECT_PATH, workItemId: WORK_ITEM_ID });
+
+    await settle();
+    expect(client.evidenceFrames()).toHaveLength(0);
+  });
+
+  it('throttles rapid repeats of the same (path, workItemId) on one socket', async () => {
+    const harness = await startGateway({ pinnedPaths: [PROJECT_PATH] });
+    const client = await openClient(harness.url);
+
+    // Two back-to-back requests — well inside the flood-guard window.
+    client.send({ type: 'evidence-request', path: PROJECT_PATH, workItemId: WORK_ITEM_ID });
+    client.send({ type: 'evidence-request', path: PROJECT_PATH, workItemId: WORK_ITEM_ID });
+
+    await client.waitForEvidenceCount(1);
+    await settle();
+    expect(client.evidenceFrames()).toHaveLength(1);
+  });
+
+  it('replies to distinct workItemIds — fan-out preserved', async () => {
+    const harness = await startGateway({ pinnedPaths: [PROJECT_PATH] });
+    const client = await openClient(harness.url);
+
+    client.send({ type: 'evidence-request', path: PROJECT_PATH, workItemId: 'WI-1' });
+    client.send({ type: 'evidence-request', path: PROJECT_PATH, workItemId: 'WI-2' });
+
+    await client.waitForEvidenceCount(2);
+    const workItemIds = client.evidenceFrames().map((f) => f.workItemId);
+    expect(workItemIds.sort()).toEqual(['WI-1', 'WI-2']);
   });
 });
 

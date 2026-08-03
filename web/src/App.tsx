@@ -64,6 +64,8 @@ function App() {
     costToday,
     workItemSessions,
     requestWorkItemSessions,
+    evidence,
+    requestEvidence,
   } = useProjects();
 
   const needsYouItems = useMemo(
@@ -105,7 +107,9 @@ function App() {
                 workItemId: selected.workItemId,
                 bridgeState: bridgeStates[selected.path],
               })}
+              evidence={evidence[selected.workItemId]}
               onBack={() => setSelected(null)}
+              onRequestEvidence={() => requestEvidence(selected.path, selected.workItemId)}
             />
           ) : (
             <>

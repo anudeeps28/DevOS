@@ -16,7 +16,9 @@ function model(): PipelineTimelineModel {
 
 describe('WorkItemDetail', () => {
   it('renders the work item id and hosts the pipeline timeline', () => {
-    render(<WorkItemDetail workItemId="wi-1" model={model()} onBack={vi.fn()} />);
+    render(
+      <WorkItemDetail workItemId="wi-1" model={model()} onBack={vi.fn()} onRequestEvidence={vi.fn()} />,
+    );
 
     const detail = screen.getByTestId('work-item-detail');
     expect(detail).toHaveAttribute('data-workitem', 'wi-1');
@@ -27,7 +29,9 @@ describe('WorkItemDetail', () => {
   it('fires onBack when the back button is clicked', () => {
     const onBack = vi.fn();
 
-    render(<WorkItemDetail workItemId="wi-1" model={model()} onBack={onBack} />);
+    render(
+      <WorkItemDetail workItemId="wi-1" model={model()} onBack={onBack} onRequestEvidence={vi.fn()} />,
+    );
 
     fireEvent.click(screen.getByTestId('detail-back'));
 
