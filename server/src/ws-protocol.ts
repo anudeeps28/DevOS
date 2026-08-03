@@ -31,6 +31,17 @@ export const MAX_REQUEST_ID_LENGTH = 128;
 // by the persona reader), so it must be a safe single path segment — no separators,
 // no `..`, no leading dot. Allowlist strictly (reject, don't sanitize) at the
 // boundary so a traversal payload can never reach any path join downstream.
+/**
+ * Collapse untrusted gate-request-changes notes into one safe single line:
+ * strip CR/LF, C0 control chars, and ESC (no ANSI), then length-cap. Mirrors
+ * hook-bus.ts's sanitizeReason — same free-text hygiene at a different
+ * inbound boundary.
+ */
+export function sanitizeNotes(raw: string): string {
+  // eslint-disable-next-line no-control-regex
+  return raw.replace(/[\u0000-\u001F\u007F]/g, ' ').slice(0, MAX_STEER_TEXT_LENGTH).trim();
+}
+
 const WORK_ITEM_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 function isSafeWorkItemId(value: unknown): value is string {
   return (
@@ -419,6 +430,13 @@ export interface GateApproveMessage {
   readonly path: string;
 }
 
+/** Inbound: request changes on the current Bridge gate for a pinned project path. */
+export interface GateRequestChangesMessage {
+  readonly type: 'gate-request-changes';
+  readonly path: string;
+  readonly notes: string;
+}
+
 /** Inbound: interrupt the running Bridge for a pinned project path. */
 export interface BridgeInterruptMessage {
   readonly type: 'bridge-interrupt';
@@ -497,6 +515,7 @@ export type InboundMessage =
   | PermissionDecisionMessage
   | BridgeStartMessage
   | GateApproveMessage
+  | GateRequestChangesMessage
   | BridgeInterruptMessage
   | SessionPersonasMessage
   | WorkItemSessionsRequestMessage
@@ -804,6 +823,34 @@ export function parseInboundMessage(data: unknown): InboundMessage | null {
       return null;
     }
     return Object.freeze<GateApproveMessage>({ type: 'gate-approve', path });
+  }
+
+  // `gate-request-changes` shares gate-approve's ABSOLUTE-path requirement plus a
+  // bounded, sanitized notes string. Notes is stripped of CR/LF/C0/ESC before
+  // freezing; an empty result after sanitizing (e.g. all control chars) is
+  // rejected — a request-changes with no actual notes is meaningless.
+  if (type === 'gate-request-changes') {
+    const { path, notes } = frame;
+    if (
+      typeof path !== 'string' ||
+      path.length === 0 ||
+      path.length > MAX_PATH_LENGTH ||
+      !isAbsolute(path)
+    ) {
+      return null;
+    }
+    if (typeof notes !== 'string' || notes.length > MAX_STEER_TEXT_LENGTH) {
+      return null;
+    }
+    const sanitized = sanitizeNotes(notes);
+    if (sanitized.length === 0) {
+      return null;
+    }
+    return Object.freeze<GateRequestChangesMessage>({
+      type: 'gate-request-changes',
+      path,
+      notes: sanitized,
+    });
   }
 
   // `bridge-interrupt` requires the same ABSOLUTE path plus a bounded reason string.

@@ -2,12 +2,14 @@ import { describe, expect, it } from 'vitest';
 
 import {
   parseInboundMessage,
+  sanitizeNotes,
   MAX_STEER_TEXT_LENGTH,
   MAX_REQUEST_ID_LENGTH,
   type BridgeInterruptMessage,
   type BridgeStartMessage,
   type DiscoverMessage,
   type GateApproveMessage,
+  type GateRequestChangesMessage,
   type GitStateMessage,
   type PermissionDecisionMessage,
   type PinMessage,
@@ -515,6 +517,77 @@ describe('parseInboundMessage', () => {
       ).toBeNull();
       expect(
         parseInboundMessage(JSON.stringify({ type: 'gate-approve', path: 'rel/dir' })),
+      ).toBeNull();
+    });
+  });
+
+  describe('gate-request-changes frames', () => {
+    it('accepts a well-formed frame and SANITIZES notes containing CR/LF/C0/ESC', () => {
+      const rawNotes = 'line one\r\nline two\x01 control\x1b escape';
+      const result = parseInboundMessage(
+        JSON.stringify({ type: 'gate-request-changes', path: '/abs/project', notes: rawNotes }),
+      ) as GateRequestChangesMessage | null;
+
+      expect(result).not.toBeNull();
+      expect(result?.type).toBe('gate-request-changes');
+      expect(result?.path).toBe('/abs/project');
+      // Matches the actual sanitizeNotes contract: CR/LF/C0/ESC are stripped/replaced,
+      // never passed through to the parsed notes.
+      expect(result?.notes).toBe(sanitizeNotes(rawNotes));
+      // eslint-disable-next-line no-control-regex
+      expect(result?.notes).not.toMatch(/[ -]/);
+      expect(Object.isFrozen(result)).toBe(true);
+    });
+
+    it('accepts notes exactly at MAX_STEER_TEXT_LENGTH', () => {
+      const notes = 'x'.repeat(MAX_STEER_TEXT_LENGTH);
+      const result = parseInboundMessage(
+        JSON.stringify({ type: 'gate-request-changes', path: '/abs/project', notes }),
+      );
+      expect(result).not.toBeNull();
+    });
+
+    it('rejects notes over MAX_STEER_TEXT_LENGTH', () => {
+      const notes = 'x'.repeat(MAX_STEER_TEXT_LENGTH + 1);
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'gate-request-changes', path: '/abs/project', notes }),
+        ),
+      ).toBeNull();
+    });
+
+    it('rejects a missing or relative path', () => {
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'gate-request-changes', notes: 'fix it' })),
+      ).toBeNull();
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'gate-request-changes', path: 'rel/dir', notes: 'fix it' }),
+        ),
+      ).toBeNull();
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'gate-request-changes', path: '', notes: 'fix it' }),
+        ),
+      ).toBeNull();
+    });
+
+    it('rejects a missing or non-string notes', () => {
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'gate-request-changes', path: '/abs/project' })),
+      ).toBeNull();
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'gate-request-changes', path: '/abs/project', notes: 42 }),
+        ),
+      ).toBeNull();
+    });
+
+    it('rejects notes that sanitize down to empty (e.g. only CR/LF)', () => {
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'gate-request-changes', path: '/abs/project', notes: '\n\r' }),
+        ),
       ).toBeNull();
     });
   });
