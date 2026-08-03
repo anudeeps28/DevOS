@@ -1488,6 +1488,104 @@ describe('ws-client session-transcript frames', () => {
     expect(warn).toHaveBeenCalled();
   });
 
+  it('parses a bridge-state frame carrying a chips-bearing question item, chips preserved', () => {
+    const { received, socket } = makeBridgeStateClient();
+    const frame = {
+      type: 'bridge-state',
+      path: '/abs/repo',
+      stage: 'implement',
+      gate: 'awaiting-approval',
+      sessionId: 'sess-1',
+      inbox: [
+        { stage: 'implement', kind: 'question', reason: 'pick one', ts: 123, chips: ['A', 'B'] },
+      ],
+    };
+
+    socket.message(JSON.stringify(frame));
+
+    expect(received).toHaveLength(1);
+    expect(received[0]!.state.inbox).toEqual([
+      { stage: 'implement', kind: 'question', reason: 'pick one', ts: 123, chips: ['A', 'B'] },
+    ]);
+    expect(Object.isFrozen(received[0]!.state.inbox[0])).toBe(true);
+  });
+
+  it('keeps chips absent when the raw item has no chips field', () => {
+    const { received, socket } = makeBridgeStateClient();
+    const frame = {
+      type: 'bridge-state',
+      path: '/abs/repo',
+      stage: 'implement',
+      gate: 'awaiting-approval',
+      sessionId: 'sess-1',
+      inbox: [{ stage: 'implement', kind: 'question', reason: 'approve?', ts: 123 }],
+    };
+
+    socket.message(JSON.stringify(frame));
+
+    expect(received).toHaveLength(1);
+    expect(received[0]!.state.inbox[0]).not.toHaveProperty('chips');
+  });
+
+  it('drops a bridge-state frame whose inbox item has a non-string chip element', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { received, socket } = makeBridgeStateClient();
+    const frame = {
+      type: 'bridge-state',
+      path: '/abs/repo',
+      stage: 'implement',
+      gate: 'awaiting-approval',
+      sessionId: 'sess-1',
+      inbox: [{ stage: 'implement', kind: 'question', reason: 'pick one', ts: 123, chips: ['A', 42] }],
+    };
+
+    socket.message(JSON.stringify(frame));
+
+    expect(received).toEqual([]);
+    expect(warn).toHaveBeenCalled();
+  });
+
+  it('caps chips to 8 entries of 512 chars each', () => {
+    const { received, socket } = makeBridgeStateClient();
+    const chips = Array.from({ length: 10 }, (_, i) => `chip-${i}-` + 'x'.repeat(600));
+    const frame = {
+      type: 'bridge-state',
+      path: '/abs/repo',
+      stage: 'implement',
+      gate: 'awaiting-approval',
+      sessionId: 'sess-1',
+      inbox: [{ stage: 'implement', kind: 'question', reason: 'pick one', ts: 123, chips }],
+    };
+
+    socket.message(JSON.stringify(frame));
+
+    expect(received).toHaveLength(1);
+    const gotChips = received[0]!.state.inbox[0]!.chips!;
+    expect(gotChips).toHaveLength(8);
+    for (const chip of gotChips) {
+      expect(chip.length).toBeLessThanOrEqual(512);
+    }
+  });
+
+  it('sendQuestionAnswer/sendEscalationChoice send the matching inbound frames', () => {
+    const { client, socket } = makeBridgeStateClient();
+
+    client.sendQuestionAnswer('/abs/repo', 'yes please');
+    client.sendEscalationChoice('/abs/repo', 'take-over');
+    client.sendEscalationChoice('/abs/repo', 'give-guidance', 'try approach B');
+
+    expect(socket.sent).toEqual([
+      JSON.stringify({ type: 'question-answer', path: '/abs/repo', answer: 'yes please' }),
+      JSON.stringify({ type: 'escalation-choice', path: '/abs/repo', choice: 'take-over' }),
+      JSON.stringify({
+        type: 'escalation-choice',
+        path: '/abs/repo',
+        choice: 'give-guidance',
+        notes: 'try approach B',
+      }),
+    ]);
+  });
+
   it('sendBridgeStart/sendGateApprove/sendBridgeInterrupt send the matching inbound frames', () => {
     const { client, socket } = makeBridgeStateClient();
 

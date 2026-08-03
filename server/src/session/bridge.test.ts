@@ -11,6 +11,7 @@ import { createRegistry, type Registry } from '../registry/registry.js';
 import type { BridgeStateSnapshot } from '../ws-protocol.js';
 import {
   createBridge,
+  DEBUG_TAKEOVER_PROMPT,
   defaultDraftPrBody,
   defaultReadReviewReport,
   defaultReadReviewVerdict,
@@ -18,7 +19,13 @@ import {
 } from './bridge.js';
 import type { OpenPrAdapter, OpenPrParams } from './pr-adapter.js';
 import type { PhaseTransitionListener, PhaseTransitionSignal, PhaseWatcher } from './phase-watcher.js';
-import type { EngineMessage, EngineSession, QueryFn, SpawnParams } from './session-engine.js';
+import type {
+  EngineMessage,
+  EngineQuestionRequest,
+  EngineSession,
+  QueryFn,
+  SpawnParams,
+} from './session-engine.js';
 import { createSessionManager, type SessionManager } from './session-manager.js';
 import { createSessionStore } from './session-store.js';
 import type { Role } from './roles.js';
@@ -34,12 +41,18 @@ function makeSession(): {
   finish: () => void;
   throwError: (err: unknown) => void;
   ended: () => boolean;
+  /** Fire the engine's question-request listener as if the agent raised a question. */
+  raiseQuestion: (req: EngineQuestionRequest) => void;
+  /** Every `answerQuestion(requestId, answer)` the engine received. */
+  answerQuestionCalls: () => readonly { readonly requestId: string; readonly answer: string }[];
 } {
   const buffer: EngineMessage[] = [];
   let resolveNext: (() => void) | null = null;
   let done = false;
   let error: unknown = null;
   let endCalled = false;
+  let questionListener: ((req: EngineQuestionRequest) => void) | null = null;
+  const answerQuestionCalls: { readonly requestId: string; readonly answer: string }[] = [];
 
   const wake = (): void => {
     if (resolveNext !== null) {
@@ -73,6 +86,12 @@ function makeSession(): {
     send: async (): Promise<void> => {},
     onPermissionRequest: (): void => {},
     resolvePermission: (): void => {},
+    onQuestionRequest: (listener: (req: EngineQuestionRequest) => void): void => {
+      questionListener = listener;
+    },
+    answerQuestion: (requestId: string, answer: string): void => {
+      answerQuestionCalls.push({ requestId, answer });
+    },
     end: (): void => {
       endCalled = true;
       done = true;
@@ -99,6 +118,10 @@ function makeSession(): {
       wake();
     },
     ended: () => endCalled,
+    raiseQuestion: (req) => {
+      questionListener?.(req);
+    },
+    answerQuestionCalls: () => [...answerQuestionCalls],
   };
 }
 
@@ -185,6 +208,8 @@ function makeSteerableSession(): {
     send: async (): Promise<void> => {},
     onPermissionRequest: (): void => {},
     resolvePermission: (): void => {},
+    onQuestionRequest: (): void => {},
+    answerQuestion: (): void => {},
     end: (): void => {
       endCalled = true;
       done = true;
@@ -1054,6 +1079,150 @@ describe('Bridge plan gate', () => {
     await new Promise((r) => setTimeout(r, 50));
     expect(queryFactory.calls).toHaveLength(1); // no reviewer spawn
     expect(bridge.getState(PROJECT)?.gate).toBe('awaiting-approval');
+  });
+});
+
+describe('Bridge agent question', () => {
+  it('onQuestionRequest parks a question item with chips, pauses, and sets gate=awaiting-approval', async () => {
+    const { sessionManager, registry, queryFactory } = freshEnv();
+    const bridge = createBridge({ sessionManager, registry, resolveRoster: () => ROSTER });
+
+    bridge.start(PROJECT);
+    await waitUntil(() => queryFactory.calls.length === 1);
+    const builder = queryFactory.sessionAt(0);
+    builder.emitInit('sdk-question-1');
+
+    builder.raiseQuestion({ requestId: 'q-1', question: 'Which approach?', chips: ['A', 'B'] });
+
+    await waitUntil(() => bridge.getState(PROJECT)?.gate === 'awaiting-approval');
+    expect(bridge.getInbox(PROJECT)).toHaveLength(1);
+    expect(bridge.getInbox(PROJECT)[0]).toMatchObject({
+      kind: 'question',
+      reason: 'Which approach?',
+      chips: ['A', 'B'],
+      stage: 'builder',
+    });
+
+    // Paused: a subsequent ended must not auto-advance.
+    builder.finish();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(queryFactory.calls).toHaveLength(1);
+  });
+
+  it('answerQuestion relays to sessionManager.answerQuestion and clears the item + pendingQuestion', async () => {
+    const { sessionManager, registry, queryFactory } = freshEnv();
+    const bridge = createBridge({ sessionManager, registry, resolveRoster: () => ROSTER });
+
+    bridge.start(PROJECT);
+    await waitUntil(() => queryFactory.calls.length === 1);
+    const builder = queryFactory.sessionAt(0);
+    builder.emitInit('sdk-question-2');
+
+    builder.raiseQuestion({ requestId: 'q-2', question: 'Which approach?', chips: [] });
+    await waitUntil(() => bridge.getState(PROJECT)?.gate === 'awaiting-approval');
+
+    bridge.answerQuestion(PROJECT, 'go with A');
+
+    expect(builder.answerQuestionCalls()).toEqual([{ requestId: 'q-2', answer: 'go with A' }]);
+    expect(bridge.getInbox(PROJECT)).toHaveLength(0);
+    expect(bridge.getState(PROJECT)?.gate).toBe('running');
+  });
+
+  it('a stale answer after the session ended is a no-op', async () => {
+    const { sessionManager, registry, queryFactory } = freshEnv();
+    const bridge = createBridge({ sessionManager, registry, resolveRoster: () => ROSTER });
+
+    bridge.start(PROJECT);
+    await waitUntil(() => queryFactory.calls.length === 1);
+    const builder = queryFactory.sessionAt(0);
+    builder.emitInit('sdk-question-3');
+
+    builder.raiseQuestion({ requestId: 'q-3', question: 'Which approach?', chips: [] });
+    await waitUntil(() => bridge.getState(PROJECT)?.gate === 'awaiting-approval');
+
+    // The session ends before the operator answers.
+    builder.finish();
+    await new Promise((r) => setTimeout(r, 50));
+
+    bridge.answerQuestion(PROJECT, 'too late');
+
+    expect(builder.answerQuestionCalls()).toEqual([]);
+  });
+});
+
+describe('Bridge escalation resolution', () => {
+  /** Drive a run to gate='escalated' via an errored builder with no failure report. */
+  async function driveToEscalated(): Promise<{
+    sessionManager: SessionManager;
+    registry: Registry;
+    queryFactory: ReturnType<typeof makeQueryFactory>;
+    bridge: Bridge;
+  }> {
+    const { sessionManager, registry, queryFactory } = freshEnv();
+    const bridge = createBridge({
+      sessionManager,
+      registry,
+      resolveRoster: () => ROSTER,
+      readFailureReport: () => null,
+    });
+
+    bridge.start(PROJECT);
+    await waitUntil(() => queryFactory.calls.length === 1);
+    queryFactory.sessionAt(0).throwError(new Error('boom'));
+    await waitUntil(() => bridge.getState(PROJECT)?.gate === 'escalated');
+
+    return { sessionManager, registry, queryFactory, bridge };
+  }
+
+  it('is a no-op unless the run is genuinely escalated', async () => {
+    const { sessionManager, registry, queryFactory } = freshEnv();
+    const bridge = createBridge({ sessionManager, registry, resolveRoster: () => ROSTER });
+
+    bridge.start(PROJECT);
+    await waitUntil(() => queryFactory.calls.length === 1);
+
+    bridge.resolveEscalation(PROJECT, 'take-over');
+
+    // Still running — the choice had no effect.
+    expect(bridge.getState(PROJECT)?.gate).toBe('running');
+    expect(queryFactory.calls).toHaveLength(1);
+  });
+
+  it('let-debug-try resets reworkCount + index and respawns the build role with the debug prompt', async () => {
+    const { queryFactory, bridge } = await driveToEscalated();
+
+    bridge.resolveEscalation(PROJECT, 'let-debug-try');
+
+    expect(bridge.getState(PROJECT)?.gate).toBe('reworking');
+    expect(bridge.getState(PROJECT)?.reworkCount).toBe(0);
+    expect(bridge.getInbox(PROJECT)).toHaveLength(0);
+
+    await waitUntil(() => queryFactory.calls.length === 2);
+    expect(queryFactory.calls[1]?.role).toBe('builder');
+    expect(queryFactory.calls[1]?.prompt).toBe(DEBUG_TAKEOVER_PROMPT);
+  });
+
+  it('give-guidance respawns the build role with the operator notes as the prompt', async () => {
+    const { queryFactory, bridge } = await driveToEscalated();
+
+    bridge.resolveEscalation(PROJECT, 'give-guidance', 'try a different library');
+
+    expect(bridge.getState(PROJECT)?.gate).toBe('reworking');
+
+    await waitUntil(() => queryFactory.calls.length === 2);
+    expect(queryFactory.calls[1]?.role).toBe('builder');
+    expect(queryFactory.calls[1]?.prompt).toBe('try a different library');
+  });
+
+  it('take-over clears the inbox and leaves gate escalated (Bridge relinquishes)', async () => {
+    const { queryFactory, bridge } = await driveToEscalated();
+
+    bridge.resolveEscalation(PROJECT, 'take-over');
+
+    expect(bridge.getState(PROJECT)?.gate).toBe('escalated');
+    expect(bridge.getInbox(PROJECT)).toHaveLength(0);
+    // No respawn — the Bridge relinquishes.
+    expect(queryFactory.calls).toHaveLength(1);
   });
 });
 

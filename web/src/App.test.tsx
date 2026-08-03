@@ -43,6 +43,8 @@ function defaultProjectsResult(overrides: Partial<UseProjectsResult> = {}): UseP
     bridgeStates: {},
     approveGate: vi.fn(),
     requestChanges: vi.fn(),
+    answerQuestion: vi.fn(),
+    resolveEscalation: vi.fn(),
     spawnSession: vi.fn(),
     bridgeStart,
     transcripts: {},
@@ -102,5 +104,43 @@ describe('App — assign work wiring', () => {
 
     const detail = screen.getByTestId('work-item-detail');
     expect(detail).toHaveAttribute('data-workitem', 'task-1');
+  });
+});
+
+describe('App — needs-you inbox wiring', () => {
+  it('threads answerQuestion and resolveEscalation into NeedsYouInbox', async () => {
+    const { useProjects } = await import('@/hooks/useProjects');
+    const answerQuestion = vi.fn();
+    const resolveEscalation = vi.fn();
+    const path = '/abs/one';
+    vi.mocked(useProjects).mockReturnValue(
+      defaultProjectsResult({
+        answerQuestion,
+        resolveEscalation,
+        bridgeStates: {
+          [path]: {
+            path,
+            stage: 'implement',
+            gate: 'escalated',
+            sessionId: 'sess-1',
+            reworkCount: 0,
+            inbox: [
+              { stage: 'implement', kind: 'question', reason: 'Pick one', ts: 1, chips: ['A', 'B'] },
+              { stage: 'implement', kind: 'escalation', reason: 'Stuck', ts: 2 },
+            ],
+          },
+        },
+      }),
+    );
+
+    render(<App />);
+
+    fireEvent.click(screen.getByTestId('tab-inbox'));
+
+    fireEvent.click(screen.getByTestId('needs-you-chip-0-0'));
+    expect(answerQuestion).toHaveBeenCalledWith(path, 'A');
+
+    fireEvent.click(screen.getByTestId('needs-you-escalation-debug-1'));
+    expect(resolveEscalation).toHaveBeenCalledWith(path, 'let-debug-try');
   });
 });

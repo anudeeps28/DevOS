@@ -46,6 +46,8 @@ function App() {
     rosterTimelines,
     approveGate,
     requestChanges,
+    answerQuestion,
+    resolveEscalation,
     spawnSession,
     bridgeStart,
     transcripts,
@@ -146,6 +148,8 @@ function App() {
               bridgeStates={Object.values(bridgeStates)}
               onApprove={approveGate}
               onRequestChanges={requestChanges}
+              onAnswerQuestion={answerQuestion}
+              onEscalationChoice={resolveEscalation}
               permissions={Object.values(pendingPermissions).flat()}
               onPermissionDecision={(sessionId, requestId, decision) =>
                 resolvePermission(sessionId, requestId, decision)

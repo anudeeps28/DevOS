@@ -9,14 +9,19 @@
 // Auth: the SDK inherits the CLI's keychain OAuth (Claude subscription) — no API
 // key in V1 (VERIFIED — see tasks/notes.md Decision 2026-07-18).
 
+import { randomUUID } from 'node:crypto';
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import {
+  createSdkMcpServer,
   query,
+  tool,
   type CanUseTool,
   type Options,
   type PermissionResult,
   type PermissionUpdate,
   type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
+import { z } from 'zod';
 import type { Role } from './roles.js';
 import type { Effort } from './roster-reader.js';
 import { MAX_TEXT_CHARS } from './transcript-events.js';
@@ -55,6 +60,10 @@ export interface EngineSession extends AsyncIterable<EngineMessage> {
   onPermissionRequest(listener: (req: EnginePermissionRequest) => void): void;
   /** Resolve a pending permission request by id. Idempotent no-op for an unknown id. */
   resolvePermission(requestId: string, decision: PermissionDecision): void;
+  /** Register a listener fired on every agent-raised operator question. */
+  onQuestionRequest(listener: (req: EngineQuestionRequest) => void): void;
+  /** Answer a pending agent question by id. Idempotent no-op for an unknown id. */
+  answerQuestion(requestId: string, answer: string): void;
   /**
    * End the session at a clean turn boundary: closes the streaming-input queue so the
    * current turn finishes and the generator then returns. Distinct from `interrupt()`,
@@ -232,6 +241,90 @@ export function createPermissionBroker(): PermissionBroker {
   };
 }
 
+/** A decision question raised by a live session, awaiting an operator answer. */
+export interface EngineQuestionRequest {
+  readonly requestId: string;
+  readonly question: string;
+  readonly chips: readonly string[];
+}
+
+/**
+ * Bound on the un-resolved question queue — the exact analog of
+ * `MAX_PENDING_PERMISSIONS`: a compromised/misbehaving session could raise `ask_operator`
+ * calls faster than the operator answers. Past the cap, new requests fail closed.
+ */
+export const MAX_PENDING_QUESTIONS = 256;
+
+/** Cap on the number of quick-reply chips carried by one question, and the length of each. */
+const MAX_CHIPS = 8;
+const MAX_CHIP_LENGTH = 512;
+
+// Built from char codes (not a regex literal) so no control-char escape appears in source.
+const CONTROL_CHAR_CLASS = '[' + String.fromCharCode(0) + '-' + String.fromCharCode(31) + String.fromCharCode(127) + ']';
+const SANITIZE_REGEX = new RegExp(CONTROL_CHAR_CLASS, 'g');
+
+/** Strip control chars and cap length/count on the agent-supplied chip list. */
+function sanitizeChips(chips: readonly string[] | undefined): readonly string[] {
+  if (chips === undefined) return [];
+  return chips.slice(0, MAX_CHIPS).map((chip) => truncate(chip.replace(SANITIZE_REGEX, ' '), MAX_CHIP_LENGTH));
+}
+
+/** One session's question broker: bridges the in-process `ask_operator` MCP tool to a
+ * listener-driven request/resolve flow the manager can relay over the wire. */
+export interface QuestionBroker {
+  readonly mcpServer: ReturnType<typeof createSdkMcpServer>;
+  onRequest(listener: (req: EngineQuestionRequest) => void): void;
+  answer(requestId: string, answer: string): void;
+  failAll(): void;
+}
+
+/** Create a per-session question broker mirroring `createPermissionBroker`'s push-pull
+ * pattern: the `ask_operator` tool handler parks a resolver per broker-generated
+ * requestId, `answer` looks it up and settles it, `failAll` fails closed on teardown. */
+export function createQuestionBroker(): QuestionBroker {
+  const pending = new Map<string, { resolve: (result: CallToolResult) => void }>();
+  let listener: ((req: EngineQuestionRequest) => void) | null = null;
+
+  const askOperatorTool = tool(
+    'ask_operator',
+    'Ask the human operator a decision question and block until they answer.',
+    { question: z.string(), chips: z.array(z.string()).optional() },
+    async (args) =>
+      new Promise<CallToolResult>((resolve) => {
+        if (pending.size >= MAX_PENDING_QUESTIONS) {
+          resolve({ content: [{ type: 'text', text: 'question queue full' }], isError: true });
+          return;
+        }
+        const requestId = randomUUID();
+        pending.set(requestId, { resolve });
+        listener?.({
+          requestId,
+          question: args.question,
+          chips: sanitizeChips(args.chips),
+        });
+      }),
+  );
+
+  return {
+    mcpServer: createSdkMcpServer({ name: 'devos-operator', tools: [askOperatorTool] }),
+    onRequest: (l): void => {
+      listener = l;
+    },
+    answer: (requestId, answer): void => {
+      const r = pending.get(requestId);
+      if (r === undefined) return;
+      pending.delete(requestId);
+      r.resolve({ content: [{ type: 'text', text: answer }] });
+    },
+    failAll: (): void => {
+      for (const r of pending.values()) {
+        r.resolve({ content: [{ type: 'text', text: 'session ended' }], isError: true });
+      }
+      pending.clear();
+    },
+  };
+}
+
 /** The push-pull queue handed to the SDK's streaming-input `prompt`, plus the
  * `push`/`close` controls that let a live session steer an in-flight turn. */
 export interface InputStream {
@@ -312,30 +405,34 @@ export function createInputStream(initial: string): InputStream {
 }
 
 /** Wrap a session's message iteration so the input stream is always closed AND any
- * still-pending permission requests are fail-closed when iteration finishes — a
- * torn-down/ended session releases its queues, and `stopAll` still terminates the
+ * still-pending permission/question requests are fail-closed when iteration finishes —
+ * a torn-down/ended session releases its queues, and `stopAll` still terminates the
  * underlying SDK generator. */
 async function* withInputClose(
   messages: AsyncIterable<EngineMessage>,
   input: InputStream,
   broker: PermissionBroker,
+  questionBroker: QuestionBroker,
 ): AsyncGenerator<EngineMessage> {
   try {
     yield* messages;
   } finally {
     input.close();
     broker.denyAll();
+    questionBroker.failAll();
   }
 }
 
 /**
  * Build the SDK `Options` for one owned session: cwd, scrubbed env, and the role
- * wired into the system prompt, plus the given permission broker's `canUseTool`.
- * Deliberately sets NO `permissionMode` — the SDK default is NOT auto-approve.
+ * wired into the system prompt, plus the given permission broker's `canUseTool` and
+ * the question broker's in-process `ask_operator` MCP server. Deliberately sets NO
+ * `permissionMode` — the SDK default is NOT auto-approve.
  */
 export function buildSessionOptions(
   { cwd, role, model, effort }: Pick<SpawnParams, 'cwd' | 'role' | 'model' | 'effort'>,
   broker: PermissionBroker,
+  questionBroker: QuestionBroker,
 ): Options {
   return {
     cwd,
@@ -343,6 +440,7 @@ export function buildSessionOptions(
     env: buildSessionEnv(),
     systemPrompt: { type: 'preset', preset: 'claude_code', append: roleAppend(role) },
     canUseTool: broker.canUseTool,
+    mcpServers: { 'devos-operator': questionBroker.mcpServer },
     model,
     effort,
   };
@@ -352,14 +450,16 @@ export function buildSessionOptions(
  * The real-SDK default engine: start a `query()` generator in streaming-input mode
  * with `cwd = project root` and the role wired into the system prompt. Returns the
  * SDK `Query` wrapped so its input queue closes on iteration end, plus `send()` to
- * push a steering message into the open stream and the permission broker's relay.
+ * push a steering message into the open stream and the permission/question brokers'
+ * relays.
  */
 export const defaultQuery: QueryFn = ({ cwd, role, model, effort, prompt }): EngineSession => {
   const broker = createPermissionBroker();
-  const options = buildSessionOptions({ cwd, role, model, effort }, broker);
+  const questionBroker = createQuestionBroker();
+  const options = buildSessionOptions({ cwd, role, model, effort }, broker, questionBroker);
   const input = createInputStream(prompt);
   const q = query({ prompt: input.stream, options });
-  return Object.assign(withInputClose(q, input, broker), {
+  return Object.assign(withInputClose(q, input, broker, questionBroker), {
     interrupt: (): Promise<unknown> => q.interrupt(),
     send: async (text: string): Promise<void> => {
       input.push(text);
@@ -369,6 +469,12 @@ export const defaultQuery: QueryFn = ({ cwd, role, model, effort, prompt }): Eng
     },
     resolvePermission: (requestId: string, decision: PermissionDecision): void => {
       broker.resolve(requestId, decision);
+    },
+    onQuestionRequest: (listener: (req: EngineQuestionRequest) => void): void => {
+      questionBroker.onRequest(listener);
+    },
+    answerQuestion: (requestId: string, answer: string): void => {
+      questionBroker.answer(requestId, answer);
     },
     end: (): void => input.close(),
   });

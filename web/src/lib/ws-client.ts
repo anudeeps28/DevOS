@@ -225,6 +225,11 @@ export interface BridgeInboxItem {
   readonly stage: string;
   readonly kind: 'interrupt' | 'question' | 'escalation';
   readonly reason: string;
+  /**
+   * The agent-question quick-reply discriminator: present (an array, possibly
+   * empty) = agent question; absent = plan-gate question.
+   */
+  readonly chips?: readonly string[];
   readonly ts: number;
 }
 
@@ -471,6 +476,14 @@ export interface WsClient {
   readonly sendGateRequestChanges: (path: string, notes: string) => void;
   /** Interrupt a running bridge with a reason; no-op (warns) when the socket is not open. */
   readonly sendBridgeInterrupt: (path: string, reason: string) => void;
+  /** Answer a parked agent question for a bridge run; no-op (warns) when the socket is not open. */
+  readonly sendQuestionAnswer: (path: string, answer: string) => void;
+  /** Resolve the current escalation for a bridge run; no-op (warns) when the socket is not open. */
+  readonly sendEscalationChoice: (
+    path: string,
+    choice: 'let-debug-try' | 'give-guidance' | 'take-over',
+    notes?: string,
+  ) => void;
   /** Send an allow/deny decision for a pending permission request; no-op (warns) when the socket is not open. */
   readonly sendPermissionDecision: (
     sessionId: string,
@@ -1312,14 +1325,28 @@ function parseBridgeInboxItem(entry: unknown): BridgeInboxItem | null {
   if (typeof entry !== 'object' || entry === null) return null;
 
   const record = entry as Record<string, unknown>;
-  const { stage, kind, reason, ts } = record;
+  const { stage, kind, reason, ts, chips } = record;
 
   if (typeof stage !== 'string') return null;
   if (kind !== 'interrupt' && kind !== 'question' && kind !== 'escalation') return null;
   if (typeof reason !== 'string') return null;
   if (typeof ts !== 'number' || !Number.isFinite(ts)) return null;
 
-  return Object.freeze({ stage, kind, reason, ts });
+  let boundedChips: readonly string[] | undefined;
+  if (chips !== undefined) {
+    if (!Array.isArray(chips) || !chips.every((chip) => typeof chip === 'string')) return null;
+    boundedChips = Object.freeze(
+      chips.slice(0, 8).map((chip) => (chip as string).slice(0, 512)),
+    );
+  }
+
+  return Object.freeze({
+    stage,
+    kind,
+    reason,
+    ts,
+    ...(boundedChips !== undefined ? { chips: boundedChips } : {}),
+  });
 }
 
 /**
@@ -2016,6 +2043,23 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     sendFrame({ type: 'bridge-interrupt', path, reason });
   }
 
+  function sendQuestionAnswer(path: string, answer: string): void {
+    sendFrame({ type: 'question-answer', path, answer });
+  }
+
+  function sendEscalationChoice(
+    path: string,
+    choice: 'let-debug-try' | 'give-guidance' | 'take-over',
+    notes?: string,
+  ): void {
+    sendFrame({
+      type: 'escalation-choice',
+      path,
+      choice,
+      ...(notes !== undefined ? { notes } : {}),
+    });
+  }
+
   function sendPermissionDecision(
     sessionId: string,
     requestId: string,
@@ -2155,6 +2199,8 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     sendGateApprove,
     sendGateRequestChanges,
     sendBridgeInterrupt,
+    sendQuestionAnswer,
+    sendEscalationChoice,
     sendPermissionDecision,
     close,
   };
