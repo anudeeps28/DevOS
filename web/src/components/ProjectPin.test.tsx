@@ -558,4 +558,35 @@ describe('ProjectPin', () => {
       expect(onAssignWork).not.toHaveBeenCalled();
     });
   });
+
+  describe('plan-gate toggle', () => {
+    it('renders the toggle per project and unchecks it when uiPrefs has no plan_gate', () => {
+      projects = [sampleProject('/abs/one')];
+      renderPin();
+
+      const toggle = screen.getByTestId('plan-gate-/abs/one');
+      expect(toggle).not.toBeChecked();
+    });
+
+    it('reflects project.uiPrefs.plan_gate when true', () => {
+      projects = [{ ...sampleProject('/abs/one'), uiPrefs: { plan_gate: true } }];
+      renderPin();
+
+      const toggle = screen.getByTestId('plan-gate-/abs/one');
+      expect(toggle).toBeChecked();
+    });
+
+    it('calls pin with uiPrefs.plan_gate toggled on and preserves sibling keys', () => {
+      projects = [
+        { ...sampleProject('/abs/one'), uiPrefs: { auto_advance: true } },
+      ];
+      renderPin();
+
+      fireEvent.click(screen.getByTestId('plan-gate-/abs/one'));
+
+      expect(pin).toHaveBeenCalledWith('/abs/one', {
+        uiPrefs: { auto_advance: true, plan_gate: true },
+      });
+    });
+  });
 });

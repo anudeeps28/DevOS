@@ -42,6 +42,7 @@ function defaultProjectsResult(overrides: Partial<UseProjectsResult> = {}): UseP
     requestWorkItemSessions: vi.fn(),
     bridgeStates: {},
     approveGate: vi.fn(),
+    requestChanges: vi.fn(),
     spawnSession: vi.fn(),
     bridgeStart,
     transcripts: {},

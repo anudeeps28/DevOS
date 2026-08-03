@@ -233,4 +233,56 @@ describe('NeedsYouInbox', () => {
 
     expect(screen.getByTestId('needs-you-inbox-empty')).toBeInTheDocument();
   });
+
+  it('renders the notes input and Request-changes button for a question item', () => {
+    const state = bridgeState({
+      inbox: [{ stage: 'implement', kind: 'question', reason: 'Which approach?', ts: 1 }],
+    });
+    render(<NeedsYouInbox bridgeStates={[state]} onApprove={() => {}} />);
+
+    expect(screen.getByTestId('needs-you-notes-0')).toBeInTheDocument();
+    expect(screen.getByTestId('needs-you-request-changes-0')).toBeInTheDocument();
+  });
+
+  it('calls onRequestChanges with the item path and typed notes when clicked', () => {
+    const onRequestChanges = vi.fn();
+    const state = bridgeState({
+      path: '/abs/repo',
+      inbox: [{ stage: 'implement', kind: 'question', reason: 'Which approach?', ts: 1 }],
+    });
+    render(
+      <NeedsYouInbox bridgeStates={[state]} onApprove={() => {}} onRequestChanges={onRequestChanges} />,
+    );
+
+    fireEvent.change(screen.getByTestId('needs-you-notes-0'), {
+      target: { value: 'Please use approach B' },
+    });
+    fireEvent.click(screen.getByTestId('needs-you-request-changes-0'));
+
+    expect(onRequestChanges).toHaveBeenCalledTimes(1);
+    expect(onRequestChanges).toHaveBeenCalledWith('/abs/repo', 'Please use approach B');
+  });
+
+  it('still calls onApprove for a question item alongside Request changes', () => {
+    const onApprove = vi.fn();
+    const state = bridgeState({
+      path: '/abs/repo',
+      inbox: [{ stage: 'implement', kind: 'question', reason: 'Which approach?', ts: 1 }],
+    });
+    render(<NeedsYouInbox bridgeStates={[state]} onApprove={onApprove} />);
+
+    fireEvent.click(screen.getByTestId('needs-you-approve-0'));
+
+    expect(onApprove).toHaveBeenCalledWith('/abs/repo');
+  });
+
+  it('does not render request-changes controls for a non-question item', () => {
+    const state = bridgeState({
+      inbox: [{ stage: 'implement', kind: 'interrupt', reason: 'paused', ts: 1 }],
+    });
+    render(<NeedsYouInbox bridgeStates={[state]} onApprove={() => {}} />);
+
+    expect(screen.queryByTestId('needs-you-notes-0')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('needs-you-request-changes-0')).not.toBeInTheDocument();
+  });
 });

@@ -13,6 +13,15 @@ function attrNum(value: number | null): string {
   return value === null ? 'null' : String(value);
 }
 
+/** Defensively read `plan_gate` off an `unknown` uiPrefs blob. */
+function readPlanGate(uiPrefs: unknown): boolean {
+  return (
+    typeof uiPrefs === 'object' &&
+    uiPrefs !== null &&
+    (uiPrefs as Record<string, unknown>).plan_gate === true
+  );
+}
+
 /**
  * Compact git-status line for one pinned row. Render-only:
  *  - undefined snapshot → a subtle loading affordance,
@@ -439,6 +448,31 @@ export function ProjectPin({
                     signals={lifecycleSignals[project.path]}
                     trackerState={trackerStates[project.path]}
                   />
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <input
+                    id={`plan-gate-${project.path}`}
+                    data-testid={`plan-gate-${project.path}`}
+                    type="checkbox"
+                    checked={readPlanGate(project.uiPrefs)}
+                    onChange={(event) => {
+                      const nextChecked = event.target.checked;
+                      const sibling =
+                        typeof project.uiPrefs === 'object' && project.uiPrefs !== null
+                          ? (project.uiPrefs as Record<string, unknown>)
+                          : {};
+                      pin(project.path, {
+                        uiPrefs: { ...sibling, plan_gate: nextChecked },
+                      });
+                    }}
+                    className="h-3.5 w-3.5 rounded border-input"
+                  />
+                  <label
+                    htmlFor={`plan-gate-${project.path}`}
+                    className="text-xs font-medium text-muted-foreground"
+                  >
+                    Plan gate
+                  </label>
                 </div>
                 {(() => {
                   const trackerState = trackerStates[project.path];

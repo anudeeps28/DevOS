@@ -45,6 +45,7 @@ function App() {
     bridgeStates,
     rosterTimelines,
     approveGate,
+    requestChanges,
     spawnSession,
     bridgeStart,
     transcripts,
@@ -144,6 +145,7 @@ function App() {
             <NeedsYouInbox
               bridgeStates={Object.values(bridgeStates)}
               onApprove={approveGate}
+              onRequestChanges={requestChanges}
               permissions={Object.values(pendingPermissions).flat()}
               onPermissionDecision={(sessionId, requestId, decision) =>
                 resolvePermission(sessionId, requestId, decision)
