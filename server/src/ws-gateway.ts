@@ -266,13 +266,28 @@ function sendFleetFixture(socket: WebSocket): void {
 }
 
 // Deterministic canned inbox fixture for e2e — gated on DEVOS_E2E_INBOX_FIXTURE so it
-// NEVER runs unless explicitly opted into. One pinned fixture path, gate='escalated',
-// with a chips-bearing agent-question item and an escalation item — enough for the
-// Needs-you inbox to render both the Question and Escalation cards without a live SDK.
+// NEVER runs unless explicitly opted into. Seeds blocked items ACROSS TWO fixture
+// project paths, plus a permission request and a foreign-session signal, each with a
+// distinct, KNOWN `ts` so the merged/sorted (longest-wait-first) cross-project order
+// is deterministic end to end — enough for the Needs-you inbox to render the Question,
+// Escalation, second-project, permission, and foreign cards without a live SDK.
 const INBOX_FIXTURE_PATH = '/tmp/devos-e2e-inbox-fixture';
+const INBOX_FIXTURE_PATH_2 = '/tmp/devos-e2e-inbox-fixture-2';
+const INBOX_FIXTURE_PERMISSION_SESSION_ID = 'e2e-fixture-permission-session';
+const INBOX_FIXTURE_PERMISSION_REQUEST_ID = 'e2e-fixture-permission-request';
+const INBOX_FIXTURE_FOREIGN_SESSION_ID = 'e2e-fixture-foreign-session';
 
-/** Send the deterministic canned inbox fixture frame to one freshly-connected client. */
+/** Send the deterministic canned inbox fixture frames to one freshly-connected client. */
 function sendInboxFixture(socket: WebSocket): void {
+  // Known, ascending `ts` values (oldest → newest, i.e. longest-wait-first) so the
+  // cross-source, cross-project merge order is exactly predictable in the e2e.
+  const now = Date.now();
+  const questionTs = now - 50_000;
+  const escalationTs = now - 40_000;
+  const secondProjectTs = now - 30_000;
+  const permissionTs = now - 20_000;
+  const foreignTs = now - 10_000;
+
   const state: OutboundMessage = {
     type: 'bridge-state',
     path: INBOX_FIXTURE_PATH,
@@ -285,18 +300,62 @@ function sendInboxFixture(socket: WebSocket): void {
         kind: 'question',
         reason: 'Which approach should the agent take?',
         chips: ['Option A', 'Option B'],
-        ts: Date.now(),
+        ts: questionTs,
       },
       {
         stage: 'builder',
         kind: 'escalation',
         reason: 'Rework loop-cap hit — needs an operator decision.',
-        ts: Date.now(),
+        ts: escalationTs,
       },
     ],
     reworkCount: 0,
   };
   sendFrame(socket, state);
+
+  // A second, distinct fixture project — proves the merge is cross-project, not just
+  // cross-source within one path.
+  const secondProjectState: OutboundMessage = {
+    type: 'bridge-state',
+    path: INBOX_FIXTURE_PATH_2,
+    stage: 'reviewer',
+    gate: 'awaiting-approval',
+    sessionId: null,
+    inbox: [
+      {
+        stage: 'reviewer',
+        kind: 'interrupt',
+        reason: 'Second-project approval needed.',
+        ts: secondProjectTs,
+      },
+    ],
+    reworkCount: 0,
+  };
+  sendFrame(socket, secondProjectState);
+
+  const permissionRequest: OutboundMessage = {
+    type: 'permission-request',
+    path: INBOX_FIXTURE_PATH_2,
+    sessionId: INBOX_FIXTURE_PERMISSION_SESSION_ID,
+    requestId: INBOX_FIXTURE_PERMISSION_REQUEST_ID,
+    toolUseId: null,
+    toolName: 'Bash',
+    title: 'Run pytest',
+    input: '{}',
+    ts: permissionTs,
+  };
+  sendFrame(socket, permissionRequest);
+
+  const foreignNeedsYou: OutboundMessage = {
+    type: 'foreign-session-needs-you',
+    path: INBOX_FIXTURE_PATH_2,
+    sessionId: INBOX_FIXTURE_FOREIGN_SESSION_ID,
+    kind: 'agent_needs_input',
+    reason: 'Foreign session needs input.',
+    ts: foreignTs,
+    cleared: false,
+  };
+  sendFrame(socket, foreignNeedsYou);
 }
 
 export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGateway {
@@ -402,6 +461,7 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
       toolName: req.toolName,
       title: req.title,
       input: req.input,
+      ts: req.ts,
     };
     for (const client of wss.clients) {
       sendFrame(client, frame);

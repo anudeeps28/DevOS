@@ -680,6 +680,7 @@ describe('SessionManager permission relay', () => {
       toolName: 'Bash',
       title: null,
       input: '{"command":"ls"}',
+      ts: 1_700_000_000_000,
     };
     fake.emitPermissionRequest(request);
 
@@ -704,6 +705,7 @@ describe('SessionManager permission relay', () => {
       toolName: 'Bash',
       title: null,
       input: '{}',
+      ts: 1_700_000_000_000,
     });
 
     mgr.resolvePermission(snap.id, 'req-2', 'deny');
@@ -769,6 +771,7 @@ describe('SessionManager permission relay', () => {
       toolName: 'Write',
       title: null,
       input: '{}',
+      ts: 1_700_000_000_000,
     });
 
     // First decision resolves + audits; a second click (e.g. from another tab) is a no-op.
@@ -796,6 +799,7 @@ describe('SessionManager permission relay', () => {
       toolName: 'Bash',
       title: null,
       input: '{}',
+      ts: 1_700_000_000_000,
     });
 
     mgr.resolvePermission(snap.id, 'req-always', 'allow-always');

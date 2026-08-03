@@ -260,6 +260,7 @@ export interface PermissionRequest {
   readonly toolName: string;
   readonly title: string | null;
   readonly input: string;
+  readonly ts: number;
 }
 
 /**
@@ -1406,7 +1407,8 @@ function parseBridgeState(data: unknown): BridgeState | null {
 /**
  * Validate a raw WS frame against the pinned permission-request contract:
  * `{ type: 'permission-request', path: string, sessionId: string, requestId: string,
- *    toolUseId: string|null, toolName: string, title: string|null, input: string }`.
+ *    toolUseId: string|null, toolName: string, title: string|null, input: string,
+ *    ts: <finite number> }`.
  * Returns a frozen PermissionRequest, or null for anything malformed.
  */
 function parsePermissionRequest(data: unknown): PermissionRequest | null {
@@ -1424,7 +1426,7 @@ function parsePermissionRequest(data: unknown): PermissionRequest | null {
   const frame = parsed as Record<string, unknown>;
   if (frame.type !== 'permission-request') return null;
 
-  const { path, sessionId, requestId, toolUseId, toolName, title, input } = frame;
+  const { path, sessionId, requestId, toolUseId, toolName, title, input, ts } = frame;
 
   if (typeof path !== 'string' || path.length === 0) return null;
   if (typeof sessionId !== 'string' || sessionId.length === 0) return null;
@@ -1433,8 +1435,9 @@ function parsePermissionRequest(data: unknown): PermissionRequest | null {
   if (typeof toolName !== 'string' || toolName.length === 0) return null;
   if (title !== null && typeof title !== 'string') return null;
   if (typeof input !== 'string') return null;
+  if (typeof ts !== 'number' || !Number.isFinite(ts)) return null;
 
-  return Object.freeze({ path, sessionId, requestId, toolUseId, toolName, title, input });
+  return Object.freeze({ path, sessionId, requestId, toolUseId, toolName, title, input, ts });
 }
 
 /**

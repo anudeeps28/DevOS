@@ -36,6 +36,7 @@ function permission(overrides: Partial<PermissionRequest> = {}): PermissionReque
     toolName: 'Bash',
     title: null,
     input: '{}',
+    ts: 1_700_000_000_000,
     ...overrides,
   };
 }

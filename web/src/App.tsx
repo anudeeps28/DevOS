@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 
 import { ConnectionIndicator } from '@/components/ConnectionIndicator';
 import { CostToday } from '@/components/CostToday';
@@ -12,8 +12,10 @@ import { SkillsPanel } from '@/components/SkillsPanel';
 import { TeamRoom } from '@/components/TeamRoom';
 import { WorkItemDetail } from '@/components/WorkItemDetail';
 import { useHeartbeat } from '@/hooks/useHeartbeat';
+import { useNeedsYouToast } from '@/hooks/useNeedsYouToast';
 import { useProjects } from '@/hooks/useProjects';
 import { deriveFleet } from '@/lib/fleet-state';
+import { deriveNeedsYou } from '@/lib/needs-you';
 import { derivePipelineTimeline } from '@/lib/pipeline-timeline';
 
 // Minimal centered shell: the live heartbeat + connection indicator, driven by
@@ -62,6 +64,12 @@ function App() {
     requestWorkItemSessions,
   } = useProjects();
 
+  const needsYouItems = useMemo(
+    () => deriveNeedsYou({ pendingPermissions, bridgeStates, foreignNeedsYou }),
+    [pendingPermissions, bridgeStates, foreignNeedsYou],
+  );
+  useNeedsYouToast(needsYouItems);
+
   return (
     <main className="flex min-h-screen flex-col items-center gap-8 bg-background p-8 text-foreground">
       <h1 className="text-4xl font-bold tracking-tight">DevOS</h1>
@@ -78,6 +86,7 @@ function App() {
             setSelected(null);
             setTab(next);
           }}
+          badges={{ inbox: needsYouItems.length }}
         />
         <div className="flex flex-1 flex-col items-center gap-8">
           {selected !== null ? (
@@ -145,16 +154,14 @@ function App() {
           )}
           {tab === 'inbox' && (
             <NeedsYouInbox
-              bridgeStates={Object.values(bridgeStates)}
+              items={needsYouItems}
               onApprove={approveGate}
               onRequestChanges={requestChanges}
               onAnswerQuestion={answerQuestion}
               onEscalationChoice={resolveEscalation}
-              permissions={Object.values(pendingPermissions).flat()}
               onPermissionDecision={(sessionId, requestId, decision) =>
                 resolvePermission(sessionId, requestId, decision)
               }
-              foreignItems={foreignNeedsYou}
             />
           )}
             </>
