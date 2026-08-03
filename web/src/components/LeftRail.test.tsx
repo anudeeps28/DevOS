@@ -26,4 +26,20 @@ describe('LeftRail', () => {
     fireEvent.click(screen.getByTestId('tab-inbox'));
     expect(onSelect).toHaveBeenCalledWith('inbox');
   });
+
+  it('renders the inbox badge count when positive', () => {
+    render(<LeftRail active="inbox" onSelect={() => {}} badges={{ inbox: 3 }} />);
+
+    expect(screen.getByTestId('tab-badge-inbox')).toHaveTextContent('3');
+  });
+
+  it('renders no inbox badge when the count is zero or absent', () => {
+    const { rerender } = render(
+      <LeftRail active="inbox" onSelect={() => {}} badges={{ inbox: 0 }} />,
+    );
+    expect(screen.queryByTestId('tab-badge-inbox')).not.toBeInTheDocument();
+
+    rerender(<LeftRail active="inbox" onSelect={() => {}} />);
+    expect(screen.queryByTestId('tab-badge-inbox')).not.toBeInTheDocument();
+  });
 });

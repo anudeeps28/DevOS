@@ -10,6 +10,7 @@ import {
   type Heartbeat,
   type HookBusLiveness,
   type LifecycleSignals,
+  type PermissionRequest,
   type RegistryCandidate,
   type RegistryProject,
   type RosterTimeline,
@@ -1733,6 +1734,92 @@ describe('ws-client foreign-session-needs-you frames', () => {
     expect(() => socket.message(foreignNeedsYouFrame({ kind: 'not-a-kind' }))).not.toThrow();
     expect(() => socket.message(foreignNeedsYouFrame({ cleared: 'nope' }))).not.toThrow();
     expect(() => socket.message(foreignNeedsYouFrame({ ts: 'not-a-number' }))).not.toThrow();
+
+    expect(received).toEqual([]);
+    expect(warn).toHaveBeenCalled();
+  });
+});
+
+/** A well-formed permission-request frame body. */
+function samplePermissionRequest(): PermissionRequest {
+  return {
+    path: '/abs/proj',
+    sessionId: 'sess-1',
+    requestId: 'req-1',
+    toolUseId: 'tu-1',
+    toolName: 'Bash',
+    title: 'run a command',
+    input: '{"command":"ls"}',
+    ts: 1700000000000,
+  };
+}
+
+function permissionRequestFrame(overrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({ type: 'permission-request', ...samplePermissionRequest(), ...overrides });
+}
+
+describe('ws-client permission-request frames', () => {
+  beforeEach(() => {
+    FakeSocket.instances = [];
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function makePermissionRequestClient() {
+    const received: PermissionRequest[] = [];
+    const client = createWsClient({
+      url: 'ws://localhost/ws',
+      createWebSocket: (url) => new FakeSocket(url),
+    });
+    const off = client.onPermissionRequest((request) => received.push(request));
+    const socket = FakeSocket.instances[0]!;
+    socket.open();
+    return { client, received, off, socket };
+  }
+
+  it('delivers a valid permission-request frame with a numeric ts as a frozen request', () => {
+    const { received, socket } = makePermissionRequestClient();
+    const request = samplePermissionRequest();
+
+    socket.message(permissionRequestFrame());
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toEqual(request);
+    expect(typeof received[0]!.ts).toBe('number');
+    expect(Object.isFrozen(received[0])).toBe(true);
+  });
+
+  it('drops a permission-request frame with a missing ts', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { received, socket } = makePermissionRequestClient();
+
+    const frame = JSON.parse(permissionRequestFrame()) as Record<string, unknown>;
+    delete frame.ts;
+
+    expect(() => socket.message(JSON.stringify(frame))).not.toThrow();
+
+    expect(received).toEqual([]);
+    expect(warn).toHaveBeenCalled();
+  });
+
+  it('drops a permission-request frame with a non-number ts', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { received, socket } = makePermissionRequestClient();
+
+    expect(() => socket.message(permissionRequestFrame({ ts: 'not-a-number' }))).not.toThrow();
+
+    expect(received).toEqual([]);
+    expect(warn).toHaveBeenCalled();
+  });
+
+  it('drops a permission-request frame with a non-finite ts', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { received, socket } = makePermissionRequestClient();
+
+    expect(() => socket.message(permissionRequestFrame({ ts: Number.POSITIVE_INFINITY }))).not.toThrow();
+    expect(() => socket.message(permissionRequestFrame({ ts: Number.NaN }))).not.toThrow();
 
     expect(received).toEqual([]);
     expect(warn).toHaveBeenCalled();

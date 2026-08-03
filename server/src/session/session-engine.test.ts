@@ -126,11 +126,40 @@ describe('createPermissionBroker', () => {
         toolName: 'Bash',
         title: null,
         input: JSON.stringify({ command: 'ls' }),
+        ts: expect.any(Number),
       },
     ]);
 
     broker.resolve('req-1', 'allow');
     await promise;
+  });
+
+  it('stamps the emitted request with a finite numeric ts equal to the park-time clock', async () => {
+    vi.useFakeTimers();
+    const FIXED_NOW = 1_700_000_000_000;
+    vi.setSystemTime(FIXED_NOW);
+    try {
+      const broker = createPermissionBroker();
+      const requests: { ts: number }[] = [];
+      broker.onRequest((req) => requests.push(req));
+
+      const controller = new AbortController();
+      const promise = broker.canUseTool(
+        'Bash',
+        { command: 'ls' },
+        { requestId: 'req-1', toolUseID: 'tu-1', signal: controller.signal } as never,
+      );
+
+      expect(requests).toHaveLength(1);
+      expect(typeof requests[0]!.ts).toBe('number');
+      expect(Number.isFinite(requests[0]!.ts)).toBe(true);
+      expect(requests[0]!.ts).toBe(FIXED_NOW);
+
+      broker.resolve('req-1', 'allow');
+      await promise;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('resolve(requestId, "allow") resolves the parked Promise to { behavior: "allow" }', async () => {

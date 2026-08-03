@@ -865,6 +865,7 @@ describe('ws-gateway permission routing', () => {
     toolName: 'Bash',
     title: 'run a command',
     input: '{"command":"ls"}',
+    ts: 1_700_000_000_000,
   };
 
   it('routes a permission-decision for a pinned session to resolvePermission(id, requestId, decision)', async () => {
@@ -936,7 +937,9 @@ describe('ws-gateway permission routing', () => {
       requestId: 'req-1',
       toolName: 'Bash',
       input: '{"command":"ls"}',
+      ts: permReq.ts,
     });
+    expect(typeof frames[0]!.ts).toBe('number');
   });
 
   it('broadcasts nothing for a permission-request whose path is not pinned (fails closed)', async () => {

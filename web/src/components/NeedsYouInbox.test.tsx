@@ -2,6 +2,7 @@ import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { NeedsYouInbox } from '@/components/NeedsYouInbox';
+import { deriveNeedsYou, type NeedsYouItem } from '@/lib/needs-you';
 import type { BridgeState, ForeignNeedsYou, PermissionRequest } from '@/lib/ws-client';
 
 function bridgeState(overrides: Partial<BridgeState> = {}): BridgeState {
@@ -16,24 +17,70 @@ function bridgeState(overrides: Partial<BridgeState> = {}): BridgeState {
   };
 }
 
+function permissionRequest(overrides: Partial<PermissionRequest> = {}): PermissionRequest {
+  return {
+    path: '/abs/repo',
+    sessionId: 's1',
+    requestId: 'req9',
+    toolUseId: 'tu-9',
+    toolName: 'Write',
+    title: 'Write to config.json',
+    input: '{"file":"config.json"}',
+    ts: 1_700_000_000_000,
+    ...overrides,
+  };
+}
+
+function foreignItem(overrides: Partial<ForeignNeedsYou> = {}): ForeignNeedsYou {
+  return {
+    path: '/abs/other',
+    sessionId: 'foreign-1',
+    kind: 'idle_prompt',
+    reason: 'Waiting for input on step 3',
+    ts: 1_700_000_000_000,
+    cleared: false,
+    ...overrides,
+  };
+}
+
+/** Build a single-source `items` list via the real deriver (bridge-only). */
+function itemsFromBridgeStates(states: readonly BridgeState[]): readonly NeedsYouItem[] {
+  const bridgeStates: Record<string, BridgeState> = {};
+  for (const state of states) bridgeStates[state.path] = state;
+  return deriveNeedsYou({ pendingPermissions: {}, bridgeStates, foreignNeedsYou: [] });
+}
+
+function itemsFromPermissions(permissions: readonly PermissionRequest[]): readonly NeedsYouItem[] {
+  return deriveNeedsYou({
+    pendingPermissions: { s1: permissions },
+    bridgeStates: {},
+    foreignNeedsYou: [],
+  });
+}
+
+function itemsFromForeign(foreignItems: readonly ForeignNeedsYou[]): readonly NeedsYouItem[] {
+  return deriveNeedsYou({ pendingPermissions: {}, bridgeStates: {}, foreignNeedsYou: foreignItems });
+}
+
 describe('NeedsYouInbox', () => {
-  it('shows the empty state when there is no bridge state', () => {
-    render(<NeedsYouInbox bridgeStates={[]} onApprove={() => {}} />);
+  it('shows the empty state when items is empty', () => {
+    render(<NeedsYouInbox items={[]} onApprove={() => {}} />);
 
     expect(screen.getByTestId('needs-you-inbox-empty')).toBeInTheDocument();
   });
 
-  it('shows the empty state when the inbox is empty', () => {
-    render(<NeedsYouInbox bridgeStates={[bridgeState({ inbox: [] })]} onApprove={() => {}} />);
+  it('shows the empty state when the bridge inbox is empty', () => {
+    const items = itemsFromBridgeStates([bridgeState({ inbox: [] })]);
+    render(<NeedsYouInbox items={items} onApprove={() => {}} />);
 
     expect(screen.getByTestId('needs-you-inbox-empty')).toBeInTheDocument();
   });
 
   it('renders a parked item with its stage, kind, and reason', () => {
     const state = bridgeState({
-      inbox: [{ stage: 'implement', kind: 'question', reason: 'Which approach?', ts: 1700000000000 }],
+      inbox: [{ stage: 'implement', kind: 'question', reason: 'Which approach?', ts: 1_700_000_000_000 }],
     });
-    render(<NeedsYouInbox bridgeStates={[state]} onApprove={() => {}} />);
+    render(<NeedsYouInbox items={itemsFromBridgeStates([state])} onApprove={() => {}} />);
 
     expect(screen.queryByTestId('needs-you-inbox-empty')).not.toBeInTheDocument();
     const item = screen.getByTestId('needs-you-item-0');
@@ -47,7 +94,7 @@ describe('NeedsYouInbox', () => {
     const state = bridgeState({
       inbox: [{ stage: 'implement', kind: 'interrupt', reason: 'paused', ts: 1 }],
     });
-    render(<NeedsYouInbox bridgeStates={[state]} onApprove={onApprove} />);
+    render(<NeedsYouInbox items={itemsFromBridgeStates([state])} onApprove={onApprove} />);
 
     fireEvent.click(screen.getByTestId('needs-you-approve-0'));
 
@@ -63,7 +110,7 @@ describe('NeedsYouInbox', () => {
       path: '/abs/two',
       inbox: [{ stage: 'review', kind: 'interrupt', reason: 'paused', ts: 2 }],
     });
-    render(<NeedsYouInbox bridgeStates={[stateOne, stateTwo]} onApprove={() => {}} />);
+    render(<NeedsYouInbox items={itemsFromBridgeStates([stateOne, stateTwo])} onApprove={() => {}} />);
 
     expect(screen.getByTestId('needs-you-item-0')).toBeInTheDocument();
     expect(screen.getByTestId('needs-you-item-1')).toBeInTheDocument();
@@ -80,7 +127,7 @@ describe('NeedsYouInbox', () => {
       path: '/abs/two',
       inbox: [{ stage: 'review', kind: 'interrupt', reason: 'paused', ts: 2 }],
     });
-    render(<NeedsYouInbox bridgeStates={[stateOne, stateTwo]} onApprove={onApprove} />);
+    render(<NeedsYouInbox items={itemsFromBridgeStates([stateOne, stateTwo])} onApprove={onApprove} />);
 
     fireEvent.click(screen.getByTestId('needs-you-approve-1'));
 
@@ -88,16 +135,8 @@ describe('NeedsYouInbox', () => {
   });
 
   it('renders a pending permission request with its title', () => {
-    const permission: PermissionRequest = {
-      path: '/abs/repo',
-      sessionId: 's1',
-      requestId: 'req9',
-      toolUseId: 'tu-9',
-      toolName: 'Write',
-      title: 'Write to config.json',
-      input: '{"file":"config.json"}',
-    };
-    render(<NeedsYouInbox bridgeStates={[]} onApprove={() => {}} permissions={[permission]} />);
+    const permission = permissionRequest();
+    render(<NeedsYouInbox items={itemsFromPermissions([permission])} onApprove={() => {}} />);
 
     const item = screen.getByTestId('needs-you-permission-req9');
     expect(item).toBeInTheDocument();
@@ -106,20 +145,11 @@ describe('NeedsYouInbox', () => {
 
   it('calls onPermissionDecision with "allow" when the Allow button is clicked', () => {
     const onPermissionDecision = vi.fn();
-    const permission: PermissionRequest = {
-      path: '/abs/repo',
-      sessionId: 's1',
-      requestId: 'req9',
-      toolUseId: 'tu-9',
-      toolName: 'Write',
-      title: 'Write to config.json',
-      input: '{"file":"config.json"}',
-    };
+    const permission = permissionRequest();
     render(
       <NeedsYouInbox
-        bridgeStates={[]}
+        items={itemsFromPermissions([permission])}
         onApprove={() => {}}
-        permissions={[permission]}
         onPermissionDecision={onPermissionDecision}
       />,
     );
@@ -131,20 +161,11 @@ describe('NeedsYouInbox', () => {
 
   it('calls onPermissionDecision with "deny" when the Deny button is clicked', () => {
     const onPermissionDecision = vi.fn();
-    const permission: PermissionRequest = {
-      path: '/abs/repo',
-      sessionId: 's1',
-      requestId: 'req9',
-      toolUseId: 'tu-9',
-      toolName: 'Write',
-      title: 'Write to config.json',
-      input: '{"file":"config.json"}',
-    };
+    const permission = permissionRequest();
     render(
       <NeedsYouInbox
-        bridgeStates={[]}
+        items={itemsFromPermissions([permission])}
         onApprove={() => {}}
-        permissions={[permission]}
         onPermissionDecision={onPermissionDecision}
       />,
     );
@@ -156,20 +177,11 @@ describe('NeedsYouInbox', () => {
 
   it('calls onPermissionDecision with "allow-always" when the Always allow button is clicked', () => {
     const onPermissionDecision = vi.fn();
-    const permission: PermissionRequest = {
-      path: '/abs/repo',
-      sessionId: 's1',
-      requestId: 'req9',
-      toolUseId: 'tu-9',
-      toolName: 'Write',
-      title: 'Write to config.json',
-      input: '{"file":"config.json"}',
-    };
+    const permission = permissionRequest();
     render(
       <NeedsYouInbox
-        bridgeStates={[]}
+        items={itemsFromPermissions([permission])}
         onApprove={() => {}}
-        permissions={[permission]}
         onPermissionDecision={onPermissionDecision}
       />,
     );
@@ -181,64 +193,34 @@ describe('NeedsYouInbox', () => {
     expect(onPermissionDecision).toHaveBeenCalledWith('s1', 'req9', 'allow-always');
   });
 
-  it('does not show the empty-state message when permissions are present but the inbox is empty', () => {
-    const permission: PermissionRequest = {
-      path: '/abs/repo',
-      sessionId: 's1',
-      requestId: 'req9',
-      toolUseId: null,
-      toolName: 'Write',
-      title: null,
-      input: '{}',
-    };
-    render(<NeedsYouInbox bridgeStates={[]} onApprove={() => {}} permissions={[permission]} />);
+  it('does not show the empty-state message when a permission item is present', () => {
+    const permission = permissionRequest({ toolUseId: null, title: null, input: '{}' });
+    render(<NeedsYouInbox items={itemsFromPermissions([permission])} onApprove={() => {}} />);
 
     expect(screen.queryByTestId('needs-you-inbox-empty')).not.toBeInTheDocument();
   });
 
   it('renders a foreign needs-you item with its reason', () => {
-    const foreignItem: ForeignNeedsYou = {
-      path: '/abs/other',
-      sessionId: 'foreign-1',
-      kind: 'idle_prompt',
-      reason: 'Waiting for input on step 3',
-      ts: 1700000000000,
-      cleared: false,
-    };
-    render(<NeedsYouInbox bridgeStates={[]} onApprove={() => {}} foreignItems={[foreignItem]} />);
+    const item = foreignItem();
+    render(<NeedsYouInbox items={itemsFromForeign([item])} onApprove={() => {}} />);
 
-    const item = screen.getByTestId('needs-you-foreign-foreign-1');
-    expect(item).toHaveAttribute('data-kind', 'idle_prompt');
-    expect(item).toHaveTextContent('Waiting for input on step 3');
+    const rendered = screen.getByTestId('needs-you-foreign-foreign-1');
+    expect(rendered).toHaveAttribute('data-kind', 'idle_prompt');
+    expect(rendered).toHaveTextContent('Waiting for input on step 3');
   });
 
-  it('does not show the empty-state message when only foreign items are present', () => {
-    const foreignItem: ForeignNeedsYou = {
-      path: '/abs/other',
-      sessionId: 'foreign-1',
-      kind: 'permission_prompt',
-      reason: 'needs approval',
-      ts: 1700000000000,
-      cleared: false,
-    };
-    render(<NeedsYouInbox bridgeStates={[]} onApprove={() => {}} foreignItems={[foreignItem]} />);
+  it('does not show the empty-state message when only a foreign item is present', () => {
+    const item = foreignItem({ kind: 'permission_prompt', reason: 'needs approval' });
+    render(<NeedsYouInbox items={itemsFromForeign([item])} onApprove={() => {}} />);
 
     expect(screen.queryByTestId('needs-you-inbox-empty')).not.toBeInTheDocument();
-  });
-
-  it('shows the empty state when inbox, permissions, and foreignItems are all empty', () => {
-    render(
-      <NeedsYouInbox bridgeStates={[]} onApprove={() => {}} permissions={[]} foreignItems={[]} />,
-    );
-
-    expect(screen.getByTestId('needs-you-inbox-empty')).toBeInTheDocument();
   });
 
   it('renders the notes input and Request-changes button for a question item', () => {
     const state = bridgeState({
       inbox: [{ stage: 'implement', kind: 'question', reason: 'Which approach?', ts: 1 }],
     });
-    render(<NeedsYouInbox bridgeStates={[state]} onApprove={() => {}} />);
+    render(<NeedsYouInbox items={itemsFromBridgeStates([state])} onApprove={() => {}} />);
 
     expect(screen.getByTestId('needs-you-notes-0')).toBeInTheDocument();
     expect(screen.getByTestId('needs-you-request-changes-0')).toBeInTheDocument();
@@ -251,7 +233,11 @@ describe('NeedsYouInbox', () => {
       inbox: [{ stage: 'implement', kind: 'question', reason: 'Which approach?', ts: 1 }],
     });
     render(
-      <NeedsYouInbox bridgeStates={[state]} onApprove={() => {}} onRequestChanges={onRequestChanges} />,
+      <NeedsYouInbox
+        items={itemsFromBridgeStates([state])}
+        onApprove={() => {}}
+        onRequestChanges={onRequestChanges}
+      />,
     );
 
     fireEvent.change(screen.getByTestId('needs-you-notes-0'), {
@@ -269,7 +255,7 @@ describe('NeedsYouInbox', () => {
       path: '/abs/repo',
       inbox: [{ stage: 'implement', kind: 'question', reason: 'Which approach?', ts: 1 }],
     });
-    render(<NeedsYouInbox bridgeStates={[state]} onApprove={onApprove} />);
+    render(<NeedsYouInbox items={itemsFromBridgeStates([state])} onApprove={onApprove} />);
 
     fireEvent.click(screen.getByTestId('needs-you-approve-0'));
 
@@ -280,7 +266,7 @@ describe('NeedsYouInbox', () => {
     const state = bridgeState({
       inbox: [{ stage: 'implement', kind: 'interrupt', reason: 'paused', ts: 1 }],
     });
-    render(<NeedsYouInbox bridgeStates={[state]} onApprove={() => {}} />);
+    render(<NeedsYouInbox items={itemsFromBridgeStates([state])} onApprove={() => {}} />);
 
     expect(screen.queryByTestId('needs-you-notes-0')).not.toBeInTheDocument();
     expect(screen.queryByTestId('needs-you-request-changes-0')).not.toBeInTheDocument();
@@ -292,7 +278,7 @@ describe('NeedsYouInbox', () => {
         { stage: 'implement', kind: 'question', reason: 'Pick one', ts: 1, chips: ['Option A', 'Option B'] },
       ],
     });
-    render(<NeedsYouInbox bridgeStates={[state]} onApprove={() => {}} />);
+    render(<NeedsYouInbox items={itemsFromBridgeStates([state])} onApprove={() => {}} />);
 
     expect(screen.getByTestId('needs-you-chip-0-0')).toHaveTextContent('Option A');
     expect(screen.getByTestId('needs-you-chip-0-1')).toHaveTextContent('Option B');
@@ -311,7 +297,11 @@ describe('NeedsYouInbox', () => {
       ],
     });
     render(
-      <NeedsYouInbox bridgeStates={[state]} onApprove={() => {}} onAnswerQuestion={onAnswerQuestion} />,
+      <NeedsYouInbox
+        items={itemsFromBridgeStates([state])}
+        onApprove={() => {}}
+        onAnswerQuestion={onAnswerQuestion}
+      />,
     );
 
     fireEvent.click(screen.getByTestId('needs-you-chip-0-1'));
@@ -326,7 +316,11 @@ describe('NeedsYouInbox', () => {
       inbox: [{ stage: 'implement', kind: 'question', reason: 'Pick one', ts: 1, chips: [] }],
     });
     render(
-      <NeedsYouInbox bridgeStates={[state]} onApprove={() => {}} onAnswerQuestion={onAnswerQuestion} />,
+      <NeedsYouInbox
+        items={itemsFromBridgeStates([state])}
+        onApprove={() => {}}
+        onAnswerQuestion={onAnswerQuestion}
+      />,
     );
 
     fireEvent.change(screen.getByTestId('needs-you-notes-0'), { target: { value: 'My own answer' } });
@@ -339,7 +333,7 @@ describe('NeedsYouInbox', () => {
     const state = bridgeState({
       inbox: [{ stage: 'implement', kind: 'question', reason: 'Which approach?', ts: 1 }],
     });
-    render(<NeedsYouInbox bridgeStates={[state]} onApprove={() => {}} />);
+    render(<NeedsYouInbox items={itemsFromBridgeStates([state])} onApprove={() => {}} />);
 
     expect(screen.getByTestId('needs-you-notes-0')).toBeInTheDocument();
     expect(screen.getByTestId('needs-you-request-changes-0')).toBeInTheDocument();
@@ -353,7 +347,7 @@ describe('NeedsYouInbox', () => {
       gate: 'escalated',
       inbox: [{ stage: 'implement', kind: 'escalation', reason: 'Stuck in a loop', ts: 1 }],
     });
-    render(<NeedsYouInbox bridgeStates={[state]} onApprove={() => {}} />);
+    render(<NeedsYouInbox items={itemsFromBridgeStates([state])} onApprove={() => {}} />);
 
     expect(screen.getByTestId('needs-you-escalation-debug-0')).toBeInTheDocument();
     expect(screen.getByTestId('needs-you-escalation-guidance-0')).toBeInTheDocument();
@@ -370,7 +364,7 @@ describe('NeedsYouInbox', () => {
     });
     render(
       <NeedsYouInbox
-        bridgeStates={[state]}
+        items={itemsFromBridgeStates([state])}
         onApprove={() => {}}
         onEscalationChoice={onEscalationChoice}
       />,
@@ -392,11 +386,34 @@ describe('NeedsYouInbox', () => {
       gate: 'awaiting-approval',
       inbox: [{ stage: 'implement', kind: 'escalation', reason: 'Advisory warning', ts: 1 }],
     });
-    render(<NeedsYouInbox bridgeStates={[state]} onApprove={() => {}} />);
+    render(<NeedsYouInbox items={itemsFromBridgeStates([state])} onApprove={() => {}} />);
 
     expect(screen.getByTestId('needs-you-approve-0')).toBeInTheDocument();
     expect(screen.queryByTestId('needs-you-escalation-debug-0')).not.toBeInTheDocument();
     expect(screen.queryByTestId('needs-you-escalation-guidance-0')).not.toBeInTheDocument();
     expect(screen.queryByTestId('needs-you-escalation-takeover-0')).not.toBeInTheDocument();
+  });
+
+  it('renders a mixed items list (permission, bridge, foreign) in the given order', () => {
+    const permission = permissionRequest({ requestId: 'req-mixed', ts: 1 });
+    const bridge = bridgeState({
+      path: '/abs/mixed',
+      inbox: [{ stage: 'implement', kind: 'interrupt', reason: 'paused', ts: 2 }],
+    });
+    const foreign = foreignItem({ sessionId: 'foreign-mixed', ts: 3 });
+
+    const items = deriveNeedsYou({
+      pendingPermissions: { s1: [permission] },
+      bridgeStates: { [bridge.path]: bridge },
+      foreignNeedsYou: [foreign],
+    });
+
+    render(<NeedsYouInbox items={items} onApprove={() => {}} />);
+
+    const rendered = screen.getAllByRole('listitem');
+    expect(rendered).toHaveLength(3);
+    expect(rendered[0]).toHaveAttribute('data-testid', 'needs-you-permission-req-mixed');
+    expect(rendered[1]).toHaveAttribute('data-testid', 'needs-you-item-1');
+    expect(rendered[2]).toHaveAttribute('data-testid', 'needs-you-foreign-foreign-mixed');
   });
 });

@@ -150,6 +150,7 @@ export interface EnginePermissionRequest {
   readonly toolName: string;
   readonly title: string | null;
   readonly input: string;
+  readonly ts: number;
 }
 
 export type PermissionDecision = 'allow' | 'deny' | 'allow-always';
@@ -202,6 +203,7 @@ export function createPermissionBroker(): PermissionBroker {
         toolName,
         title: opts.title ?? null,
         input: truncate(JSON.stringify(input), MAX_TEXT_CHARS),
+        ts: Date.now(),
       });
     });
 

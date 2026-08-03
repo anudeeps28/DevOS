@@ -227,6 +227,7 @@ describe('TeamRoom', () => {
       toolName: 'Bash',
       title: 'Run shell command',
       input: '{"command":"ls"}',
+      ts: 1_700_000_000_000,
     };
     renderRoom(
       { '/abs/one': [runningSession('sess-1')] },
@@ -249,6 +250,7 @@ describe('TeamRoom', () => {
       toolName: 'Bash',
       title: 'Run shell command',
       input: '{"command":"ls"}',
+      ts: 1_700_000_000_000,
     };
     renderRoom(
       { '/abs/one': [runningSession('sess-1')] },
@@ -271,6 +273,7 @@ describe('TeamRoom', () => {
       toolName: 'Bash',
       title: 'Run shell command',
       input: '{"command":"ls"}',
+      ts: 1_700_000_000_000,
     };
     renderRoom(
       { '/abs/one': [runningSession('sess-1')] },
@@ -293,6 +296,7 @@ describe('TeamRoom', () => {
       toolName: 'Bash',
       title: 'Run shell command',
       input: '{"command":"ls"}',
+      ts: 1_700_000_000_000,
     };
     renderRoom(
       { '/abs/one': [runningSession('sess-1')] },

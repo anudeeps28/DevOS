@@ -407,6 +407,7 @@ export interface PermissionRequestSnapshot {
   readonly toolName: string;
   readonly title: string | null;
   readonly input: string;
+  readonly ts: number;
 }
 
 /** Inbound: the user's decision on an outstanding permission request. */
