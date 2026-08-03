@@ -16,6 +16,7 @@ import { join } from 'node:path';
 
 import type { Registry } from '../registry/registry.js';
 import type { BridgeGate, BridgeInboxItem, BridgeStateSnapshot } from '../ws-protocol.js';
+import { createPhaseWatcher, type PhaseTransitionSignal, type PhaseWatcher } from './phase-watcher.js';
 import { defaultOpenPr, type OpenPrAdapter } from './pr-adapter.js';
 import { buildResumePrompt } from './resume-prompt.js';
 import type { Role } from './roles.js';
@@ -36,9 +37,16 @@ export interface Bridge {
     kind: 'interrupt' | 'question' | 'escalation',
     reason: string,
   ) => void;
+  /** Steer the builder while its plan is paused for review, then re-arm the plan gate
+   * for the revised plan's next planning→coding transition. No-op unless the run is
+   * genuinely `planGatePending` with a live current session. */
+  readonly requestChanges: (projectPath: string, notes: string) => void;
   readonly onState: (listener: (snap: BridgeStateSnapshot) => void) => () => void;
   readonly getState: (projectPath: string) => BridgeStateSnapshot | null;
   readonly getInbox: (projectPath: string) => readonly BridgeInboxItem[];
+  /** Tear down every live plan-gate `phase.md` watcher. Called on server shutdown so
+   * fs.watch handles for in-flight plan-gated builders do not outlive the process's stop. */
+  readonly stopAll: () => void;
 }
 
 export interface BridgeDeps {
@@ -66,6 +74,9 @@ export interface BridgeDeps {
   readonly openPr?: OpenPrAdapter;
   /** Max context-recycle respawns per run before escalating instead of resuming again. Defaults to 2. */
   readonly contextRespawnCap?: number;
+  /** Watches a run's `phase.md` marker for the plan-gate's planning→coding transition —
+   * defaults to `createPhaseWatcher()`. Tests inject a fake. */
+  readonly phaseWatcher?: PhaseWatcher;
 }
 
 const DEFAULT_REWORK_LOOP_CAP = 3;
@@ -166,6 +177,12 @@ interface BridgeRun {
   paused: boolean;
   /** Count of context-recycle respawns for this run. In-memory only, never persisted. */
   contextRespawnCount: number;
+  /** Set when the builder is spawned with the plan gate on — watching for its
+   * planning→coding phase transition. Cleared once that transition fires. */
+  planGateArmed: boolean;
+  /** Set when the plan gate has paused the builder for review; cleared by
+   * `approveGate` (steer + resume) or `requestChanges` (steer + re-arm). */
+  planGatePending: boolean;
 }
 
 /** Safe indexed access into a pipeline (noUncheckedIndexedAccess-friendly). */
@@ -184,6 +201,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
   const draftPrBody = deps.draftPrBody ?? defaultDraftPrBody;
   const openPr = deps.openPr ?? defaultOpenPr;
   const contextRespawnCap = deps.contextRespawnCap ?? DEFAULT_CONTEXT_RESPAWN_CAP;
+  const phaseWatcher = deps.phaseWatcher ?? createPhaseWatcher();
 
   const runs = new Map<string, BridgeRun>();
   const listeners = new Set<(snap: BridgeStateSnapshot) => void>();
@@ -217,11 +235,11 @@ export function createBridge(deps: BridgeDeps): Bridge {
     return null;
   };
 
-  const readAutoAdvance = (projectPath: string): boolean => {
+  const readPlanGate = (projectPath: string): boolean => {
     const project = registry.listProjects().find((p) => p.path === projectPath);
     const uiPrefs = project?.uiPrefs;
     if (typeof uiPrefs !== 'object' || uiPrefs === null) return false;
-    return (uiPrefs as { auto_advance?: boolean }).auto_advance === true;
+    return (uiPrefs as { plan_gate?: boolean }).plan_gate === true;
   };
 
   // Spawn `role` as the run's current session and emit the resulting state. Errors
@@ -238,6 +256,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
       // every rework respawn) picks up the roster-declared model/effort and stamps
       // the durable session row with its work item.
       const roleDef = run.roles[role];
+      const oldSessionId = run.currentSessionId;
       const snap: SessionSnapshot = await sessionManager.spawn({
         projectPath: run.projectPath,
         role,
@@ -248,6 +267,18 @@ export function createBridge(deps: BridgeDeps): Bridge {
         ...(opts?.prompt !== undefined ? { prompt: opts.prompt } : {}),
       });
       run.currentSessionId = snap.id;
+      // A watcher must never outlive the session it was watching — always clear the
+      // replaced session's watch, whether or not the new spawn re-arms one.
+      if (oldSessionId !== null) phaseWatcher.unwatch(oldSessionId);
+      // Plan gate: only the pipeline's first role (the builder, index 0) is watched
+      // for its planning→coding transition, and only when the project has the plan
+      // gate on and this run carries a workItemId (the marker lives under its story dir).
+      if (run.index === 0 && readPlanGate(run.projectPath) && run.workItemId !== undefined) {
+        run.planGateArmed = true;
+        phaseWatcher.watch({ sessionId: snap.id, projectPath: run.projectPath, workItemId: run.workItemId });
+      } else {
+        run.planGateArmed = false;
+      }
       emit(run);
     } catch (err) {
       console.error(`[bridge] failed to spawn role "${role}" for ${run.projectPath}`, err);
@@ -261,6 +292,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
     const nextRole = stageAt(run.pipeline, nextIndex);
     if (nextRole === null) {
       run.gate = 'done';
+      if (run.currentSessionId !== null) phaseWatcher.unwatch(run.currentSessionId);
       emit(run);
       return;
     }
@@ -354,9 +386,16 @@ export function createBridge(deps: BridgeDeps): Bridge {
     // natural `ended` must NOT advance the pipeline or open a PR. Mirrors the
     // run.paused guard below; checked first because escalated outranks any pause.
     if (run.gate === 'escalated') return;
-    // An interrupt during this stage pins the run at awaiting-approval regardless
-    // of auto_advance — the next `ended` must not sneak past it (AC3).
+    // An interrupt during this stage pins the run at awaiting-approval — the next
+    // `ended` must not sneak past it into the now-unconditional advance (AC3).
     if (run.paused) {
+      run.gate = 'awaiting-approval';
+      emit(run);
+      return;
+    }
+    // A builder that ended/errored while its plan awaits review must not advance
+    // to the next stage — the plan gate, not the pipeline, owns this pause.
+    if (run.planGatePending) {
       run.gate = 'awaiting-approval';
       emit(run);
       return;
@@ -365,12 +404,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
       await handleReviewVerdict(run);
       return;
     }
-    if (readAutoAdvance(run.projectPath)) {
-      await advance(run);
-    } else {
-      run.gate = 'awaiting-approval';
-      emit(run);
-    }
+    await advance(run);
   };
 
   const handleErrored = async (run: BridgeRun): Promise<void> => {
@@ -387,6 +421,13 @@ export function createBridge(deps: BridgeDeps): Bridge {
       emit(run);
       return;
     }
+    // Same plan-gate guard as handleEnded: an errored end must not sneak past a
+    // pending plan review into rework/escalate any more than a paused one can.
+    if (run.planGatePending) {
+      run.gate = 'awaiting-approval';
+      emit(run);
+      return;
+    }
     const report = readFailureReport(run.projectPath, stage);
     const buildRole = stageAt(run.pipeline, 0);
     if (report !== null && run.reworkCount < reworkLoopCap && buildRole !== null) {
@@ -397,6 +438,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
       return;
     }
     run.gate = 'escalated';
+    if (run.currentSessionId !== null) phaseWatcher.unwatch(run.currentSessionId);
     run.inbox.push(
       Object.freeze<BridgeInboxItem>({
         stage,
@@ -418,6 +460,36 @@ export function createBridge(deps: BridgeDeps): Bridge {
     }
   });
 
+  // The plan gate's watched builder crossed out of `planning` — the plan is ready
+  // for human review. Pause the turn (the session stays alive; `approveGate` /
+  // `requestChanges` steer it) rather than letting it run straight through to
+  // implementation.
+  const handlePlanGateTransition = async (signal: PhaseTransitionSignal): Promise<void> => {
+    const run = findRunBySessionId(signal.sessionId);
+    if (run === null) return;
+    if (run.gate !== 'running' || !run.planGateArmed || signal.phase === 'planning') return;
+    try {
+      await sessionManager.interrupt(signal.sessionId);
+    } catch (err) {
+      console.error(`[bridge] plan-gate interrupt failed for ${signal.sessionId}`, err);
+    }
+    run.planGateArmed = false;
+    run.planGatePending = true;
+    run.gate = 'awaiting-approval';
+    run.inbox.push(
+      Object.freeze<BridgeInboxItem>({
+        stage: stageAt(run.pipeline, run.index) ?? '',
+        kind: 'question',
+        reason: 'Plan ready for review — approve or request changes.',
+        ts: Date.now(),
+      }),
+    );
+    phaseWatcher.unwatch(signal.sessionId);
+    emit(run);
+  };
+
+  phaseWatcher.onPhaseTransition((signal: PhaseTransitionSignal) => void handlePlanGateTransition(signal));
+
   // A session's context-window occupancy crossed the threshold: respawn the SAME
   // stage with a resume prompt (context-recycle), or escalate once the per-run cap
   // is hit. This is a same-stage respawn, never a pipeline advance — the old
@@ -434,6 +506,10 @@ export function createBridge(deps: BridgeDeps): Bridge {
       // handleEnded and cannot advance the pipeline. End the over-budget session at
       // a clean boundary rather than leaving it running past 80% indefinitely.
       run.gate = 'escalated';
+      // Tear down the plan-gate watcher for the over-budget builder before ending it —
+      // the escalate is terminal for this session, so its watcher must not outlive the
+      // stage (mirrors handleErrored's escalate path).
+      if (run.currentSessionId !== null) phaseWatcher.unwatch(run.currentSessionId);
       run.inbox.push(
         Object.freeze<BridgeInboxItem>({
           stage: stageAt(run.pipeline, run.index) ?? '',
@@ -468,6 +544,9 @@ export function createBridge(deps: BridgeDeps): Bridge {
     // overwrite) and escalate the same way instead of silently advancing.
     if (run.currentSessionId === oldId) {
       run.gate = 'escalated';
+      // Failed respawn escalates terminally — unwatch the stranded old session's
+      // plan-gate watcher so it does not leak past this stage (mirrors handleErrored).
+      if (oldId !== null) phaseWatcher.unwatch(oldId);
       run.inbox.push(
         Object.freeze<BridgeInboxItem>({
           stage: stageAt(run.pipeline, run.index) ?? '',
@@ -527,6 +606,8 @@ export function createBridge(deps: BridgeDeps): Bridge {
       reworkCount: 0,
       paused: false,
       contextRespawnCount: 0,
+      planGateArmed: false,
+      planGatePending: false,
     };
     runs.set(projectPath, run);
 
@@ -537,8 +618,39 @@ export function createBridge(deps: BridgeDeps): Bridge {
     const run = runs.get(projectPath);
     if (run === undefined) return;
     if (run.gate !== 'awaiting-approval') return;
+    if (run.planGatePending) {
+      run.planGatePending = false;
+      run.paused = false;
+      run.gate = 'running';
+      if (run.currentSessionId !== null) {
+        sessionManager.sendInput(run.currentSessionId, 'Plan approved — continue with implementation.');
+      }
+      emit(run);
+      return;
+    }
     run.paused = false;
     void advance(run);
+  };
+
+  const requestChanges = (projectPath: string, notes: string): void => {
+    const run = runs.get(projectPath);
+    if (run === undefined) return;
+    if (!run.planGatePending || run.currentSessionId === null) return;
+    sessionManager.sendInput(run.currentSessionId, notes);
+    // Re-arm the plan gate: the revised plan will re-pause on its next
+    // planning→coding transition, same as the first spawn's arm in spawnAndEmit.
+    run.planGateArmed = true;
+    run.planGatePending = false;
+    run.paused = false;
+    run.gate = 'running';
+    if (run.workItemId !== undefined) {
+      phaseWatcher.watch({
+        sessionId: run.currentSessionId,
+        projectPath: run.projectPath,
+        workItemId: run.workItemId,
+      });
+    }
+    emit(run);
   };
 
   const interrupt = (
@@ -570,5 +682,18 @@ export function createBridge(deps: BridgeDeps): Bridge {
     return run === undefined ? Object.freeze([]) : Object.freeze([...run.inbox]);
   };
 
-  return Object.freeze<Bridge>({ start, approveGate, interrupt, onState, getState, getInbox });
+  const stopAll = (): void => {
+    phaseWatcher.stopAll();
+  };
+
+  return Object.freeze<Bridge>({
+    start,
+    approveGate,
+    interrupt,
+    requestChanges,
+    onState,
+    getState,
+    getInbox,
+    stopAll,
+  });
 }

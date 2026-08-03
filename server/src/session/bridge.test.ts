@@ -17,6 +17,7 @@ import {
   type Bridge,
 } from './bridge.js';
 import type { OpenPrAdapter, OpenPrParams } from './pr-adapter.js';
+import type { PhaseTransitionListener, PhaseTransitionSignal, PhaseWatcher } from './phase-watcher.js';
 import type { EngineMessage, EngineSession, QueryFn, SpawnParams } from './session-engine.js';
 import { createSessionManager, type SessionManager } from './session-manager.js';
 import { createSessionStore } from './session-store.js';
@@ -138,6 +139,132 @@ function makeQueryFactory(): {
   };
 }
 
+/** A controllable fake EngineSession whose `interrupt()` is a turn-abort ONLY — the
+ * generator stays alive (unlike `makeSession`, which ends the session on interrupt) so
+ * a subsequent `sendInput` steer is observable via `getTranscript`. */
+function makeSteerableSession(): {
+  session: EngineSession;
+  emitInit: (sessionId: string) => void;
+  finish: () => void;
+  interruptCalls: () => number;
+  ended: () => boolean;
+} {
+  const buffer: EngineMessage[] = [];
+  let resolveNext: (() => void) | null = null;
+  let done = false;
+  let endCalled = false;
+  let interruptCalls = 0;
+
+  const wake = (): void => {
+    if (resolveNext !== null) {
+      const r = resolveNext;
+      resolveNext = null;
+      r();
+    }
+  };
+
+  async function* gen(): AsyncGenerator<EngineMessage> {
+    for (;;) {
+      const next = buffer.shift();
+      if (next !== undefined) {
+        yield next;
+        continue;
+      }
+      if (done) return;
+      await new Promise<void>((r) => {
+        resolveNext = r;
+      });
+    }
+  }
+
+  const session: EngineSession = Object.assign(gen(), {
+    interrupt: async (): Promise<unknown> => {
+      interruptCalls += 1;
+      return undefined;
+    },
+    send: async (): Promise<void> => {},
+    onPermissionRequest: (): void => {},
+    resolvePermission: (): void => {},
+    end: (): void => {
+      endCalled = true;
+      done = true;
+      wake();
+    },
+  });
+
+  return {
+    session,
+    emitInit: (sessionId) => {
+      buffer.push({ type: 'system', subtype: 'init', session_id: sessionId });
+      wake();
+    },
+    finish: () => {
+      done = true;
+      wake();
+    },
+    interruptCalls: () => interruptCalls,
+    ended: () => endCalled,
+  };
+}
+
+/** Dispenses fresh `makeSteerableSession` fakes for every `query()` call. */
+function makeSteerableQueryFactory(): {
+  query: QueryFn;
+  calls: SpawnParams[];
+  sessionAt: (i: number) => ReturnType<typeof makeSteerableSession>;
+} {
+  const calls: SpawnParams[] = [];
+  const dispensed: ReturnType<typeof makeSteerableSession>[] = [];
+  const query: QueryFn = (params) => {
+    calls.push(params);
+    const fake = makeSteerableSession();
+    dispensed.push(fake);
+    return fake.session;
+  };
+  return {
+    query,
+    calls,
+    sessionAt: (i) => {
+      const fake = dispensed[i];
+      if (fake === undefined) throw new Error(`no session dispensed at index ${i}`);
+      return fake;
+    },
+  };
+}
+
+/** A fake PhaseWatcher: `watch`/`unwatch` just track sessionIds, `emit` fires a
+ * transition to every registered listener — the injectable seam for plan-gate tests. */
+function makeFakePhaseWatcher(): {
+  phaseWatcher: PhaseWatcher;
+  emit: (signal: PhaseTransitionSignal) => void;
+  watchedSessionIds: () => readonly string[];
+} {
+  const listeners = new Set<PhaseTransitionListener>();
+  const watched = new Set<string>();
+  const phaseWatcher: PhaseWatcher = Object.freeze<PhaseWatcher>({
+    watch: ({ sessionId }) => {
+      watched.add(sessionId);
+    },
+    unwatch: (sessionId) => {
+      watched.delete(sessionId);
+    },
+    onPhaseTransition: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    stopAll: () => {
+      watched.clear();
+    },
+  });
+  return {
+    phaseWatcher,
+    emit: (signal) => {
+      for (const listener of listeners) listener(signal);
+    },
+    watchedSessionIds: () => [...watched],
+  };
+}
+
 /** Poll until `condition` is true (or reject on timeout). */
 function waitUntil(condition: () => boolean, timeoutMs = 1000): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -187,6 +314,17 @@ function freshEnv(): { sessionManager: SessionManager; registry: Registry; query
   return { sessionManager, registry, queryFactory };
 }
 
+/** Same wiring as `freshEnv`, but with a caller-supplied `query` fn (e.g. a
+ * `makeSteerableQueryFactory`'s dispenser) instead of the plain `makeQueryFactory` one. */
+function freshEnvWithQuery(query: QueryFn): { sessionManager: SessionManager; registry: Registry } {
+  const db = openDatabase(':memory:');
+  const registry = createRegistry(db);
+  registry.pin(PROJECT);
+  const store = createSessionStore(db);
+  const sessionManager = createSessionManager({ store, query });
+  return { sessionManager, registry };
+}
+
 function collectStates(bridge: Bridge): BridgeStateSnapshot[] {
   const states: BridgeStateSnapshot[] = [];
   bridge.onState((s) => states.push(s));
@@ -194,7 +332,7 @@ function collectStates(bridge: Bridge): BridgeStateSnapshot[] {
 }
 
 describe('Bridge', () => {
-  it('AC1 — auto_advance OFF: ended pauses at awaiting-approval; approveGate spawns the next role', async () => {
+  it('AC1 — no plan_gate pref: ended AUTO-ADVANCES to the next role, no awaiting-approval frame', async () => {
     const { sessionManager, registry, queryFactory } = freshEnv();
     const bridge = createBridge({ sessionManager, registry, resolveRoster: () => ROSTER });
     const states = collectStates(bridge);
@@ -207,20 +345,20 @@ describe('Bridge', () => {
     builder.emitInit('sdk-builder-1');
     builder.finish();
 
-    await waitUntil(() => bridge.getState(PROJECT)?.gate === 'awaiting-approval');
-    // No second spawn happened while awaiting approval.
-    expect(queryFactory.calls).toHaveLength(1);
-    expect(states.some((s) => s.gate === 'awaiting-approval')).toBe(true);
-
-    bridge.approveGate(PROJECT);
     await waitUntil(() => queryFactory.calls.length === 2);
     expect(queryFactory.calls[1]?.role).toBe('reviewer');
     expect(bridge.getState(PROJECT)?.gate).toBe('running');
+    expect(states.some((s) => s.gate === 'awaiting-approval')).toBe(false);
+
+    // Release the auto-spawned reviewer's slot so it doesn't linger held for later tests.
+    queryFactory.sessionAt(1).finish();
   });
 
-  it('AC2 — auto_advance ON: next role spawns automatically, no awaiting-approval frame', async () => {
+  it('AC2 — a stale auto_advance:false pref has no effect (the deleted gate is gone): ended still auto-advances', async () => {
     const { sessionManager, registry, queryFactory } = freshEnv();
-    registry.setPrefs(PROJECT, { auto_advance: true });
+    // The gate that once read this pref is deleted — setting it (even to false, the
+    // opposite of "on") must not change the auto-advance behavior at all.
+    registry.setPrefs(PROJECT, { auto_advance: false });
     const bridge = createBridge({ sessionManager, registry, resolveRoster: () => ROSTER });
     const states = collectStates(bridge);
 
@@ -234,6 +372,9 @@ describe('Bridge', () => {
     await waitUntil(() => queryFactory.calls.length === 2);
     expect(queryFactory.calls[1]?.role).toBe('reviewer');
     expect(states.some((s) => s.gate === 'awaiting-approval')).toBe(false);
+
+    // Release the auto-spawned reviewer's slot so it doesn't linger held for later tests.
+    queryFactory.sessionAt(1).finish();
   });
 
   it('AC3 — interrupt during a stage parks the inbox and pauses even with auto_advance ON; a subsequent ended does not auto-advance', async () => {
@@ -312,6 +453,13 @@ describe('Bridge', () => {
     expect(bridge.getState(PROJECT)?.gate).toBe('reworking');
     expect(bridge.getState(PROJECT)?.reworkCount).toBe(1);
     expect(states.some((s) => s.reworkCount === 1)).toBe(true);
+
+    // Drain the reworked builder + its auto-advanced reviewer so their slots don't
+    // linger held for later tests (no workItemId here, so the reviewer's verdict read
+    // is null — deferred to a human — a safe terminal state with no further spawn).
+    queryFactory.sessionAt(1).finish();
+    await waitUntil(() => queryFactory.calls.length === 3);
+    queryFactory.sessionAt(2).finish();
   });
 
   it('AC4 — errored + no failure report escalates without respawning', async () => {
@@ -370,6 +518,11 @@ describe('Bridge', () => {
       resolveRoster: () => ROSTER,
       readReviewVerdict: () => 'BLOCK',
       readReviewReport: () => 'FIX THE REVIEW FINDINGS',
+      // Cap at 1 so draining the rework builder's own auto-advance below (see cleanup)
+      // escalates on its second BLOCK rather than cascading through further reworks —
+      // the test's own assertions only concern the FIRST rework, which still happens
+      // (reworkCount 0 < cap 1) exactly as before this cap was added.
+      reworkLoopCap: 1,
     });
 
     bridge.start(PROJECT);
@@ -391,6 +544,14 @@ describe('Bridge', () => {
     expect(queryFactory.calls[2]?.role).toBe('builder');
     expect(queryFactory.calls[2]?.prompt).toBe('FIX THE REVIEW FINDINGS');
     expect(bridge.getState(PROJECT)?.gate).toBe('reworking');
+
+    // Drain the rework builder + its auto-advanced reviewer so their slots don't
+    // linger held for later tests. The verdict is hardwired to BLOCK, so the second
+    // reviewer end escalates (reworkCount 1 no longer < cap 1) instead of reworking
+    // again — a terminal state with no further spawn.
+    queryFactory.sessionAt(2).finish();
+    await waitUntil(() => queryFactory.calls.length === 4);
+    queryFactory.sessionAt(3).finish();
   });
 
   it('AC3 — reviewer BLOCK verdict repeated past the rework cap escalates instead of looping forever', async () => {
@@ -544,6 +705,10 @@ describe('Bridge', () => {
     expect(queryFactory.calls[1]?.role).toBe('reviewer');
     expect(queryFactory.calls[1]?.model).toBe('claude-opus-5[1m]');
     expect(queryFactory.calls[1]?.effort).toBe('high');
+
+    // Release the reviewer's slot (null verdict → awaiting-approval, terminal) so it
+    // doesn't linger held for later tests.
+    queryFactory.sessionAt(1).finish();
   });
 });
 
@@ -651,6 +816,13 @@ describe('Bridge context-recycle respawn', () => {
     expect(bridge.getState(PROJECT)?.stage).toBe('builder');
     expect(bridge.getState(PROJECT)?.sessionId).toBe(stateBeforeOldEnd?.sessionId);
     expect(bridge.getState(PROJECT)?.gate).not.toBe('done');
+
+    // Drain the respawned (new) builder + its auto-advanced reviewer so their slots
+    // don't linger held for later tests (no evaluation.md on disk for this work item,
+    // so the reviewer's verdict read is null — a safe terminal awaiting-approval).
+    queryFactory.sessionAt(1).finish();
+    await waitUntil(() => queryFactory.calls.length === 3);
+    queryFactory.sessionAt(2).finish();
   });
 
   it('a FAILED respawn escalates instead of ending the old session and advancing the pipeline', async () => {
@@ -734,6 +906,154 @@ describe('Bridge context-recycle respawn', () => {
     expect(bridge.getState(PROJECT)?.gate).toBe('running'); // advisory does not change the gate
 
     builder.finish();
+    // Drain the auto-advanced reviewer too so its slot doesn't linger held for later tests.
+    await waitUntil(() => queryFactory.calls.length === 2);
+    queryFactory.sessionAt(1).finish();
+  });
+});
+
+describe('Bridge plan gate', () => {
+  it('ON: a phase transition off planning pauses for review; approveGate steers and resumes without spawning the reviewer', async () => {
+    const queryFactory = makeSteerableQueryFactory();
+    const { sessionManager, registry } = freshEnvWithQuery(queryFactory.query);
+    registry.setPrefs(PROJECT, { plan_gate: true });
+    const { phaseWatcher, emit } = makeFakePhaseWatcher();
+    const bridge = createBridge({
+      sessionManager,
+      registry,
+      resolveRoster: () => ROSTER,
+      phaseWatcher,
+    });
+
+    bridge.start(PROJECT, 'WORK-GATE-1');
+    await waitUntil(() => queryFactory.calls.length === 1);
+    const builderId = bridge.getState(PROJECT)?.sessionId;
+    if (builderId === null || builderId === undefined) throw new Error('no builder session id');
+    const builder = queryFactory.sessionAt(0);
+    builder.emitInit('sdk-gate-on-1');
+
+    // The builder crosses OUT of planning — the plan is ready for review.
+    emit(
+      Object.freeze({
+        sessionId: builderId,
+        projectPath: PROJECT,
+        workItemId: 'WORK-GATE-1',
+        phase: 'coding',
+      }),
+    );
+
+    await waitUntil(() => bridge.getState(PROJECT)?.gate === 'awaiting-approval');
+    expect(bridge.getInbox(PROJECT).some((i) => i.kind === 'question')).toBe(true);
+    expect(builder.interruptCalls()).toBeGreaterThan(0);
+    // No reviewer spawn happened merely from the pause.
+    expect(queryFactory.calls).toHaveLength(1);
+
+    bridge.approveGate(PROJECT);
+    await waitUntil(() =>
+      sessionManager
+        .getTranscript(builderId)
+        .some((e) => e.kind === 'user-text' && e.text === 'Plan approved — continue with implementation.'),
+    );
+    expect(bridge.getState(PROJECT)?.gate).toBe('running');
+    // Approval steers the SAME builder session — it never spawns the reviewer.
+    expect(queryFactory.calls).toHaveLength(1);
+
+    // Release the builder's slot: finishing it now (plan gate no longer pending) is a
+    // normal end that auto-advances to the reviewer — drain that too.
+    builder.finish();
+    await waitUntil(() => queryFactory.calls.length === 2);
+    queryFactory.sessionAt(1).finish();
+  });
+
+  it('request-changes: steers the builder with the notes and RE-ARMS the plan gate for the next transition', async () => {
+    const queryFactory = makeSteerableQueryFactory();
+    const { sessionManager, registry } = freshEnvWithQuery(queryFactory.query);
+    registry.setPrefs(PROJECT, { plan_gate: true });
+    const { phaseWatcher, emit } = makeFakePhaseWatcher();
+    const bridge = createBridge({
+      sessionManager,
+      registry,
+      resolveRoster: () => ROSTER,
+      phaseWatcher,
+    });
+
+    bridge.start(PROJECT, 'WORK-GATE-2');
+    await waitUntil(() => queryFactory.calls.length === 1);
+    const builderId = bridge.getState(PROJECT)?.sessionId;
+    if (builderId === null || builderId === undefined) throw new Error('no builder session id');
+    const builder = queryFactory.sessionAt(0);
+    builder.emitInit('sdk-gate-changes-1');
+
+    emit(
+      Object.freeze({
+        sessionId: builderId,
+        projectPath: PROJECT,
+        workItemId: 'WORK-GATE-2',
+        phase: 'coding',
+      }),
+    );
+    await waitUntil(() => bridge.getState(PROJECT)?.gate === 'awaiting-approval');
+
+    bridge.requestChanges(PROJECT, 'please add X');
+    await waitUntil(() =>
+      sessionManager.getTranscript(builderId).some((e) => e.kind === 'user-text' && e.text === 'please add X'),
+    );
+    expect(bridge.getState(PROJECT)?.gate).toBe('running');
+    // Steering back to coding never spawns the reviewer.
+    expect(queryFactory.calls).toHaveLength(1);
+
+    // The plan gate is re-armed: a second transition off planning re-pauses the run.
+    emit(
+      Object.freeze({
+        sessionId: builderId,
+        projectPath: PROJECT,
+        workItemId: 'WORK-GATE-2',
+        phase: 'coding',
+      }),
+    );
+    await waitUntil(() => bridge.getState(PROJECT)?.gate === 'awaiting-approval');
+    expect(queryFactory.calls).toHaveLength(1);
+
+    // Release the builder's slot: it's currently plan-gate-pending, so ending it now
+    // hits the pending guard (stays awaiting-approval, no cascade) — a safe drain.
+    builder.finish();
+  });
+
+  it("interrupt breakthrough still pins awaiting-approval and a later ended does not advance", async () => {
+    const queryFactory = makeSteerableQueryFactory();
+    const { sessionManager, registry } = freshEnvWithQuery(queryFactory.query);
+    registry.setPrefs(PROJECT, { plan_gate: true });
+    const { phaseWatcher, emit } = makeFakePhaseWatcher();
+    const bridge = createBridge({
+      sessionManager,
+      registry,
+      resolveRoster: () => ROSTER,
+      phaseWatcher,
+    });
+
+    bridge.start(PROJECT, 'WORK-GATE-3');
+    await waitUntil(() => queryFactory.calls.length === 1);
+    const builderId = bridge.getState(PROJECT)?.sessionId;
+    if (builderId === null || builderId === undefined) throw new Error('no builder session id');
+    const builder = queryFactory.sessionAt(0);
+    builder.emitInit('sdk-gate-pin-1');
+
+    emit(
+      Object.freeze({
+        sessionId: builderId,
+        projectPath: PROJECT,
+        workItemId: 'WORK-GATE-3',
+        phase: 'coding',
+      }),
+    );
+    await waitUntil(() => bridge.getState(PROJECT)?.gate === 'awaiting-approval');
+
+    // The paused session now genuinely ends (e.g. the interrupted turn's stream
+    // finishes) — handleEnded's planGatePending guard must keep it parked, not advance.
+    builder.finish();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(queryFactory.calls).toHaveLength(1); // no reviewer spawn
+    expect(bridge.getState(PROJECT)?.gate).toBe('awaiting-approval');
   });
 });
 

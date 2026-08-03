@@ -118,6 +118,8 @@ export interface UseProjectsResult {
   readonly bridgeStates: Record<string, BridgeState>;
   /** Approve a parked bridge gate for a project path; delegates to the live client. */
   readonly approveGate: (path: string) => void;
+  /** Request changes on a parked bridge gate for a project path; delegates to the live client. */
+  readonly requestChanges: (path: string, notes: string) => void;
   /** Spawn an owned session for a pinned project + role; delegates to the live client. */
   readonly spawnSession: (path: string, role: string, workItemId?: string) => void;
   /** Start (or resume) a Bridge pipeline run for a pinned project, optionally carrying a work-item id; delegates to the live client. */
@@ -460,6 +462,10 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     clientRef.current?.sendGateApprove(path);
   }
 
+  function requestChanges(path: string, notes: string): void {
+    clientRef.current?.sendGateRequestChanges(path, notes);
+  }
+
   return {
     projects,
     candidates,
@@ -483,6 +489,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     requestWorkItemSessions,
     bridgeStates,
     approveGate,
+    requestChanges,
     spawnSession,
     bridgeStart,
     transcripts,

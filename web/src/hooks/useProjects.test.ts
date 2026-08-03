@@ -67,6 +67,7 @@ function makeFakeClient() {
   const interruptSession = vi.fn();
   const sendBridgeStart = vi.fn();
   const sendGateApprove = vi.fn();
+  const sendGateRequestChanges = vi.fn();
   const sendBridgeInterrupt = vi.fn();
   const sendPermissionDecision = vi.fn();
   const close = vi.fn();
@@ -173,6 +174,7 @@ function makeFakeClient() {
     interruptSession,
     sendBridgeStart,
     sendGateApprove,
+    sendGateRequestChanges,
     sendBridgeInterrupt,
     sendPermissionDecision,
     close,
@@ -196,6 +198,7 @@ function makeFakeClient() {
     interruptSession,
     sendBridgeStart,
     sendGateApprove,
+    sendGateRequestChanges,
     sendBridgeInterrupt,
     sendPermissionDecision,
     close,

@@ -467,6 +467,8 @@ export interface WsClient {
   readonly sendBridgeStart: (path: string, workItemId?: string) => void;
   /** Approve the current gate for a bridge run; no-op (warns) when the socket is not open. */
   readonly sendGateApprove: (path: string) => void;
+  /** Request changes on the current gate for a bridge run; no-op (warns) when the socket is not open. */
+  readonly sendGateRequestChanges: (path: string, notes: string) => void;
   /** Interrupt a running bridge with a reason; no-op (warns) when the socket is not open. */
   readonly sendBridgeInterrupt: (path: string, reason: string) => void;
   /** Send an allow/deny decision for a pending permission request; no-op (warns) when the socket is not open. */
@@ -2006,6 +2008,10 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     sendFrame({ type: 'gate-approve', path });
   }
 
+  function sendGateRequestChanges(path: string, notes: string): void {
+    sendFrame({ type: 'gate-request-changes', path, notes });
+  }
+
   function sendBridgeInterrupt(path: string, reason: string): void {
     sendFrame({ type: 'bridge-interrupt', path, reason });
   }
@@ -2147,6 +2153,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     interruptSession,
     sendBridgeStart,
     sendGateApprove,
+    sendGateRequestChanges,
     sendBridgeInterrupt,
     sendPermissionDecision,
     close,

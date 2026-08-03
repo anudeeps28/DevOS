@@ -1,3 +1,5 @@
+import { useState } from 'react';
+
 import { AlertCircle, HelpCircle, MessageSquareWarning, Radio, ShieldQuestion } from 'lucide-react';
 
 import type { BridgeInboxItem, BridgeState, ForeignNeedsYou, PermissionRequest } from '@/lib/ws-client';
@@ -23,12 +25,14 @@ function InboxIcon({ kind }: { kind: BridgeInboxItem['kind'] }): JSX.Element {
 export function NeedsYouInbox({
   bridgeStates,
   onApprove,
+  onRequestChanges = () => {},
   permissions = [],
   onPermissionDecision = () => {},
   foreignItems = [],
 }: {
   bridgeStates: readonly BridgeState[];
   onApprove: (path: string) => void;
+  onRequestChanges?: (path: string, notes: string) => void;
   permissions?: readonly PermissionRequest[];
   onPermissionDecision?: (
     sessionId: string,
@@ -38,6 +42,10 @@ export function NeedsYouInbox({
   foreignItems?: readonly ForeignNeedsYou[];
 }): JSX.Element {
   const inboxItems = bridgeStates.flatMap((state) => state.inbox.map((item) => ({ item, path: state.path })));
+  // Keyed by a stable per-item identity (path + stage + ts), NOT array index — the
+  // inbox is reordered by wait time upstream, so index-keyed notes would rebind to the
+  // wrong item when the list shifts.
+  const [notesByKey, setNotesByKey] = useState<Record<string, string>>({});
 
   return (
     <section
@@ -101,9 +109,11 @@ export function NeedsYouInbox({
               </div>
             </li>
           ))}
-          {inboxItems.map((entry, index) => (
+          {inboxItems.map((entry, index) => {
+            const noteKey = `${entry.path}::${entry.item.stage}::${entry.item.ts}`;
+            return (
             <li
-              key={`${entry.item.stage}-${entry.item.ts}-${index}`}
+              key={noteKey}
               data-testid={`needs-you-item-${index}`}
               data-kind={entry.item.kind}
               className="flex items-start justify-between gap-2 rounded-lg border border-border bg-card p-3"
@@ -117,16 +127,40 @@ export function NeedsYouInbox({
                   <span className="text-sm text-foreground">{entry.item.reason}</span>
                 </div>
               </div>
-              <button
-                type="button"
-                data-testid={`needs-you-approve-${index}`}
-                onClick={() => onApprove(entry.path)}
-                className="shrink-0 rounded-md border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-accent"
-              >
-                Approve
-              </button>
+              <div className="flex shrink-0 items-center gap-2">
+                {entry.item.kind === 'question' && (
+                  <>
+                    <input
+                      type="text"
+                      data-testid={`needs-you-notes-${index}`}
+                      value={notesByKey[noteKey] ?? ''}
+                      onChange={(event) =>
+                        setNotesByKey((prev) => ({ ...prev, [noteKey]: event.target.value }))
+                      }
+                      className="rounded-md border border-border px-2 py-1 text-xs text-foreground"
+                    />
+                    <button
+                      type="button"
+                      data-testid={`needs-you-request-changes-${index}`}
+                      onClick={() => onRequestChanges(entry.path, notesByKey[noteKey] ?? '')}
+                      className="rounded-md border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-accent"
+                    >
+                      Request changes
+                    </button>
+                  </>
+                )}
+                <button
+                  type="button"
+                  data-testid={`needs-you-approve-${index}`}
+                  onClick={() => onApprove(entry.path)}
+                  className="rounded-md border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-accent"
+                >
+                  Approve
+                </button>
+              </div>
             </li>
-          ))}
+            );
+          })}
           {foreignItems.map((item) => (
             <li
               key={item.sessionId}

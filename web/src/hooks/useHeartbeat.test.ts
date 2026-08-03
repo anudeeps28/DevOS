@@ -67,6 +67,7 @@ function makeFakeClient() {
     interruptSession: () => {},
     sendBridgeStart: () => {},
     sendGateApprove: () => {},
+    sendGateRequestChanges: () => {},
     sendBridgeInterrupt: () => {},
     sendPermissionDecision: () => {},
     close,

@@ -131,6 +131,8 @@ export function createServer(options?: CreateServerOptions): DevOsServer {
   const stop = async (): Promise<void> => {
     // Interrupt every live owned session before tearing down the transport + DB.
     await sessionManager.stopAll();
+    // Tear down any live plan-gate phase.md watchers so they don't outlive the process stop.
+    bridge.stopAll();
     await gateway.close();
     await new Promise<void>((resolve, reject) => {
       server.close((err) => (err ? reject(err) : resolve()));
