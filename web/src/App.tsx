@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 
+import { Board } from '@/components/Board';
 import { ConnectionIndicator } from '@/components/ConnectionIndicator';
 import { CostToday } from '@/components/CostToday';
 import { Fleet } from '@/components/Fleet';
@@ -14,6 +15,7 @@ import { WorkItemDetail } from '@/components/WorkItemDetail';
 import { useHeartbeat } from '@/hooks/useHeartbeat';
 import { useNeedsYouToast } from '@/hooks/useNeedsYouToast';
 import { useProjects } from '@/hooks/useProjects';
+import { deriveBoard } from '@/lib/board-state';
 import { deriveFleet } from '@/lib/fleet-state';
 import { deriveNeedsYou } from '@/lib/needs-you';
 import { derivePipelineTimeline } from '@/lib/pipeline-timeline';
@@ -69,6 +71,11 @@ function App() {
     [pendingPermissions, bridgeStates, foreignNeedsYou],
   );
   useNeedsYouToast(needsYouItems);
+
+  const boardModel = useMemo(
+    () => deriveBoard({ sessionPersonas, bridgeStates, trackerStates }),
+    [sessionPersonas, bridgeStates, trackerStates],
+  );
 
   return (
     <main className="flex min-h-screen flex-col items-center gap-8 bg-background p-8 text-foreground">
@@ -151,6 +158,9 @@ function App() {
               })}
               onOpenItem={(workItemId, path) => setSelected({ workItemId, path })}
             />
+          )}
+          {tab === 'board' && (
+            <Board model={boardModel} onOpenItem={(workItemId, path) => setSelected({ workItemId, path })} />
           )}
           {tab === 'inbox' && (
             <NeedsYouInbox

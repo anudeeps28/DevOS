@@ -63,7 +63,7 @@ function composeStageOrder(
  * a builder-role entry with a non-null `phase`; fall back to any non-null
  * phase for the item.
  */
-function findCurrentPhase(
+export function findCurrentPhase(
   sessionPersonas: readonly SessionPersona[],
   workItemId: string,
 ): string | null {
