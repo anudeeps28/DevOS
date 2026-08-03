@@ -29,7 +29,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { WebSocket } from 'ws';
 import { createServer } from '../../src/index.js';
 import { WS_PATH } from '../../src/config.js';
-import type { BridgeStateSnapshot } from '../../src/ws-protocol.js';
+import type { BridgeStateSnapshot, SessionStateSnapshot } from '../../src/ws-protocol.js';
 import type { EngineMessage, EngineSession, QueryFn, SpawnParams } from '../../src/session/session-engine.js';
 
 // Self-provision a minimal valid roster fixture rather than copy the repo's
@@ -70,6 +70,17 @@ function isBridgeStateFrame(value: unknown): value is BridgeStateSnapshot {
     frame.type === 'bridge-state' &&
     typeof frame.path === 'string' &&
     typeof frame.gate === 'string'
+  );
+}
+
+function isSessionStateFrame(value: unknown): value is SessionStateSnapshot {
+  if (typeof value !== 'object' || value === null) return false;
+  const frame = value as Record<string, unknown>;
+  return (
+    frame.type === 'session-state' &&
+    typeof frame.path === 'string' &&
+    typeof frame.session === 'object' &&
+    frame.session !== null
   );
 }
 
@@ -137,12 +148,23 @@ interface Waiter {
   readonly timer: ReturnType<typeof setTimeout>;
 }
 
+interface SessionStateWaiter {
+  readonly predicate: (frame: SessionStateSnapshot) => boolean;
+  readonly resolve: (frame: SessionStateSnapshot) => void;
+  readonly reject: (err: Error) => void;
+  readonly timer: ReturnType<typeof setTimeout>;
+}
+
 interface TestClient {
   readonly send: (message: unknown) => void;
   readonly waitForBridgeState: (
     predicate: (frame: BridgeStateSnapshot) => boolean,
     timeoutMs: number,
   ) => Promise<BridgeStateSnapshot>;
+  readonly waitForSessionState: (
+    predicate: (frame: SessionStateSnapshot) => boolean,
+    timeoutMs: number,
+  ) => Promise<SessionStateSnapshot>;
   readonly seen: () => BridgeStateSnapshot[];
   readonly close: () => void;
 }
@@ -151,7 +173,9 @@ function openClient(url: string, openTimeoutMs = 3000): Promise<TestClient> {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(url);
     let waiters: Waiter[] = [];
+    let sessionStateWaiters: SessionStateWaiter[] = [];
     const seen: BridgeStateSnapshot[] = [];
+    const seenSessionStates: SessionStateSnapshot[] = [];
     let opened = false;
 
     const openTimer = setTimeout(() => {
@@ -175,6 +199,12 @@ function openClient(url: string, openTimeoutMs = 3000): Promise<TestClient> {
         clearTimeout(waiter.timer);
         waiter.reject(error);
       }
+      const pendingSessionState = sessionStateWaiters;
+      sessionStateWaiters = [];
+      for (const waiter of pendingSessionState) {
+        clearTimeout(waiter.timer);
+        waiter.reject(error);
+      }
     });
 
     socket.on('message', (data) => {
@@ -182,6 +212,20 @@ function openClient(url: string, openTimeoutMs = 3000): Promise<TestClient> {
       try {
         parsed = JSON.parse(data.toString());
       } catch {
+        return;
+      }
+      if (isSessionStateFrame(parsed)) {
+        seenSessionStates.push(parsed);
+        const stillWaiting: SessionStateWaiter[] = [];
+        for (const waiter of sessionStateWaiters) {
+          if (waiter.predicate(parsed)) {
+            clearTimeout(waiter.timer);
+            waiter.resolve(parsed);
+          } else {
+            stillWaiting.push(waiter);
+          }
+        }
+        sessionStateWaiters = stillWaiting;
         return;
       }
       if (!isBridgeStateFrame(parsed)) return;
@@ -215,6 +259,19 @@ function openClient(url: string, openTimeoutMs = 3000): Promise<TestClient> {
               rej(new Error(`Timed out after ${timeoutMs}ms waiting for a bridge-state frame`));
             }, timeoutMs);
             waiters.push({ predicate, resolve: res, reject: rej, timer });
+          }),
+        waitForSessionState: (predicate, timeoutMs) =>
+          new Promise<SessionStateSnapshot>((res, rej) => {
+            const existing = seenSessionStates.find(predicate);
+            if (existing) {
+              res(existing);
+              return;
+            }
+            const timer = setTimeout(() => {
+              sessionStateWaiters = sessionStateWaiters.filter((w) => w.timer !== timer);
+              rej(new Error(`Timed out after ${timeoutMs}ms waiting for a session-state frame`));
+            }, timeoutMs);
+            sessionStateWaiters.push({ predicate, resolve: res, reject: rej, timer });
           }),
         seen: () => [...seen],
         close: () => {
@@ -380,6 +437,32 @@ describe('Bridge pipeline over the live WS transport', () => {
     // The foreign bridge-start never reached the engine — only the pinned one did.
     expect(engine.calls).toHaveLength(1);
     expect(engine.calls[0]?.cwd).toBe(pinned);
+    expect(engine.calls[0]?.role).toBe('builder');
+  }, 15000);
+
+  it('assign work — bridge-start with a workItemId spawns the builder stamped with that work item', async () => {
+    const project = makeProjectDir();
+    const engine = makeFakeEngine();
+    const server = await startServer(makeTmpDbPath(), engine.query);
+    server.instance.registry.pin(project);
+
+    const client = await connect(server.url);
+    const bridgeStarted = client.waitForBridgeState(
+      (f) => f.path === project && f.gate === 'awaiting-approval',
+      5000,
+    );
+    const sessionStarted = client.waitForSessionState(
+      (f) => f.path === project && f.session.workItemId === 'WI-assign-1',
+      5000,
+    );
+    client.send({ type: 'bridge-start', path: project, workItemId: 'WI-assign-1' });
+
+    await bridgeStarted;
+    const sessionFrame = await sessionStarted;
+
+    expect(sessionFrame.session.workItemId).toBe('WI-assign-1');
+    expect(engine.calls).toHaveLength(1);
+    expect(engine.calls[0]?.cwd).toBe(project);
     expect(engine.calls[0]?.role).toBe('builder');
   }, 15000);
 });

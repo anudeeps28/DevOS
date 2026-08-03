@@ -120,6 +120,8 @@ export interface UseProjectsResult {
   readonly approveGate: (path: string) => void;
   /** Spawn an owned session for a pinned project + role; delegates to the live client. */
   readonly spawnSession: (path: string, role: string, workItemId?: string) => void;
+  /** Start (or resume) a Bridge pipeline run for a pinned project, optionally carrying a work-item id; delegates to the live client. */
+  readonly bridgeStart: (path: string, workItemId?: string) => void;
   /** Folded per-session transcripts keyed by session id (upserted + sorted by seq, bounded). */
   readonly transcripts: Record<string, readonly TranscriptEvent[]>;
   /** Request the buffered transcript of a live session; delegates to the live client. */
@@ -420,6 +422,15 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     }
   }
 
+  function bridgeStart(path: string, workItemId?: string): void {
+    // Forward only the args given — don't pass an explicit `undefined` workItemId.
+    if (workItemId !== undefined) {
+      clientRef.current?.sendBridgeStart(path, workItemId);
+    } else {
+      clientRef.current?.sendBridgeStart(path);
+    }
+  }
+
   function requestTranscript(sessionId: string): void {
     clientRef.current?.requestTranscript(sessionId);
   }
@@ -473,6 +484,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     bridgeStates,
     approveGate,
     spawnSession,
+    bridgeStart,
     transcripts,
     requestTranscript,
     sendSessionInput,

@@ -46,6 +46,7 @@ function App() {
     rosterTimelines,
     approveGate,
     spawnSession,
+    bridgeStart,
     transcripts,
     sendSessionInput,
     interruptSession,
@@ -105,6 +106,10 @@ function App() {
                 requestLifecycleSignals={requestLifecycleSignals}
                 sessions={sessions}
                 spawnSession={spawnSession}
+                onAssignWork={(path, workItemId) => {
+                  bridgeStart(path, workItemId);
+                  setSelected({ workItemId, path });
+                }}
               />
               <TeamRoom
                 sessions={sessions}
