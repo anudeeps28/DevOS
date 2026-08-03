@@ -1028,6 +1028,21 @@ describe('useProjects', () => {
     expect(result.current.costToday).toEqual(usage);
   });
 
+  it('bridgeStart forwards to client.sendBridgeStart, omitting workItemId when not given', () => {
+    const fake = makeFakeClient();
+    const { result } = renderHook(() =>
+      useProjects({ createClient: () => fake.client }),
+    );
+
+    act(() => result.current.bridgeStart('/abs/one'));
+    expect(fake.sendBridgeStart).toHaveBeenNthCalledWith(1, '/abs/one');
+
+    act(() => result.current.bridgeStart('/abs/one', 'WI-1'));
+    expect(fake.sendBridgeStart).toHaveBeenNthCalledWith(2, '/abs/one', 'WI-1');
+
+    expect(fake.sendBridgeStart).toHaveBeenCalledTimes(2);
+  });
+
   it('closes the client on unmount', () => {
     const fake = makeFakeClient();
     const { unmount } = renderHook(() =>
