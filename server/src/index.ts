@@ -17,6 +17,7 @@ import { createCostLedgerStore, type CostLedgerStore } from './session/cost-ledg
 import { createSessionStore } from './session/session-store.js';
 import { createSessionManager, type SessionManager } from './session/session-manager.js';
 import type { QueryFn } from './session/session-engine.js';
+import { createE2eFakeQuery } from './session/e2e-fake-query.js';
 import { createStaticHandler } from './static-server.js';
 import { resolveAuthToken } from './ws-auth.js';
 import { attachWsGateway } from './ws-gateway.js';
@@ -156,7 +157,8 @@ function registerShutdown(instance: DevOsServer): void {
 }
 
 async function main(): Promise<void> {
-  const instance = createServer();
+  const query = process.env['DEVOS_E2E_FAKE_QUERY'] === '1' ? createE2eFakeQuery() : undefined;
+  const instance = createServer(query !== undefined ? { query } : undefined);
   registerShutdown(instance);
 
   try {
