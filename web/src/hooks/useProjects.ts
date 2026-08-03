@@ -4,6 +4,7 @@ import {
   createWsClient,
   type BridgeState,
   type CostUsage,
+  type EvidenceData,
   type ForeignNeedsYou,
   type GitState,
   type LifecycleSignals,
@@ -114,6 +115,10 @@ export interface UseProjectsResult {
   readonly workItemSessions: Record<string, readonly WorkItemSessionAnchor[]>;
   /** Request the current owned-session anchors for a work item; delegates to the live client. */
   readonly requestWorkItemSessions: (path: string, workItemId: string) => void;
+  /** Latest evidence snapshots keyed by work item id; empty until the first arrives. */
+  readonly evidence: Record<string, EvidenceData>;
+  /** Request the current evidence snapshot for a work item; delegates to the live client. */
+  readonly requestEvidence: (path: string, workItemId: string) => void;
   /** Latest bridge-state snapshots keyed by absolute project path; empty until the first arrives. */
   readonly bridgeStates: Record<string, BridgeState>;
   /** Approve a parked bridge gate for a project path; delegates to the live client. */
@@ -180,6 +185,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
   const [workItemSessions, setWorkItemSessions] = useState<
     Record<string, readonly WorkItemSessionAnchor[]>
   >({});
+  const [evidence, setEvidence] = useState<Record<string, EvidenceData>>({});
   const [bridgeStates, setBridgeStates] = useState<Record<string, BridgeState>>({});
   const [rosterTimelines, setRosterTimelines] = useState<Record<string, RosterTimeline>>({});
   const [transcripts, setTranscripts] = useState<Record<string, readonly TranscriptEvent[]>>({});
@@ -274,6 +280,11 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     const offWorkItemSessions = client.onWorkItemSessions((_path, workItemId, sessions) =>
       setWorkItemSessions((prev) => ({ ...prev, [workItemId]: sessions })),
     );
+    // Immutable fold: an evidence snapshot replaces the entry for that work item
+    // id with a new object.
+    const offEvidence = client.onEvidence((_path, workItemId, ev) =>
+      setEvidence((prev) => ({ ...prev, [workItemId]: ev })),
+    );
     // Immutable fold: a bridge-state snapshot replaces the map with a new object.
     const offBridgeState = client.onBridgeState((path, bridgeState) =>
       setBridgeStates((prev) => ({ ...prev, [path]: bridgeState })),
@@ -354,6 +365,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
       offSessionState();
       offSessionPersonas();
       offWorkItemSessions();
+      offEvidence();
       offBridgeState();
       offRosterTimeline();
       offSessionTranscript();
@@ -421,6 +433,10 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
 
   function requestWorkItemSessions(path: string, workItemId: string): void {
     clientRef.current?.requestWorkItemSessions(path, workItemId);
+  }
+
+  function requestEvidence(path: string, workItemId: string): void {
+    clientRef.current?.requestEvidence(path, workItemId);
   }
 
   function spawnSession(path: string, role: string, workItemId?: string): void {
@@ -507,6 +523,8 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     requestRosterTimeline,
     workItemSessions,
     requestWorkItemSessions,
+    evidence,
+    requestEvidence,
     bridgeStates,
     approveGate,
     requestChanges,

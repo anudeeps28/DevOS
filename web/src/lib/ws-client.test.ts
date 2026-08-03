@@ -5,6 +5,7 @@ import {
   type BridgeState,
   type ConnectionStatus,
   type CostUsage,
+  type EvidenceData,
   type ForeignNeedsYou,
   type GitState,
   type Heartbeat,
@@ -1945,5 +1946,119 @@ describe('ws-client cost-usage frames', () => {
 
     expect(received).toEqual([]);
     expect(warn).toHaveBeenCalled();
+  });
+});
+
+function sampleEvidenceData(): EvidenceData {
+  return {
+    filesChanged: [{ path: 'src/foo.ts', status: 'modified' }],
+    testResults: { summary: '12 passed' },
+    prSummary: 'Adds the foo feature.',
+    artifacts: [{ name: 'design.md', state: 'Final' }],
+  };
+}
+
+function evidenceFrame(
+  path: string,
+  workItemId: string,
+  evidence: unknown = sampleEvidenceData(),
+): string {
+  return JSON.stringify({ type: 'evidence', path, workItemId, evidence });
+}
+
+describe('ws-client evidence frames', () => {
+  beforeEach(() => {
+    FakeSocket.instances = [];
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function makeEvidenceClient() {
+    const received: { path: string; workItemId: string; evidence: EvidenceData }[] = [];
+    const client = createWsClient({
+      url: 'ws://localhost/ws',
+      createWebSocket: (url) => new FakeSocket(url),
+    });
+    client.onEvidence((path, workItemId, evidence) =>
+      received.push({ path, workItemId, evidence }),
+    );
+    const socket = FakeSocket.instances[0]!;
+    socket.open();
+    return { client, received, socket };
+  }
+
+  it('delivers a valid evidence snapshot with the correct path, workItemId, and frozen evidence', () => {
+    const { received, socket } = makeEvidenceClient();
+    const evidence = sampleEvidenceData();
+
+    socket.message(evidenceFrame('/abs/repo', 'WI-1', evidence));
+
+    expect(received).toHaveLength(1);
+    expect(received[0]!.path).toBe('/abs/repo');
+    expect(received[0]!.workItemId).toBe('WI-1');
+    expect(received[0]!.evidence).toEqual(evidence);
+    expect(Object.isFrozen(received[0]!.evidence)).toBe(true);
+    expect(Object.isFrozen(received[0]!.evidence.filesChanged)).toBe(true);
+    expect(Object.isFrozen(received[0]!.evidence.artifacts)).toBe(true);
+  });
+
+  it('drops malformed evidence frames without emitting to listeners', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { received, socket } = makeEvidenceClient();
+
+    // Missing evidence entirely.
+    expect(() =>
+      socket.message(JSON.stringify({ type: 'evidence', path: '/abs/repo', workItemId: 'WI-1' })),
+    ).not.toThrow();
+    // Bad artifact state.
+    expect(() =>
+      socket.message(
+        evidenceFrame('/abs/repo', 'WI-1', {
+          ...sampleEvidenceData(),
+          artifacts: [{ name: 'design.md', state: 'Published' }],
+        }),
+      ),
+    ).not.toThrow();
+    // Non-string prSummary.
+    expect(() =>
+      socket.message(
+        evidenceFrame('/abs/repo', 'WI-1', { ...sampleEvidenceData(), prSummary: 42 }),
+      ),
+    ).not.toThrow();
+    // Missing testResults.summary.
+    expect(() =>
+      socket.message(
+        evidenceFrame('/abs/repo', 'WI-1', {
+          ...sampleEvidenceData(),
+          testResults: {},
+        }),
+      ),
+    ).not.toThrow();
+    // workItemId missing.
+    expect(() =>
+      socket.message(
+        JSON.stringify({ type: 'evidence', path: '/abs/repo', evidence: sampleEvidenceData() }),
+      ),
+    ).not.toThrow();
+
+    expect(received).toEqual([]);
+    expect(warn).toHaveBeenCalled();
+  });
+
+  it('requestEvidence() sends an evidence-request frame once the socket is OPEN', () => {
+    const client = createWsClient({
+      url: 'ws://localhost/ws',
+      createWebSocket: (url) => new FakeSocket(url),
+    });
+    const socket = FakeSocket.instances[0]!;
+    socket.open();
+
+    client.requestEvidence('/abs/repo', 'WI-1');
+
+    expect(socket.sent).toEqual([
+      JSON.stringify({ type: 'evidence-request', path: '/abs/repo', workItemId: 'WI-1' }),
+    ]);
   });
 });

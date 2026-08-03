@@ -166,6 +166,38 @@ export interface WorkItemSessionAnchor {
 }
 
 /**
+ * A validated evidence file-change entry. Mirrors the server's EvidenceFileChange
+ * (server/src/ws-protocol.ts) — duplicated typed contract, no shared package.
+ * Frozen — never mutated after construction.
+ */
+export interface EvidenceFileChange {
+  readonly path: string;
+  readonly status: string;
+}
+
+/**
+ * A validated evidence artifact entry. Mirrors the server's EvidenceArtifact
+ * (server/src/ws-protocol.ts) — duplicated typed contract, no shared package.
+ * Frozen — never mutated after construction.
+ */
+export interface EvidenceArtifact {
+  readonly name: string;
+  readonly state: 'Draft' | 'Final';
+}
+
+/**
+ * A validated evidence-request payload. Mirrors the server's EvidenceData
+ * (server/src/ws-protocol.ts) — duplicated typed contract, no shared package.
+ * Frozen — never mutated after construction.
+ */
+export interface EvidenceData {
+  readonly filesChanged: readonly EvidenceFileChange[];
+  readonly testResults: { readonly summary: string };
+  readonly prSummary: string;
+  readonly artifacts: readonly EvidenceArtifact[];
+}
+
+/**
  * One normalized transcript event body — the payload of a live session's SDK
  * message stream. Mirrors the server's TranscriptEventBody
  * (server/src/ws-protocol.ts, the source of truth) — duplicated typed contract,
@@ -395,6 +427,11 @@ export type SessionTranscriptListener = (
   sessionId: string,
   events: readonly TranscriptEvent[],
 ) => void;
+export type EvidenceListener = (
+  path: string,
+  workItemId: string,
+  evidence: EvidenceData,
+) => void;
 export type BridgeStateListener = (path: string, state: BridgeState) => void;
 export type PermissionRequestListener = (request: PermissionRequest) => void;
 export type ForeignNeedsYouListener = (item: ForeignNeedsYou) => void;
@@ -429,6 +466,8 @@ export interface WsClient {
   readonly onWorkItemSessions: (listener: WorkItemSessionsListener) => () => void;
   /** Subscribe to validated owned-session transcript batches. */
   readonly onSessionTranscript: (listener: SessionTranscriptListener) => () => void;
+  /** Subscribe to validated evidence snapshots. */
+  readonly onEvidence: (listener: EvidenceListener) => () => void;
   /** Subscribe to validated bridge-state snapshots. */
   readonly onBridgeState: (listener: BridgeStateListener) => () => void;
   /** Subscribe to validated permission requests. */
@@ -461,6 +500,8 @@ export interface WsClient {
   readonly requestRosterTimeline: (path: string) => void;
   /** Request the current owned-session anchors for a work item; no-op (warns) when the socket is not open. */
   readonly requestWorkItemSessions: (path: string, workItemId: string) => void;
+  /** Request the current evidence snapshot for a work item; no-op (warns) when the socket is not open. */
+  readonly requestEvidence: (path: string, workItemId: string) => void;
   /** Spawn an owned session for a pinned project + role; no-op (warns) when the socket is not open. */
   readonly spawnSession: (path: string, role: string, workItemId?: string) => void;
   /** Request the buffered transcript of a live owned session; no-op (warns) when the socket is not open. */
@@ -1144,6 +1185,112 @@ function parseWorkItemSessionsSnapshot(
 }
 
 /**
+ * Validate a single raw entry against the EvidenceFileChange contract:
+ * `{ path: string, status: string }`.
+ * Returns a frozen EvidenceFileChange, or null for anything malformed.
+ */
+function parseEvidenceFileChange(entry: unknown): EvidenceFileChange | null {
+  if (typeof entry !== 'object' || entry === null) return null;
+
+  const record = entry as Record<string, unknown>;
+  const { path, status } = record;
+
+  if (typeof path !== 'string') return null;
+  if (typeof status !== 'string') return null;
+
+  return Object.freeze({ path, status });
+}
+
+/**
+ * Validate a single raw entry against the EvidenceArtifact contract:
+ * `{ name: string, state: 'Draft'|'Final' }`.
+ * Returns a frozen EvidenceArtifact, or null for anything malformed.
+ */
+function parseEvidenceArtifact(entry: unknown): EvidenceArtifact | null {
+  if (typeof entry !== 'object' || entry === null) return null;
+
+  const record = entry as Record<string, unknown>;
+  const { name, state } = record;
+
+  if (typeof name !== 'string') return null;
+  if (state !== 'Draft' && state !== 'Final') return null;
+
+  return Object.freeze({ name, state });
+}
+
+/**
+ * Validate a single raw entry against the EvidenceData contract:
+ * `{ filesChanged: EvidenceFileChange[], testResults: { summary: string },
+ *    prSummary: string, artifacts: EvidenceArtifact[] }`.
+ * Returns a frozen EvidenceData, or null for anything malformed.
+ */
+function parseEvidenceData(entry: unknown): EvidenceData | null {
+  if (typeof entry !== 'object' || entry === null) return null;
+
+  const record = entry as Record<string, unknown>;
+  const { filesChanged, testResults, prSummary, artifacts } = record;
+
+  if (!Array.isArray(filesChanged)) return null;
+  const parsedFilesChanged: EvidenceFileChange[] = [];
+  for (const fileEntry of filesChanged) {
+    const fileChange = parseEvidenceFileChange(fileEntry);
+    if (fileChange === null) return null;
+    parsedFilesChanged.push(fileChange);
+  }
+
+  if (typeof testResults !== 'object' || testResults === null) return null;
+  const { summary } = testResults as Record<string, unknown>;
+  if (typeof summary !== 'string') return null;
+
+  if (typeof prSummary !== 'string') return null;
+
+  if (!Array.isArray(artifacts)) return null;
+  const parsedArtifacts: EvidenceArtifact[] = [];
+  for (const artifactEntry of artifacts) {
+    const artifact = parseEvidenceArtifact(artifactEntry);
+    if (artifact === null) return null;
+    parsedArtifacts.push(artifact);
+  }
+
+  return Object.freeze({
+    filesChanged: Object.freeze(parsedFilesChanged),
+    testResults: Object.freeze({ summary }),
+    prSummary,
+    artifacts: Object.freeze(parsedArtifacts),
+  });
+}
+
+/**
+ * Validate a raw WS frame against the pinned evidence contract:
+ * `{ type: 'evidence', path: string, workItemId: string, evidence: EvidenceData }`.
+ * Returns a frozen `{ path, workItemId, evidence }`, or null for anything malformed.
+ */
+function parseEvidenceSnapshot(
+  data: unknown,
+): { path: string; workItemId: string; evidence: EvidenceData } | null {
+  if (typeof data !== 'string') return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return null;
+  }
+
+  if (typeof parsed !== 'object' || parsed === null) return null;
+
+  const frame = parsed as Record<string, unknown>;
+  if (frame.type !== 'evidence') return null;
+  if (typeof frame.path !== 'string' || frame.path.length === 0) return null;
+  if (typeof frame.workItemId !== 'string' || frame.workItemId.length === 0) return null;
+
+  const evidence = parseEvidenceData(frame.evidence);
+  if (evidence === null) return null;
+
+  return Object.freeze({ path: frame.path, workItemId: frame.workItemId, evidence });
+}
+
+/**
  * Validate a raw WS frame against the pinned session-state contract:
  * `{ type: 'session-state', path: string, session: SessionState }`.
  * Returns a frozen `{ path, session }`, or null for anything malformed.
@@ -1583,6 +1730,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
   const sessionPersonasListeners = new Set<SessionPersonasListener>();
   const workItemSessionsListeners = new Set<WorkItemSessionsListener>();
   const sessionTranscriptListeners = new Set<SessionTranscriptListener>();
+  const evidenceListeners = new Set<EvidenceListener>();
   const bridgeStateListeners = new Set<BridgeStateListener>();
   const permissionRequestListeners = new Set<PermissionRequestListener>();
   const foreignNeedsYouListeners = new Set<ForeignNeedsYouListener>();
@@ -1657,6 +1805,10 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     events: readonly TranscriptEvent[],
   ): void {
     for (const listener of sessionTranscriptListeners) listener(path, sessionId, events);
+  }
+
+  function emitEvidence(path: string, workItemId: string, evidence: EvidenceData): void {
+    for (const listener of evidenceListeners) listener(path, workItemId, evidence);
   }
 
   function emitBridgeState(path: string, bridgeState: BridgeState): void {
@@ -1800,6 +1952,16 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
         return;
       }
       emitWorkItemSessions(snapshot.path, snapshot.workItemId, snapshot.sessions);
+      return;
+    }
+
+    if (type === 'evidence') {
+      const snapshot = parseEvidenceSnapshot(data);
+      if (snapshot === null) {
+        console.warn('[ws-client] dropped malformed frame:', data);
+        return;
+      }
+      emitEvidence(snapshot.path, snapshot.workItemId, snapshot.evidence);
       return;
     }
 
@@ -2005,6 +2167,10 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     sendFrame({ type: 'work-item-sessions-request', path, workItemId });
   }
 
+  function requestEvidence(path: string, workItemId: string): void {
+    sendFrame({ type: 'evidence-request', path, workItemId });
+  }
+
   function spawnSession(path: string, role: string, workItemId?: string): void {
     sendFrame({
       type: 'session-spawn',
@@ -2148,6 +2314,12 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
         sessionTranscriptListeners.delete(listener);
       };
     },
+    onEvidence: (listener) => {
+      evidenceListeners.add(listener);
+      return () => {
+        evidenceListeners.delete(listener);
+      };
+    },
     onBridgeState: (listener) => {
       bridgeStateListeners.add(listener);
       return () => {
@@ -2194,6 +2366,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     requestSessionPersonas,
     requestRosterTimeline,
     requestWorkItemSessions,
+    requestEvidence,
     spawnSession,
     requestTranscript,
     sendSessionInput,

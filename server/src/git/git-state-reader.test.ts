@@ -16,7 +16,7 @@ import { promisify } from 'node:util';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { readGitState } from './git-state-reader.js';
+import { readChangedFiles, readGitState } from './git-state-reader.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -215,5 +215,54 @@ describe('readGitState', () => {
 
     // Then: the returned object is immutable
     expect(Object.isFrozen(state)).toBe(true);
+  });
+});
+
+describe('readChangedFiles', () => {
+  it('(i) returns modified + added entries for a temp repo with changes vs base', async () => {
+    // Given: a repo with an initial commit on `main` (the fallback base), then a
+    // `feature` branch with a modified tracked file and a newly added file,
+    // committed so a diff of `main...HEAD` (feature) is non-empty.
+    const dir = await newTmpRoot('changedfiles');
+    await initRepoWithCommit(dir);
+    await git(dir, ['checkout', '-b', 'feature']);
+    await fs.writeFile(join(dir, 'file.txt'), 'v2\n');
+    await fs.writeFile(join(dir, 'new-file.txt'), 'new\n');
+    await git(dir, ['add', 'file.txt', 'new-file.txt']);
+    await git(dir, ['commit', '-m', 'modify + add']);
+
+    // When: reading its changed files
+    const entries = await readChangedFiles(dir);
+
+    // Then: both the modified and added files are reported
+    const byPath = new Map(entries.map((e) => [e.path, e.status]));
+    expect(byPath.get('file.txt')).toBe('M');
+    expect(byPath.get('new-file.txt')).toBe('A');
+  });
+
+  it('(j) resolves to an empty array for a plain non-git dir (never rejects)', async () => {
+    // Given: an ordinary tmp directory that is not a git repository
+    const dir = await newTmpRoot('changedfiles-nongit');
+
+    // When: reading its changed files
+    const entries = await readChangedFiles(dir);
+
+    // Then: it resolves to an empty array rather than rejecting
+    expect(entries).toEqual([]);
+  });
+
+  it('(k) returns a frozen array', async () => {
+    // Given: a repo with a change on `feature` vs the `main` base
+    const dir = await newTmpRoot('changedfiles-frozen');
+    await initRepoWithCommit(dir);
+    await git(dir, ['checkout', '-b', 'feature']);
+    await fs.writeFile(join(dir, 'file.txt'), 'v2\n');
+    await git(dir, ['commit', '-am', 'modify']);
+
+    // When: reading its changed files
+    const entries = await readChangedFiles(dir);
+
+    // Then: the returned array is immutable
+    expect(Object.isFrozen(entries)).toBe(true);
   });
 });

@@ -40,6 +40,8 @@ function defaultProjectsResult(overrides: Partial<UseProjectsResult> = {}): UseP
     requestRosterTimeline: vi.fn(),
     workItemSessions: {},
     requestWorkItemSessions: vi.fn(),
+    evidence: {},
+    requestEvidence: vi.fn(),
     bridgeStates: {},
     approveGate: vi.fn(),
     requestChanges: vi.fn(),
@@ -87,10 +89,20 @@ describe('App — assign work wiring', () => {
   it('clicking Assign work calls bridgeStart(path, nextTaskId) AND navigates to Work-item Detail', async () => {
     const { useProjects } = await import('@/hooks/useProjects');
     const path = '/abs/one';
+    const requestEvidence = vi.fn();
     vi.mocked(useProjects).mockReturnValue(
       defaultProjectsResult({
         projects: [sampleProject(path)],
         trackerStates: { [path]: sampleTrackerState(path) },
+        requestEvidence,
+        evidence: {
+          'task-1': {
+            filesChanged: [],
+            testResults: { summary: '' },
+            prSummary: '',
+            artifacts: [],
+          },
+        },
       }),
     );
 
@@ -104,6 +116,9 @@ describe('App — assign work wiring', () => {
 
     const detail = screen.getByTestId('work-item-detail');
     expect(detail).toHaveAttribute('data-workitem', 'task-1');
+
+    expect(requestEvidence).toHaveBeenCalledWith(path, 'task-1');
+    expect(screen.getByTestId('evidence-tab-files')).toBeInTheDocument();
   });
 });
 

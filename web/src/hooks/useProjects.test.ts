@@ -9,6 +9,8 @@ import type {
   ConnectionStatus,
   CostUsage,
   CostUsageListener,
+  EvidenceData,
+  EvidenceListener,
   GitState,
   GitStateListener,
   LifecycleSignals,
@@ -51,6 +53,7 @@ function makeFakeClient() {
   let sessionTranscriptListener: SessionTranscriptListener | null = null;
   let costUsageListener: CostUsageListener | null = null;
   let rosterTimelineListener: RosterTimelineListener | null = null;
+  let evidenceListener: EvidenceListener | null = null;
   const pin = vi.fn();
   const unpin = vi.fn();
   const discover = vi.fn();
@@ -61,6 +64,7 @@ function makeFakeClient() {
   const requestSessionPersonas = vi.fn();
   const requestRosterTimeline = vi.fn();
   const requestWorkItemSessions = vi.fn();
+  const requestEvidence = vi.fn();
   const spawnSession = vi.fn();
   const requestTranscript = vi.fn();
   const sendSessionInput = vi.fn();
@@ -133,6 +137,12 @@ function makeFakeClient() {
       };
     },
     onWorkItemSessions: () => () => {},
+    onEvidence: (listener) => {
+      evidenceListener = listener;
+      return () => {
+        evidenceListener = null;
+      };
+    },
     onSessionTranscript: (listener) => {
       sessionTranscriptListener = listener;
       return () => {
@@ -170,6 +180,7 @@ function makeFakeClient() {
     requestSessionPersonas,
     requestRosterTimeline,
     requestWorkItemSessions,
+    requestEvidence,
     spawnSession,
     requestTranscript,
     sendSessionInput,
@@ -196,6 +207,7 @@ function makeFakeClient() {
     requestSessionPersonas,
     requestRosterTimeline,
     requestWorkItemSessions,
+    requestEvidence,
     spawnSession,
     requestTranscript,
     sendSessionInput,
@@ -234,6 +246,8 @@ function makeFakeClient() {
     emitCostUsage: (usage: CostUsage) => costUsageListener?.(usage),
     emitRosterTimeline: (path: string, timeline: RosterTimeline) =>
       rosterTimelineListener?.(path, timeline),
+    emitEvidence: (path: string, workItemId: string, evidence: EvidenceData) =>
+      evidenceListener?.(path, workItemId, evidence),
   };
 }
 
@@ -294,6 +308,15 @@ function sampleRosterTimeline(path: string): RosterTimeline {
         ],
       },
     ],
+  };
+}
+
+function sampleEvidenceData(): EvidenceData {
+  return {
+    filesChanged: [{ path: 'src/foo.ts', status: 'modified' }],
+    testResults: { summary: '12 passed' },
+    prSummary: 'Adds the foo feature.',
+    artifacts: [{ name: 'design.md', state: 'Final' }],
   };
 }
 
@@ -986,6 +1009,39 @@ describe('useProjects', () => {
       '/abs/one': timelineOne,
       '/abs/two': timelineTwo,
     });
+  });
+
+  it('folds an emitted evidence snapshot into evidence keyed by workItemId, immutably', () => {
+    const fake = makeFakeClient();
+    const { result } = renderHook(() =>
+      useProjects({ createClient: () => fake.client }),
+    );
+
+    const prevEvidence = result.current.evidence;
+    const evidenceOne = sampleEvidenceData();
+    act(() => fake.emitEvidence('/abs/one', 'WI-1', evidenceOne));
+
+    expect(prevEvidence).toEqual({});
+    expect(result.current.evidence).toEqual({ 'WI-1': evidenceOne });
+    expect(result.current.evidence).not.toBe(prevEvidence);
+
+    const beforeSecond = result.current.evidence;
+    const evidenceTwo = { ...sampleEvidenceData(), prSummary: 'Adds the bar feature.' };
+    act(() => fake.emitEvidence('/abs/two', 'WI-2', evidenceTwo));
+
+    expect(result.current.evidence).toEqual({ 'WI-1': evidenceOne, 'WI-2': evidenceTwo });
+    expect(result.current.evidence).not.toBe(beforeSecond);
+  });
+
+  it('delegates requestEvidence to the underlying client', () => {
+    const fake = makeFakeClient();
+    const { result } = renderHook(() =>
+      useProjects({ createClient: () => fake.client }),
+    );
+
+    act(() => result.current.requestEvidence('/abs/path', 'WI-1'));
+
+    expect(fake.requestEvidence).toHaveBeenCalledWith('/abs/path', 'WI-1');
   });
 
   it('delegates requestRosterTimeline to the underlying client', () => {

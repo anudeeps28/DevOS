@@ -216,3 +216,130 @@ export async function readGitState(projectPath: string): Promise<GitState> {
     return unavailable(projectPath);
   }
 }
+
+/** A single changed-file entry: a git status token and the affected path. */
+interface ChangedFileEntry {
+  path: string;
+  status: string;
+}
+
+// Hard cap on how many changed-file entries readChangedFiles will return, so a
+// pathological diff (huge rename/rewrite) can't blow up a caller's payload.
+const CHANGED_FILES_MAX_ENTRIES = 2000;
+
+/** Run a hardened git invocation in `projectPath` and return trimmed-free stdout. */
+async function execGit(projectPath: string, args: readonly string[]): Promise<string> {
+  const { stdout } = await execFileAsync('git', [...GIT_HARDENING_ARGS, ...args], {
+    cwd: projectPath,
+    timeout: GIT_TIMEOUT_MS,
+    maxBuffer: GIT_MAX_BUFFER_BYTES,
+    // Read-only diff/status must not take index locks.
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+  });
+  return stdout;
+}
+
+/**
+ * Run `git diff --name-status --find-renames <base>...HEAD` against the first
+ * base that resolves: `origin/HEAD` (stripped of its `origin/` prefix), then
+ * `main`, then `master`. Throws the last error if every candidate fails.
+ */
+async function getDiffOutput(projectPath: string): Promise<string> {
+  const candidates: string[] = [];
+  try {
+    const originHead = (await execGit(projectPath, ['rev-parse', '--abbrev-ref', 'origin/HEAD'])).trim();
+    candidates.push(originHead.startsWith('origin/') ? originHead.slice('origin/'.length) : originHead);
+  } catch {
+    // origin/HEAD unresolvable (no remote, detached, etc.) — fall through.
+  }
+  candidates.push('main', 'master');
+
+  let lastError: unknown;
+  for (const base of candidates) {
+    try {
+      return await execGit(projectPath, ['diff', '--name-status', '--find-renames', `${base}...HEAD`]);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+
+/**
+ * Parse `git diff --name-status --find-renames` output into entries. Each line
+ * is tab-separated: the first field is the status (`M`, `A`, `D`, `R100`, ...)
+ * and the last field is the path (the destination path for a rename/copy).
+ */
+function parseDiffOutput(stdout: string): ChangedFileEntry[] {
+  const entries: ChangedFileEntry[] = [];
+  for (const line of stdout.split('\n')) {
+    if (line.length === 0) continue;
+    const parts = line.split('\t');
+    if (parts.length < 2) continue;
+    const status = parts[0]!;
+    const path = parts[parts.length - 1]!;
+    entries.push({ status, path });
+  }
+  return entries;
+}
+
+/** Run `git status --porcelain=v2` (no `--branch`, entries only). */
+async function getStatusOutput(projectPath: string): Promise<string> {
+  return execGit(projectPath, ['status', '--porcelain=v2']);
+}
+
+/**
+ * Parse `git status --porcelain=v2` output into changed-file entries, skipping
+ * `# `-prefixed header lines. Handles ordinary (`1`), renamed/copied (`2`),
+ * unmerged (`u`), untracked (`?`), and ignored (`!`) entry lines.
+ */
+function parseStatusOutput(stdout: string): ChangedFileEntry[] {
+  const entries: ChangedFileEntry[] = [];
+  for (const line of stdout.split('\n')) {
+    if (line.length === 0 || line.startsWith('# ')) continue;
+
+    const typeChar = line[0];
+    if (typeChar === '?' || typeChar === '!') {
+      entries.push({ status: typeChar, path: line.slice(2) });
+      continue;
+    }
+
+    const fields = line.split(' ');
+    const status = fields[1];
+    if (status === undefined) continue;
+
+    if (typeChar === '1') {
+      entries.push({ status, path: fields.slice(8).join(' ') });
+    } else if (typeChar === '2') {
+      const rest = fields.slice(9).join(' ');
+      entries.push({ status, path: rest.split('\t')[0] ?? rest });
+    } else if (typeChar === 'u') {
+      entries.push({ status, path: fields.slice(10).join(' ') });
+    }
+  }
+  return entries;
+}
+
+/**
+ * Read the changed files for `projectPath` relative to its default branch:
+ * `git diff --name-status --find-renames <base>...HEAD`, where `<base>` is the
+ * first of `origin/HEAD` (stripped), `main`, `master` that resolves. Falls back
+ * to `git status --porcelain=v2` entries on ANY failure (unresolvable base,
+ * non-repo, timeout, spawn ENOENT). Drop-don't-throw: NEVER throws or rejects —
+ * every failure path returns a frozen, capped, empty-or-partial array.
+ */
+export async function readChangedFiles(
+  projectPath: string,
+): Promise<readonly ChangedFileEntry[]> {
+  try {
+    const stdout = await getDiffOutput(projectPath);
+    return Object.freeze(parseDiffOutput(stdout).slice(0, CHANGED_FILES_MAX_ENTRIES));
+  } catch {
+    try {
+      const stdout = await getStatusOutput(projectPath);
+      return Object.freeze(parseStatusOutput(stdout).slice(0, CHANGED_FILES_MAX_ENTRIES));
+    } catch {
+      return Object.freeze([]);
+    }
+  }
+}

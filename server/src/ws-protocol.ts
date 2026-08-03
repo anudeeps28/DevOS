@@ -309,6 +309,41 @@ export interface WorkItemSessionsSnapshot {
   readonly sessions: readonly WorkItemSessionAnchor[];
 }
 
+/** One changed file in a work item's evidence, as sent to the client. */
+export interface EvidenceFileChange {
+  readonly path: string;
+  readonly status: string;
+}
+
+/** One test/build artifact in a work item's evidence, as sent to the client. */
+export interface EvidenceArtifact {
+  readonly name: string;
+  readonly state: 'Draft' | 'Final';
+}
+
+/** A work item's evidence bundle, as sent to the client. */
+export interface EvidenceData {
+  readonly filesChanged: readonly EvidenceFileChange[];
+  readonly testResults: { readonly summary: string };
+  readonly prSummary: string;
+  readonly artifacts: readonly EvidenceArtifact[];
+}
+
+/** Inbound: request the current evidence bundle for a work item of a pinned project path. */
+export interface EvidenceRequestMessage {
+  readonly type: 'evidence-request';
+  readonly path: string;
+  readonly workItemId: string;
+}
+
+/** Outbound: an evidence snapshot for a single project path + work item. */
+export interface EvidenceSnapshot {
+  readonly type: 'evidence';
+  readonly path: string;
+  readonly workItemId: string;
+  readonly evidence: EvidenceData;
+}
+
 /** Inbound: spawn an owned Agent-SDK session for a pinned project + role. */
 export interface SessionSpawnMessage {
   readonly type: 'session-spawn';
@@ -546,7 +581,8 @@ export type InboundMessage =
   | EscalationChoiceMessage
   | SessionPersonasMessage
   | WorkItemSessionsRequestMessage
-  | RosterTimelineRequestMessage;
+  | RosterTimelineRequestMessage
+  | EvidenceRequestMessage;
 
 /** Every registry message the server emits to a client. */
 export type OutboundMessage =
@@ -566,7 +602,8 @@ export type OutboundMessage =
   | SessionPersonasSnapshot
   | CostUsageSnapshot
   | WorkItemSessionsSnapshot
-  | RosterTimelineSnapshot;
+  | RosterTimelineSnapshot
+  | EvidenceSnapshot;
 
 /**
  * Validate a raw WS frame against the inbound contract. Branches on `type` first:
@@ -695,6 +732,28 @@ export function parseInboundMessage(data: unknown): InboundMessage | null {
     }
     return Object.freeze<WorkItemSessionsRequestMessage>({
       type: 'work-item-sessions-request',
+      path,
+      workItemId,
+    });
+  }
+
+  // `evidence-request` requires a non-empty ABSOLUTE path (like the read frames) AND
+  // a safe workItemId (same allowlist as work-item-sessions-request).
+  if (type === 'evidence-request') {
+    const { path, workItemId } = frame;
+    if (
+      typeof path !== 'string' ||
+      path.length === 0 ||
+      path.length > MAX_PATH_LENGTH ||
+      !isAbsolute(path)
+    ) {
+      return null;
+    }
+    if (!isSafeWorkItemId(workItemId)) {
+      return null;
+    }
+    return Object.freeze<EvidenceRequestMessage>({
+      type: 'evidence-request',
       path,
       workItemId,
     });
