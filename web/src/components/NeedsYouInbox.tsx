@@ -26,6 +26,8 @@ export function NeedsYouInbox({
   bridgeStates,
   onApprove,
   onRequestChanges = () => {},
+  onAnswerQuestion = () => {},
+  onEscalationChoice = () => {},
   permissions = [],
   onPermissionDecision = () => {},
   foreignItems = [],
@@ -33,6 +35,12 @@ export function NeedsYouInbox({
   bridgeStates: readonly BridgeState[];
   onApprove: (path: string) => void;
   onRequestChanges?: (path: string, notes: string) => void;
+  onAnswerQuestion?: (path: string, answer: string) => void;
+  onEscalationChoice?: (
+    path: string,
+    choice: 'let-debug-try' | 'give-guidance' | 'take-over',
+    notes?: string,
+  ) => void;
   permissions?: readonly PermissionRequest[];
   onPermissionDecision?: (
     sessionId: string,
@@ -41,7 +49,9 @@ export function NeedsYouInbox({
   ) => void;
   foreignItems?: readonly ForeignNeedsYou[];
 }): JSX.Element {
-  const inboxItems = bridgeStates.flatMap((state) => state.inbox.map((item) => ({ item, path: state.path })));
+  const inboxItems = bridgeStates.flatMap((state) =>
+    state.inbox.map((item) => ({ item, path: state.path, gate: state.gate })),
+  );
   // Keyed by a stable per-item identity (path + stage + ts), NOT array index — the
   // inbox is reordered by wait time upstream, so index-keyed notes would rebind to the
   // wrong item when the list shifts.
@@ -128,8 +138,19 @@ export function NeedsYouInbox({
                 </div>
               </div>
               <div className="flex shrink-0 items-center gap-2">
-                {entry.item.kind === 'question' && (
+                {entry.item.kind === 'question' && entry.item.chips !== undefined ? (
                   <>
+                    {entry.item.chips.map((chip, chipIndex) => (
+                      <button
+                        key={`${chip}-${chipIndex}`}
+                        type="button"
+                        data-testid={`needs-you-chip-${index}-${chipIndex}`}
+                        onClick={() => onAnswerQuestion(entry.path, chip)}
+                        className="rounded-md border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-accent"
+                      >
+                        {chip}
+                      </button>
+                    ))}
                     <input
                       type="text"
                       data-testid={`needs-you-notes-${index}`}
@@ -141,22 +162,84 @@ export function NeedsYouInbox({
                     />
                     <button
                       type="button"
-                      data-testid={`needs-you-request-changes-${index}`}
-                      onClick={() => onRequestChanges(entry.path, notesByKey[noteKey] ?? '')}
+                      data-testid={`needs-you-answer-${index}`}
+                      onClick={() => onAnswerQuestion(entry.path, notesByKey[noteKey] ?? '')}
                       className="rounded-md border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-accent"
                     >
-                      Request changes
+                      Send answer
+                    </button>
+                  </>
+                ) : entry.item.kind === 'escalation' && entry.gate === 'escalated' ? (
+                  <>
+                    <button
+                      type="button"
+                      data-testid={`needs-you-escalation-debug-${index}`}
+                      onClick={() => onEscalationChoice(entry.path, 'let-debug-try')}
+                      className="rounded-md border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-accent"
+                    >
+                      Let debug try
+                    </button>
+                    <input
+                      type="text"
+                      data-testid={`needs-you-notes-${index}`}
+                      value={notesByKey[noteKey] ?? ''}
+                      onChange={(event) =>
+                        setNotesByKey((prev) => ({ ...prev, [noteKey]: event.target.value }))
+                      }
+                      className="rounded-md border border-border px-2 py-1 text-xs text-foreground"
+                    />
+                    <button
+                      type="button"
+                      data-testid={`needs-you-escalation-guidance-${index}`}
+                      onClick={() =>
+                        onEscalationChoice(entry.path, 'give-guidance', notesByKey[noteKey] ?? '')
+                      }
+                      className="rounded-md border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-accent"
+                    >
+                      Give guidance
+                    </button>
+                    <button
+                      type="button"
+                      data-testid={`needs-you-escalation-takeover-${index}`}
+                      onClick={() => onEscalationChoice(entry.path, 'take-over')}
+                      className="rounded-md border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-accent"
+                    >
+                      Take over
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    {entry.item.kind === 'question' && (
+                      <>
+                        <input
+                          type="text"
+                          data-testid={`needs-you-notes-${index}`}
+                          value={notesByKey[noteKey] ?? ''}
+                          onChange={(event) =>
+                            setNotesByKey((prev) => ({ ...prev, [noteKey]: event.target.value }))
+                          }
+                          className="rounded-md border border-border px-2 py-1 text-xs text-foreground"
+                        />
+                        <button
+                          type="button"
+                          data-testid={`needs-you-request-changes-${index}`}
+                          onClick={() => onRequestChanges(entry.path, notesByKey[noteKey] ?? '')}
+                          className="rounded-md border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-accent"
+                        >
+                          Request changes
+                        </button>
+                      </>
+                    )}
+                    <button
+                      type="button"
+                      data-testid={`needs-you-approve-${index}`}
+                      onClick={() => onApprove(entry.path)}
+                      className="rounded-md border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-accent"
+                    >
+                      Approve
                     </button>
                   </>
                 )}
-                <button
-                  type="button"
-                  data-testid={`needs-you-approve-${index}`}
-                  onClick={() => onApprove(entry.path)}
-                  className="rounded-md border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-accent"
-                >
-                  Approve
-                </button>
               </div>
             </li>
             );

@@ -27,6 +27,7 @@ import type {
   SessionManager,
   SessionSnapshot,
 } from './session-manager.js';
+import type { EngineQuestionRequest } from './session-engine.js';
 
 /** Public surface of the Bridge — one instance drives every pinned project's run. */
 export interface Bridge {
@@ -41,6 +42,16 @@ export interface Bridge {
    * for the revised plan's next planning→coding transition. No-op unless the run is
    * genuinely `planGatePending` with a live current session. */
   readonly requestChanges: (projectPath: string, notes: string) => void;
+  /** Answer a parked agent question (chip or free text) for a pinned project's run.
+   * No-op unless the run has a pending question. */
+  readonly answerQuestion: (projectPath: string, answer: string) => void;
+  /** Resolve the current escalation for a pinned project's run with one of three
+   * explicit operator choices. No-op unless the run is genuinely `escalated`. */
+  readonly resolveEscalation: (
+    projectPath: string,
+    choice: 'let-debug-try' | 'give-guidance' | 'take-over',
+    notes?: string,
+  ) => void;
   readonly onState: (listener: (snap: BridgeStateSnapshot) => void) => () => void;
   readonly getState: (projectPath: string) => BridgeStateSnapshot | null;
   readonly getInbox: (projectPath: string) => readonly BridgeInboxItem[];
@@ -81,6 +92,13 @@ export interface BridgeDeps {
 
 const DEFAULT_REWORK_LOOP_CAP = 3;
 const DEFAULT_CONTEXT_RESPAWN_CAP = 2;
+// Fixed diagnosis instruction for the "let debug try" escalation choice — the
+// /debug spirit (rules/autonomous-mode.md): reproduce the failure deterministically,
+// test one hypothesis at a time, fix the root cause before resuming.
+export const DEBUG_TAKEOVER_PROMPT =
+  'The pipeline escalated after repeated failures. Reproduce the failure deterministically, ' +
+  'then diagnose it one hypothesis at a time — test each hypothesis and revert if it does not ' +
+  'hold before moving to the next. Fix the root cause, not a symptom, before resuming normal work.';
 const FAILURE_REPORT_REL_DIR = join('.claude', 'failure-reports');
 // The two-session handoff contract (SPEC §3.1, .claude/agents/{builder,reviewer}.md):
 // every artifact the sessions exchange lives in `tasks/stories/<id>/`, NOT in a
@@ -183,6 +201,9 @@ interface BridgeRun {
   /** Set when the plan gate has paused the builder for review; cleared by
    * `approveGate` (steer + resume) or `requestChanges` (steer + re-arm). */
   planGatePending: boolean;
+  /** Set when an agent-raised question is parked awaiting an operator answer;
+   * cleared by `answerQuestion` or session teardown (handleEnded/handleErrored). */
+  pendingQuestion: { sessionId: string; requestId: string } | null;
 }
 
 /** Safe indexed access into a pipeline (noUncheckedIndexedAccess-friendly). */
@@ -380,6 +401,8 @@ export function createBridge(deps: BridgeDeps): Bridge {
   };
 
   const handleEnded = async (run: BridgeRun): Promise<void> => {
+    // A stale answer must not relay after the session terminated.
+    run.pendingQuestion = null;
     const isLast = run.index >= run.pipeline.length - 1;
     // A context-budget escalation ("task too big — split it") is terminal for this
     // run: the over-budget session was asked to end at a boundary, and its later
@@ -408,6 +431,8 @@ export function createBridge(deps: BridgeDeps): Bridge {
   };
 
   const handleErrored = async (run: BridgeRun): Promise<void> => {
+    // A stale answer must not relay after the session terminated.
+    run.pendingQuestion = null;
     const stage = stageAt(run.pipeline, run.index) ?? '';
     // Same terminal guard as handleEnded: once escalated for context budget, an
     // `errored` end must not sneak into rework/escalate again.
@@ -588,6 +613,32 @@ export function createBridge(deps: BridgeDeps): Bridge {
     handleContextConfigWarning(warning),
   );
 
+  // A live session raised a decision question via `ask_operator` — park a `question`
+  // inbox item (ALWAYS carrying `chips`, even empty, so the UI discriminator holds
+  // against the plan-gate question which never sets `chips`) and pause the run for
+  // the operator's answer.
+  const handleQuestionRequest = (sessionId: string, req: EngineQuestionRequest): void => {
+    const run = findRunBySessionId(sessionId);
+    if (run === null) return;
+    run.inbox.push(
+      Object.freeze<BridgeInboxItem>({
+        stage: stageAt(run.pipeline, run.index) ?? '',
+        kind: 'question',
+        reason: req.question,
+        chips: req.chips,
+        ts: Date.now(),
+      }),
+    );
+    run.pendingQuestion = { sessionId, requestId: req.requestId };
+    run.paused = true;
+    run.gate = 'awaiting-approval';
+    emit(run);
+  };
+
+  sessionManager.onQuestionRequest((_projectPath, sessionId, req) =>
+    handleQuestionRequest(sessionId, req),
+  );
+
   const start = (projectPath: string, workItemId?: string): void => {
     const roster = resolveRoster(projectPath);
     if (roster === null) return;
@@ -608,6 +659,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
       contextRespawnCount: 0,
       planGateArmed: false,
       planGatePending: false,
+      pendingQuestion: null,
     };
     runs.set(projectPath, run);
 
@@ -653,6 +705,43 @@ export function createBridge(deps: BridgeDeps): Bridge {
     emit(run);
   };
 
+  const answerQuestion = (projectPath: string, answer: string): void => {
+    const run = runs.get(projectPath);
+    if (run === undefined) return;
+    if (run.pendingQuestion === null) return;
+    sessionManager.answerQuestion(run.pendingQuestion.sessionId, run.pendingQuestion.requestId, answer);
+    // Remove the agent-question inbox item(s) — the ones carrying `chips` (the
+    // plan-gate question never sets it, so this can't accidentally clear that card).
+    run.inbox = run.inbox.filter((item) => item.chips === undefined);
+    run.pendingQuestion = null;
+    run.paused = false;
+    run.gate = 'running';
+    emit(run);
+  };
+
+  const resolveEscalation = (
+    projectPath: string,
+    choice: 'let-debug-try' | 'give-guidance' | 'take-over',
+    notes?: string,
+  ): void => {
+    const run = runs.get(projectPath);
+    if (run === undefined) return;
+    if (run.gate !== 'escalated') return;
+    if (choice === 'take-over') {
+      run.inbox = [];
+      emit(run);
+      return;
+    }
+    const buildRole = stageAt(run.pipeline, 0);
+    if (buildRole === null) return;
+    run.reworkCount = 0;
+    run.index = 0;
+    run.gate = 'reworking';
+    run.inbox = [];
+    const prompt = choice === 'let-debug-try' ? DEBUG_TAKEOVER_PROMPT : (notes ?? '');
+    void spawnAndEmit(run, buildRole, buildRole, { prompt });
+  };
+
   const interrupt = (
     projectPath: string,
     kind: 'interrupt' | 'question' | 'escalation',
@@ -691,6 +780,8 @@ export function createBridge(deps: BridgeDeps): Bridge {
     approveGate,
     interrupt,
     requestChanges,
+    answerQuestion,
+    resolveEscalation,
     onState,
     getState,
     getInbox,

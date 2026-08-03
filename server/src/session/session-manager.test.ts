@@ -11,6 +11,7 @@ import { createSessionManager, type SessionSnapshot } from './session-manager.js
 import type {
   EngineMessage,
   EnginePermissionRequest,
+  EngineQuestionRequest,
   EngineSession,
   PermissionDecision,
   QueryFn,
@@ -31,6 +32,8 @@ function makeSession(opts: { endsOnInterrupt?: boolean } = {}): {
   sent: () => string[];
   emitPermissionRequest: (req: EnginePermissionRequest) => void;
   resolvePermissionCalls: () => Array<{ requestId: string; decision: PermissionDecision }>;
+  emitQuestionRequest: (req: EngineQuestionRequest) => void;
+  answerQuestionCalls: () => Array<{ requestId: string; answer: string }>;
 } {
   // Whether interrupt() ends the generator. Default true (models stopAll's shutdown
   // interrupt, closing the stream). Set false to model per-turn interrupt that leaves
@@ -45,6 +48,8 @@ function makeSession(opts: { endsOnInterrupt?: boolean } = {}): {
   const sentTexts: string[] = [];
   let permissionListener: ((req: EnginePermissionRequest) => void) | null = null;
   const resolvePermissionCalls: Array<{ requestId: string; decision: PermissionDecision }> = [];
+  let questionListener: ((req: EngineQuestionRequest) => void) | null = null;
+  const answerQuestionCalls: Array<{ requestId: string; answer: string }> = [];
 
   const wake = (): void => {
     if (resolveNext !== null) {
@@ -88,6 +93,12 @@ function makeSession(opts: { endsOnInterrupt?: boolean } = {}): {
     resolvePermission: (requestId: string, decision: PermissionDecision): void => {
       resolvePermissionCalls.push({ requestId, decision });
     },
+    onQuestionRequest: (listener: (req: EngineQuestionRequest) => void): void => {
+      questionListener = listener;
+    },
+    answerQuestion: (requestId: string, answer: string): void => {
+      answerQuestionCalls.push({ requestId, answer });
+    },
     end: (): void => {
       done = true;
       wake();
@@ -119,6 +130,10 @@ function makeSession(opts: { endsOnInterrupt?: boolean } = {}): {
       permissionListener?.(req);
     },
     resolvePermissionCalls: () => [...resolvePermissionCalls],
+    emitQuestionRequest: (req) => {
+      questionListener?.(req);
+    },
+    answerQuestionCalls: () => [...answerQuestionCalls],
   };
 }
 
@@ -814,6 +829,107 @@ describe('SessionManager permission relay', () => {
 
     expect(fake.resolvePermissionCalls()).toEqual([]);
     expect(received.some((e) => e.kind === 'permission')).toBe(false);
+
+    fake.finish();
+    await mgr.stopAll();
+  });
+});
+
+describe('SessionManager question relay', () => {
+  it('onQuestionRequest fires the listener with (projectPath, sessionId, req)', async () => {
+    const store = freshStore();
+    const fake = makeSession();
+    const mgr = createSessionManager({ store, query: () => fake.session });
+    const received: Array<{ projectPath: string; sessionId: string; req: EngineQuestionRequest }> = [];
+    mgr.onQuestionRequest((projectPath, sessionId, req) => {
+      received.push({ projectPath, sessionId, req });
+    });
+
+    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'builder' });
+
+    const request: EngineQuestionRequest = {
+      requestId: 'q-1',
+      question: 'Which config?',
+      chips: ['A', 'B'],
+    };
+    fake.emitQuestionRequest(request);
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toEqual({ projectPath: PROJECT, sessionId: snap.id, req: request });
+
+    fake.finish();
+    await mgr.stopAll();
+  });
+
+  it('answerQuestion for a live session calls through to the engine and echoes a user-text event', async () => {
+    const store = freshStore();
+    const fake = makeSession();
+    const mgr = createSessionManager({ store, query: () => fake.session });
+    const received: TranscriptEvent[] = [];
+    mgr.onTranscript((_path, _id, events) => received.push(...events));
+
+    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'builder' });
+    fake.emitQuestionRequest({ requestId: 'q-2', question: 'Proceed?', chips: [] });
+
+    mgr.answerQuestion(snap.id, 'q-2', 'yes');
+
+    expect(fake.answerQuestionCalls()).toEqual([{ requestId: 'q-2', answer: 'yes' }]);
+    const echo = received.find((e) => e.kind === 'user-text');
+    expect(echo).toMatchObject({ kind: 'user-text', text: 'yes', sessionId: snap.id });
+    expect(Object.isFrozen(echo)).toBe(true);
+
+    fake.finish();
+    await mgr.stopAll();
+  });
+
+  it('answerQuestion for an unknown session id is a silent no-op', async () => {
+    const store = freshStore();
+    const fake = makeSession();
+    const mgr = createSessionManager({ store, query: () => fake.session });
+
+    await mgr.spawn({ projectPath: PROJECT, role: 'builder' });
+    expect(() => mgr.answerQuestion('does-not-exist', 'q-x', 'yes')).not.toThrow();
+    expect(fake.answerQuestionCalls()).toEqual([]);
+
+    fake.finish();
+    await mgr.stopAll();
+  });
+
+  it('answerQuestion for an unknown/stale requestId on a live session is an idempotent no-op (no phantom echo)', async () => {
+    const store = freshStore();
+    const fake = makeSession();
+    const mgr = createSessionManager({ store, query: () => fake.session });
+    const received: TranscriptEvent[] = [];
+    mgr.onTranscript((_path, _id, events) => received.push(...events));
+
+    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'builder' });
+    // No question was ever raised for 'ghost-q' — a forged/stale answer must NOT reach the
+    // engine and must NOT inject a phantom user-text echo.
+    mgr.answerQuestion(snap.id, 'ghost-q', 'yes');
+
+    expect(fake.answerQuestionCalls()).toEqual([]);
+    expect(received.some((e) => e.kind === 'user-text')).toBe(false);
+
+    fake.finish();
+    await mgr.stopAll();
+  });
+
+  it('answerQuestion is idempotent for a repeated answer on the same requestId', async () => {
+    const store = freshStore();
+    const fake = makeSession();
+    const mgr = createSessionManager({ store, query: () => fake.session });
+    const received: TranscriptEvent[] = [];
+    mgr.onTranscript((_path, _id, events) => received.push(...events));
+
+    const snap = await mgr.spawn({ projectPath: PROJECT, role: 'builder' });
+    fake.emitQuestionRequest({ requestId: 'q-dup', question: 'Q?', chips: [] });
+
+    // First answer resolves + echoes; a second submit (e.g. from another tab) is a no-op.
+    mgr.answerQuestion(snap.id, 'q-dup', 'first');
+    mgr.answerQuestion(snap.id, 'q-dup', 'second');
+
+    expect(fake.answerQuestionCalls()).toEqual([{ requestId: 'q-dup', answer: 'first' }]);
+    expect(received.filter((e) => e.kind === 'user-text')).toHaveLength(1);
 
     fake.finish();
     await mgr.stopAll();

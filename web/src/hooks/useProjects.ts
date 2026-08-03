@@ -120,6 +120,14 @@ export interface UseProjectsResult {
   readonly approveGate: (path: string) => void;
   /** Request changes on a parked bridge gate for a project path; delegates to the live client. */
   readonly requestChanges: (path: string, notes: string) => void;
+  /** Answer a parked agent question for a project path; delegates to the live client. */
+  readonly answerQuestion: (path: string, answer: string) => void;
+  /** Resolve a parked escalation for a project path; delegates to the live client. */
+  readonly resolveEscalation: (
+    path: string,
+    choice: 'let-debug-try' | 'give-guidance' | 'take-over',
+    notes?: string,
+  ) => void;
   /** Spawn an owned session for a pinned project + role; delegates to the live client. */
   readonly spawnSession: (path: string, role: string, workItemId?: string) => void;
   /** Start (or resume) a Bridge pipeline run for a pinned project, optionally carrying a work-item id; delegates to the live client. */
@@ -466,6 +474,18 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     clientRef.current?.sendGateRequestChanges(path, notes);
   }
 
+  function answerQuestion(path: string, answer: string): void {
+    clientRef.current?.sendQuestionAnswer(path, answer);
+  }
+
+  function resolveEscalation(
+    path: string,
+    choice: 'let-debug-try' | 'give-guidance' | 'take-over',
+    notes?: string,
+  ): void {
+    clientRef.current?.sendEscalationChoice(path, choice, notes);
+  }
+
   return {
     projects,
     candidates,
@@ -490,6 +510,8 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     bridgeStates,
     approveGate,
     requestChanges,
+    answerQuestion,
+    resolveEscalation,
     spawnSession,
     bridgeStart,
     transcripts,

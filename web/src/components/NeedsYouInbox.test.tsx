@@ -285,4 +285,118 @@ describe('NeedsYouInbox', () => {
     expect(screen.queryByTestId('needs-you-notes-0')).not.toBeInTheDocument();
     expect(screen.queryByTestId('needs-you-request-changes-0')).not.toBeInTheDocument();
   });
+
+  it('renders an Agent Question card (chips + free text + Send answer) for a chips-bearing question', () => {
+    const state = bridgeState({
+      inbox: [
+        { stage: 'implement', kind: 'question', reason: 'Pick one', ts: 1, chips: ['Option A', 'Option B'] },
+      ],
+    });
+    render(<NeedsYouInbox bridgeStates={[state]} onApprove={() => {}} />);
+
+    expect(screen.getByTestId('needs-you-chip-0-0')).toHaveTextContent('Option A');
+    expect(screen.getByTestId('needs-you-chip-0-1')).toHaveTextContent('Option B');
+    expect(screen.getByTestId('needs-you-notes-0')).toBeInTheDocument();
+    expect(screen.getByTestId('needs-you-answer-0')).toBeInTheDocument();
+    expect(screen.queryByTestId('needs-you-approve-0')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('needs-you-request-changes-0')).not.toBeInTheDocument();
+  });
+
+  it('dispatches onAnswerQuestion with the chip text when a chip is clicked', () => {
+    const onAnswerQuestion = vi.fn();
+    const state = bridgeState({
+      path: '/abs/repo',
+      inbox: [
+        { stage: 'implement', kind: 'question', reason: 'Pick one', ts: 1, chips: ['Option A', 'Option B'] },
+      ],
+    });
+    render(
+      <NeedsYouInbox bridgeStates={[state]} onApprove={() => {}} onAnswerQuestion={onAnswerQuestion} />,
+    );
+
+    fireEvent.click(screen.getByTestId('needs-you-chip-0-1'));
+
+    expect(onAnswerQuestion).toHaveBeenCalledWith('/abs/repo', 'Option B');
+  });
+
+  it('dispatches onAnswerQuestion with the typed text when Send answer is clicked', () => {
+    const onAnswerQuestion = vi.fn();
+    const state = bridgeState({
+      path: '/abs/repo',
+      inbox: [{ stage: 'implement', kind: 'question', reason: 'Pick one', ts: 1, chips: [] }],
+    });
+    render(
+      <NeedsYouInbox bridgeStates={[state]} onApprove={() => {}} onAnswerQuestion={onAnswerQuestion} />,
+    );
+
+    fireEvent.change(screen.getByTestId('needs-you-notes-0'), { target: { value: 'My own answer' } });
+    fireEvent.click(screen.getByTestId('needs-you-answer-0'));
+
+    expect(onAnswerQuestion).toHaveBeenCalledWith('/abs/repo', 'My own answer');
+  });
+
+  it('renders the UNCHANGED plan-gate card for a chips-absent question item (AC3 regression)', () => {
+    const state = bridgeState({
+      inbox: [{ stage: 'implement', kind: 'question', reason: 'Which approach?', ts: 1 }],
+    });
+    render(<NeedsYouInbox bridgeStates={[state]} onApprove={() => {}} />);
+
+    expect(screen.getByTestId('needs-you-notes-0')).toBeInTheDocument();
+    expect(screen.getByTestId('needs-you-request-changes-0')).toBeInTheDocument();
+    expect(screen.getByTestId('needs-you-approve-0')).toBeInTheDocument();
+    expect(screen.queryByTestId('needs-you-chip-0-0')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('needs-you-answer-0')).not.toBeInTheDocument();
+  });
+
+  it('renders the three-choice Escalation card when gate is escalated', () => {
+    const state = bridgeState({
+      gate: 'escalated',
+      inbox: [{ stage: 'implement', kind: 'escalation', reason: 'Stuck in a loop', ts: 1 }],
+    });
+    render(<NeedsYouInbox bridgeStates={[state]} onApprove={() => {}} />);
+
+    expect(screen.getByTestId('needs-you-escalation-debug-0')).toBeInTheDocument();
+    expect(screen.getByTestId('needs-you-escalation-guidance-0')).toBeInTheDocument();
+    expect(screen.getByTestId('needs-you-escalation-takeover-0')).toBeInTheDocument();
+    expect(screen.queryByTestId('needs-you-approve-0')).not.toBeInTheDocument();
+  });
+
+  it('dispatches onEscalationChoice for each of the three escalation buttons, carrying notes for give-guidance', () => {
+    const onEscalationChoice = vi.fn();
+    const state = bridgeState({
+      path: '/abs/repo',
+      gate: 'escalated',
+      inbox: [{ stage: 'implement', kind: 'escalation', reason: 'Stuck in a loop', ts: 1 }],
+    });
+    render(
+      <NeedsYouInbox
+        bridgeStates={[state]}
+        onApprove={() => {}}
+        onEscalationChoice={onEscalationChoice}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId('needs-you-escalation-debug-0'));
+    expect(onEscalationChoice).toHaveBeenCalledWith('/abs/repo', 'let-debug-try');
+
+    fireEvent.change(screen.getByTestId('needs-you-notes-0'), { target: { value: 'Try approach B' } });
+    fireEvent.click(screen.getByTestId('needs-you-escalation-guidance-0'));
+    expect(onEscalationChoice).toHaveBeenCalledWith('/abs/repo', 'give-guidance', 'Try approach B');
+
+    fireEvent.click(screen.getByTestId('needs-you-escalation-takeover-0'));
+    expect(onEscalationChoice).toHaveBeenCalledWith('/abs/repo', 'take-over');
+  });
+
+  it('renders the existing lone-Approve rendering for an escalation item when gate is not escalated (AC3)', () => {
+    const state = bridgeState({
+      gate: 'awaiting-approval',
+      inbox: [{ stage: 'implement', kind: 'escalation', reason: 'Advisory warning', ts: 1 }],
+    });
+    render(<NeedsYouInbox bridgeStates={[state]} onApprove={() => {}} />);
+
+    expect(screen.getByTestId('needs-you-approve-0')).toBeInTheDocument();
+    expect(screen.queryByTestId('needs-you-escalation-debug-0')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('needs-you-escalation-guidance-0')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('needs-you-escalation-takeover-0')).not.toBeInTheDocument();
+  });
 });

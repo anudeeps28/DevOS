@@ -444,6 +444,24 @@ export interface BridgeInterruptMessage {
   readonly reason: string;
 }
 
+/** Inbound: answer a parked agent question for a pinned project path. */
+export interface QuestionAnswerMessage {
+  readonly type: 'question-answer';
+  readonly path: string;
+  readonly answer: string;
+}
+
+/** The three explicit choices an operator can make on an escalated Bridge run. */
+export type EscalationChoice = 'let-debug-try' | 'give-guidance' | 'take-over';
+
+/** Inbound: resolve the current escalation for a pinned project path. */
+export interface EscalationChoiceMessage {
+  readonly type: 'escalation-choice';
+  readonly path: string;
+  readonly choice: EscalationChoice;
+  readonly notes?: string;
+}
+
 /** The gate a Bridge run is currently sitting at, as sent to the client. */
 export type BridgeGate = 'running' | 'awaiting-approval' | 'reworking' | 'escalated' | 'done';
 
@@ -452,6 +470,12 @@ export interface BridgeInboxItem {
   readonly stage: string;
   readonly kind: 'interrupt' | 'question' | 'escalation';
   readonly reason: string;
+  /**
+   * The agent-question quick-reply discriminator: present (an array, possibly
+   * empty) = agent question (kind:'question' via ask_operator); absent =
+   * plan-gate question. At most 8 chips, each <= 512 chars.
+   */
+  readonly chips?: readonly string[];
   readonly ts: number;
 }
 
@@ -517,6 +541,8 @@ export type InboundMessage =
   | GateApproveMessage
   | GateRequestChangesMessage
   | BridgeInterruptMessage
+  | QuestionAnswerMessage
+  | EscalationChoiceMessage
   | SessionPersonasMessage
   | WorkItemSessionsRequestMessage
   | RosterTimelineRequestMessage;
@@ -868,6 +894,86 @@ export function parseInboundMessage(data: unknown): InboundMessage | null {
       return null;
     }
     return Object.freeze<BridgeInterruptMessage>({ type: 'bridge-interrupt', path, reason });
+  }
+
+  // `question-answer` shares the ABSOLUTE-path requirement plus a bounded,
+  // sanitized answer string. An answer that sanitizes down to empty is
+  // rejected — same rationale as gate-request-changes.
+  if (type === 'question-answer') {
+    const { path, answer } = frame;
+    if (
+      typeof path !== 'string' ||
+      path.length === 0 ||
+      path.length > MAX_PATH_LENGTH ||
+      !isAbsolute(path)
+    ) {
+      return null;
+    }
+    if (typeof answer !== 'string' || answer.length > MAX_STEER_TEXT_LENGTH) {
+      return null;
+    }
+    const sanitized = sanitizeNotes(answer);
+    if (sanitized.length === 0) {
+      return null;
+    }
+    return Object.freeze<QuestionAnswerMessage>({
+      type: 'question-answer',
+      path,
+      answer: sanitized,
+    });
+  }
+
+  // `escalation-choice` requires the ABSOLUTE-path requirement plus one of the
+  // three EscalationChoice literals. `notes` is REQUIRED (bounded, sanitized,
+  // non-empty) when choice is 'give-guidance'; for the other two choices it is
+  // optional but must be a valid sanitized string when present.
+  if (type === 'escalation-choice') {
+    const { path, choice, notes } = frame;
+    if (
+      typeof path !== 'string' ||
+      path.length === 0 ||
+      path.length > MAX_PATH_LENGTH ||
+      !isAbsolute(path)
+    ) {
+      return null;
+    }
+    if (choice !== 'let-debug-try' && choice !== 'give-guidance' && choice !== 'take-over') {
+      return null;
+    }
+
+    if (choice === 'give-guidance') {
+      if (typeof notes !== 'string' || notes.length > MAX_STEER_TEXT_LENGTH) {
+        return null;
+      }
+      const sanitized = sanitizeNotes(notes);
+      if (sanitized.length === 0) {
+        return null;
+      }
+      return Object.freeze<EscalationChoiceMessage>({
+        type: 'escalation-choice',
+        path,
+        choice,
+        notes: sanitized,
+      });
+    }
+
+    if (notes !== undefined) {
+      if (typeof notes !== 'string' || notes.length > MAX_STEER_TEXT_LENGTH) {
+        return null;
+      }
+      const sanitized = sanitizeNotes(notes);
+      if (sanitized.length === 0) {
+        return null;
+      }
+      return Object.freeze<EscalationChoiceMessage>({
+        type: 'escalation-choice',
+        path,
+        choice,
+        notes: sanitized,
+      });
+    }
+
+    return Object.freeze<EscalationChoiceMessage>({ type: 'escalation-choice', path, choice });
   }
 
   // `pin`/`unpin` share the absolute-path requirement.

@@ -28,6 +28,7 @@ import {
   defaultQuery,
   type EngineMessage,
   type EnginePermissionRequest,
+  type EngineQuestionRequest,
   type EngineSession,
   type PermissionDecision,
   type QueryFn,
@@ -125,6 +126,13 @@ export type PermissionRequestListener = (
   req: EnginePermissionRequest,
 ) => void;
 
+/** Fired with each agent-raised operator question, awaiting an answer. */
+export type QuestionRequestListener = (
+  projectPath: string,
+  sessionId: string,
+  req: EngineQuestionRequest,
+) => void;
+
 export interface SessionManager {
   readonly spawn: (input: SpawnInput) => Promise<SessionSnapshot>;
   readonly list: () => SessionSnapshot[];
@@ -135,6 +143,8 @@ export interface SessionManager {
   readonly onTranscript: (listener: TranscriptListener) => () => void;
   /** Register a listener fired on every permission request. Returns an unsubscribe fn. */
   readonly onPermissionRequest: (listener: PermissionRequestListener) => () => void;
+  /** Register a listener fired on every agent-raised operator question. Returns an unsubscribe fn. */
+  readonly onQuestionRequest: (listener: QuestionRequestListener) => () => void;
   /** Register a listener fired with the latest cost/usage aggregate. Returns an unsubscribe fn. */
   readonly onCostUsage: (listener: CostUsageListener) => () => void;
   /** Register a listener fired once per session when context-window occupancy crosses the threshold. */
@@ -160,6 +170,12 @@ export interface SessionManager {
    * an unknown/ended session.
    */
   readonly resolvePermission: (id: string, requestId: string, decision: PermissionDecision) => void;
+  /**
+   * Answer a pending agent question with the operator's text, then record a `user-text`
+   * transcript event (audit + visibility). Guarded + per-session isolated; a no-op for
+   * an unknown/ended session or an unknown/stale requestId.
+   */
+  readonly answerQuestion: (id: string, requestId: string, answer: string) => void;
   /**
    * End a live session at a clean turn boundary: closes its input stream so the current
    * turn finishes and the consume loop then sees the generator end naturally. Guarded;
@@ -209,6 +225,8 @@ interface LiveSession {
   readonly engine: EngineSession;
   /** requestId → toolName, populated as permission requests are raised (for the audit event). */
   readonly permissionToolNames: Map<string, string>;
+  /** requestIds of pending agent questions, populated as questions are raised (idempotency guard). */
+  readonly pendingQuestionIds: Set<string>;
   /** Latch: true once `onContextUsage` has fired for this session — fires AT MOST ONCE. */
   contextFired: boolean;
   /** Latch: true once the unknown-window warning has been logged for this session — warns AT MOST ONCE. */
@@ -226,6 +244,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   const listeners = new Set<StateListener>();
   const transcriptListeners = new Set<TranscriptListener>();
   const permissionRequestListeners = new Set<PermissionRequestListener>();
+  const questionRequestListeners = new Set<QuestionRequestListener>();
   const costUsageListeners = new Set<CostUsageListener>();
   const contextUsageListeners = new Set<ContextUsageListener>();
   const contextConfigWarningListeners = new Set<ContextConfigWarningListener>();
@@ -272,6 +291,16 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         listener(s.projectPath, s.id, req);
       } catch (err) {
         console.error('[session] permission request listener threw', err);
+      }
+    }
+  };
+
+  const emitQuestion = (s: LiveSession, req: EngineQuestionRequest): void => {
+    for (const listener of questionRequestListeners) {
+      try {
+        listener(s.projectPath, s.id, req);
+      } catch (err) {
+        console.error('[session] question request listener threw', err);
       }
     }
   };
@@ -539,6 +568,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       transcript: [],
       engine,
       permissionToolNames: new Map(),
+      pendingQuestionIds: new Set(),
       contextFired: false,
       windowWarned: false,
     };
@@ -550,6 +580,11 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     engine.onPermissionRequest((req) => {
       session.permissionToolNames.set(req.requestId, req.toolName);
       emitPermission(session, req);
+    });
+
+    engine.onQuestionRequest((req) => {
+      session.pendingQuestionIds.add(req.requestId);
+      emitQuestion(session, req);
     });
 
     // Detached — spawn returns immediately so many sessions multiplex concurrently.
@@ -581,6 +616,11 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   const onPermissionRequest = (listener: PermissionRequestListener): (() => void) => {
     permissionRequestListeners.add(listener);
     return () => permissionRequestListeners.delete(listener);
+  };
+
+  const onQuestionRequest = (listener: QuestionRequestListener): (() => void) => {
+    questionRequestListeners.add(listener);
+    return () => questionRequestListeners.delete(listener);
   };
 
   const onCostUsage = (listener: CostUsageListener): (() => void) => {
@@ -703,6 +743,40 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     emitTranscript(s, Object.freeze([event]));
   };
 
+  const answerQuestion = (id: string, requestId: string, answer: string): void => {
+    const s = live.get(id);
+    if (s === undefined) {
+      // Unknown/ended session — guarded no-op.
+      console.error(`[session] answerQuestion: no live session ${id}`);
+      return;
+    }
+    // Idempotency guard: only a request that is actually pending for THIS session is
+    // answered + audited. `pendingQuestionIds` holds an entry from when the question was
+    // raised until it is answered here, so an unknown/stale/duplicate requestId (a second
+    // tab's submit, or a forged answer) finds no entry and is a silent no-op.
+    if (!s.pendingQuestionIds.has(requestId)) {
+      return;
+    }
+    // Prune the entry as we answer it — bounds the set's growth and ensures a repeat
+    // answer for the same requestId is the no-op above.
+    s.pendingQuestionIds.delete(requestId);
+    // Per-session isolated: a throw is logged, never rethrown.
+    try {
+      s.engine.answerQuestion(requestId, answer);
+    } catch (err) {
+      console.error(`[session] answerQuestion: engine.answerQuestion threw for ${id}`, err);
+    }
+    // Audit trail + visibility: record the operator's answer as a user-text transcript event.
+    const event = pushEvent(
+      s,
+      Object.freeze<TranscriptEventBody>({
+        kind: 'user-text',
+        text: answer.length > MAX_TEXT_CHARS ? answer.slice(0, MAX_TEXT_CHARS) : answer,
+      }),
+    );
+    emitTranscript(s, Object.freeze([event]));
+  };
+
   const stopAll = async (): Promise<void> => {
     const running = [...live.values()];
     // Interrupt each live generator (guarded) — this closes its input stream so the
@@ -728,6 +802,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     onState,
     onTranscript,
     onPermissionRequest,
+    onQuestionRequest,
     onCostUsage,
     onContextUsage,
     onContextConfigWarning,
@@ -735,6 +810,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     sendInput,
     interrupt,
     resolvePermission,
+    answerQuestion,
     endAtBoundary,
     stopAll,
   });

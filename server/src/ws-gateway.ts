@@ -265,6 +265,40 @@ function sendFleetFixture(socket: WebSocket): void {
   sendFrame(socket, transcript);
 }
 
+// Deterministic canned inbox fixture for e2e — gated on DEVOS_E2E_INBOX_FIXTURE so it
+// NEVER runs unless explicitly opted into. One pinned fixture path, gate='escalated',
+// with a chips-bearing agent-question item and an escalation item — enough for the
+// Needs-you inbox to render both the Question and Escalation cards without a live SDK.
+const INBOX_FIXTURE_PATH = '/tmp/devos-e2e-inbox-fixture';
+
+/** Send the deterministic canned inbox fixture frame to one freshly-connected client. */
+function sendInboxFixture(socket: WebSocket): void {
+  const state: OutboundMessage = {
+    type: 'bridge-state',
+    path: INBOX_FIXTURE_PATH,
+    stage: 'builder',
+    gate: 'escalated',
+    sessionId: null,
+    inbox: [
+      {
+        stage: 'builder',
+        kind: 'question',
+        reason: 'Which approach should the agent take?',
+        chips: ['Option A', 'Option B'],
+        ts: Date.now(),
+      },
+      {
+        stage: 'builder',
+        kind: 'escalation',
+        reason: 'Rework loop-cap hit — needs an operator decision.',
+        ts: Date.now(),
+      },
+    ],
+    reworkCount: 0,
+  };
+  sendFrame(socket, state);
+}
+
 export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGateway {
   const intervalMs = options.intervalMs ?? HEARTBEAT_INTERVAL_MS;
   const { registry } = options;
@@ -538,6 +572,11 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
     // e2e fixture: only when explicitly opted into via env — never runs otherwise.
     if (process.env['DEVOS_E2E_FLEET_FIXTURE'] === '1') {
       sendFleetFixture(socket);
+    }
+
+    // e2e fixture: only when explicitly opted into via env — never runs otherwise.
+    if (process.env['DEVOS_E2E_INBOX_FIXTURE'] === '1') {
+      sendInboxFixture(socket);
     }
 
     // e2e fixture: a single deterministic non-zero cost-usage frame so the e2e can
@@ -907,6 +946,30 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
           options.bridge.requestChanges(message.path, message.notes);
         } catch (err) {
           console.error('[ws] gate-request-changes failed', err);
+        }
+        return;
+      }
+
+      // Question answer: resolve a parked agent question for a pinned project's run
+      // (fails closed, mirrors gate-approve).
+      if (message.type === 'question-answer') {
+        if (!isPinnedPath(message.path)) return;
+        try {
+          options.bridge.answerQuestion(message.path, message.answer);
+        } catch (err) {
+          console.error('[ws] question-answer failed', err);
+        }
+        return;
+      }
+
+      // Escalation choice: resolve the current escalation for a pinned project's run
+      // (fails closed, mirrors gate-approve).
+      if (message.type === 'escalation-choice') {
+        if (!isPinnedPath(message.path)) return;
+        try {
+          options.bridge.resolveEscalation(message.path, message.choice, message.notes);
+        } catch (err) {
+          console.error('[ws] escalation-choice failed', err);
         }
         return;
       }

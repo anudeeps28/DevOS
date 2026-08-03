@@ -12,11 +12,14 @@ import {
   buildSessionOptions,
   createInputStream,
   createPermissionBroker,
+  createQuestionBroker,
   defaultQuery,
   MAX_PENDING_INPUTS,
   MAX_PENDING_PERMISSIONS,
+  MAX_PENDING_QUESTIONS,
 } from './session-engine.js';
 import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk';
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
 describe('createInputStream', () => {
   it('yields the initial kickoff message first', async () => {
@@ -295,25 +298,195 @@ describe('createPermissionBroker — allow-always (AC1/AC2/AC3)', () => {
   });
 });
 
+// The SDK's `tool()` wraps the handler into an in-process `McpServer` (broker.mcpServer.instance),
+// registered under its tool name. There is no public "call this tool" API without a live
+// transport/connection, so tests invoke the registered handler directly — the exact code path
+// a real `ask_operator` call from the model takes.
+function invokeAskOperator(
+  broker: ReturnType<typeof createQuestionBroker>,
+  args: { question: string; chips?: string[] },
+): Promise<CallToolResult> {
+  const instance = broker.mcpServer.instance as unknown as {
+    _registeredTools: Record<string, { handler: (a: unknown, extra: unknown) => Promise<CallToolResult> }>;
+  };
+  const registered = instance._registeredTools['ask_operator'];
+  if (registered === undefined) throw new Error('ask_operator tool not registered');
+  return registered.handler(args, {});
+}
+
+describe('createQuestionBroker', () => {
+  it('parks a resolver and fires onRequest with sanitized chips', async () => {
+    const broker = createQuestionBroker();
+    const requests: unknown[] = [];
+    broker.onRequest((req) => requests.push(req));
+
+    let settled = false;
+    const promise = invokeAskOperator(broker, {
+      question: 'Which config?',
+      chips: ['A', 'B'],
+    });
+    void promise.then(() => {
+      settled = true;
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    expect(requests).toHaveLength(1);
+    const req = requests[0] as { requestId: string; question: string; chips: readonly string[] };
+    expect(req.question).toBe('Which config?');
+    expect(req.chips).toEqual(['A', 'B']);
+    expect(typeof req.requestId).toBe('string');
+
+    broker.answer(req.requestId, 'A');
+    await promise;
+  });
+
+  it('answer() resolves the parked tool Promise with the answer text', async () => {
+    const broker = createQuestionBroker();
+    const captured: Array<{ requestId: string }> = [];
+    broker.onRequest((req) => {
+      captured.push(req);
+    });
+
+    const promise = invokeAskOperator(broker, { question: 'Proceed?' });
+    await Promise.resolve();
+    const requestId = captured[0]?.requestId;
+    expect(typeof requestId).toBe('string');
+
+    broker.answer(requestId as string, 'yes please');
+    const result = await promise;
+
+    expect(result).toEqual({ content: [{ type: 'text', text: 'yes please' }] });
+  });
+
+  it('sanitizes chips: caps count to 8 and length to 512 each', async () => {
+    const broker = createQuestionBroker();
+    const requests: Array<{ requestId: string; chips: readonly string[] }> = [];
+    broker.onRequest((req) => requests.push(req));
+
+    const manyChips = Array.from({ length: 10 }, (_, i) => `chip-${i}`);
+    const longChip = 'x'.repeat(600);
+    void invokeAskOperator(broker, {
+      question: 'Q',
+      chips: [...manyChips, longChip],
+    });
+    await Promise.resolve();
+
+    const req = requests[0];
+    expect(req).toBeDefined();
+    expect(req?.chips.length).toBeLessThanOrEqual(8);
+    expect(req?.chips.every((c) => c.length <= 512)).toBe(true);
+
+    broker.answer(req?.requestId as string, 'ok');
+  });
+
+  it('strips control characters from a chip', async () => {
+    const broker = createQuestionBroker();
+    const requests: Array<{ requestId: string; chips: readonly string[] }> = [];
+    broker.onRequest((req) => requests.push(req));
+
+    const rawChip = String.fromCharCode(1) + 'bad' + String.fromCharCode(2) + 'chip';
+    void invokeAskOperator(broker, {
+      question: 'Q',
+      chips: [rawChip],
+    });
+    await Promise.resolve();
+
+    const req = requests[0];
+    expect(req?.chips).toEqual([' bad chip']);
+
+    broker.answer(req?.requestId as string, 'ok');
+  });
+
+  it('strips control characters and caps the length of the question text', async () => {
+    const broker = createQuestionBroker();
+    const requests: Array<{ requestId: string; question: string }> = [];
+    broker.onRequest((req) => requests.push(req));
+
+    const rawQuestion = String.fromCharCode(1) + 'pick' + String.fromCharCode(27) + 'one' + 'x'.repeat(5000);
+    void invokeAskOperator(broker, { question: rawQuestion });
+    await Promise.resolve();
+
+    const req = requests[0];
+    expect(req?.question.startsWith(' pick one')).toBe(true);
+    expect(req?.question.includes(String.fromCharCode(1))).toBe(false);
+    expect(req?.question.includes(String.fromCharCode(27))).toBe(false);
+    expect((req?.question.length ?? 0)).toBeLessThanOrEqual(4096);
+
+    broker.answer(req?.requestId as string, 'ok');
+  });
+
+  it('over-cap: the next ask_operator call resolves immediately with an error result (queue full)', async () => {
+    const broker = createQuestionBroker();
+    const requests: Array<{ requestId: string }> = [];
+    broker.onRequest((req) => requests.push(req));
+
+    for (let n = 0; n < MAX_PENDING_QUESTIONS; n += 1) {
+      void invokeAskOperator(broker, { question: `q-${n}` });
+    }
+    await Promise.resolve();
+
+    const overflow = await invokeAskOperator(broker, { question: 'overflow' });
+    expect(overflow.isError).toBe(true);
+
+    for (const req of requests) broker.answer(req.requestId, 'ok');
+  });
+
+  it('failAll() rejects all parked requests with an error CallToolResult', async () => {
+    const broker = createQuestionBroker();
+    const requests: Array<{ requestId: string }> = [];
+    broker.onRequest((req) => requests.push(req));
+
+    const a = invokeAskOperator(broker, { question: 'a' });
+    const b = invokeAskOperator(broker, { question: 'b' });
+    await Promise.resolve();
+
+    broker.failAll();
+
+    const [resultA, resultB] = await Promise.all([a, b]);
+    expect(resultA.isError).toBe(true);
+    expect(resultB.isError).toBe(true);
+    expect(requests).toHaveLength(2);
+  });
+});
+
 describe('buildSessionOptions — AC3 no-bypass regression', () => {
   it('returns Options with a canUseTool function and NO bypass permissionMode', () => {
     const broker = createPermissionBroker();
+    const questionBroker = createQuestionBroker();
     const options = buildSessionOptions(
       { cwd: '/tmp/proj', role: 'builder', model: 'claude-opus-5[1m]', effort: 'medium' },
       broker,
+      questionBroker,
     );
 
     expect(typeof options.canUseTool).toBe('function');
     expect(options.permissionMode).toBeUndefined();
+  });
+
+  it('sets mcpServers with the question broker devos-operator server', () => {
+    const broker = createPermissionBroker();
+    const questionBroker = createQuestionBroker();
+    const options = buildSessionOptions(
+      { cwd: '/tmp/proj', role: 'builder', model: 'claude-opus-5[1m]', effort: 'medium' },
+      broker,
+      questionBroker,
+    );
+
+    expect(options.mcpServers).toEqual({ 'devos-operator': questionBroker.mcpServer });
   });
 });
 
 describe('buildSessionOptions — AC2a model/effort pass-through', () => {
   it('carries the roster-declared model and effort onto Options, alongside cwd/env/systemPrompt/canUseTool', () => {
     const broker = createPermissionBroker();
+    const questionBroker = createQuestionBroker();
     const options = buildSessionOptions(
       { cwd: '/tmp/proj', role: 'builder', model: 'claude-opus-5[1m]', effort: 'medium' },
       broker,
+      questionBroker,
     );
 
     expect(options.model).toBe('claude-opus-5[1m]');

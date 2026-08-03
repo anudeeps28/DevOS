@@ -78,6 +78,8 @@ function makeFakeSession(sdkId: string, throwAfterInit: boolean): EngineSession 
     send: async (): Promise<void> => {},
     onPermissionRequest: (): void => {},
     resolvePermission: (): void => {},
+    onQuestionRequest: (): void => {},
+    answerQuestion: (): void => {},
     end: (): void => {
       resolveOpen?.();
     },

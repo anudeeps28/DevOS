@@ -231,6 +231,14 @@ interface GatewayHarness {
   }[];
   /** Every `bridge.requestChanges(path, notes)` the gateway forwarded. */
   readonly requestChangesCalls: () => readonly { readonly path: string; readonly notes: string }[];
+  /** Every `bridge.answerQuestion(path, answer)` the gateway forwarded. */
+  readonly answerQuestionCalls: () => readonly { readonly path: string; readonly answer: string }[];
+  /** Every `bridge.resolveEscalation(path, choice, notes?)` the gateway forwarded. */
+  readonly resolveEscalationCalls: () => readonly {
+    readonly path: string;
+    readonly choice: string;
+    readonly notes: string | undefined;
+  }[];
   readonly close: () => Promise<void>;
 }
 
@@ -344,6 +352,8 @@ async function startGateway(options: HarnessOptions = {}): Promise<GatewayHarnes
     resolvePermission: (id: string, requestId: string, decision: PermissionDecision) => {
       permissionCalls.push({ sessionId: id, requestId, decision });
     },
+    onQuestionRequest: () => () => {},
+    answerQuestion: () => {},
     sendInput: (id: string, text: string) => {
       steerCalls.push({ sessionId: id, text });
     },
@@ -358,6 +368,12 @@ async function startGateway(options: HarnessOptions = {}): Promise<GatewayHarnes
   });
 
   const requestChangesCalls: { readonly path: string; readonly notes: string }[] = [];
+  const answerQuestionCalls: { readonly path: string; readonly answer: string }[] = [];
+  const resolveEscalationCalls: {
+    readonly path: string;
+    readonly choice: string;
+    readonly notes: string | undefined;
+  }[] = [];
 
   const bridge: Bridge = Object.freeze({
     start: () => {},
@@ -365,6 +381,12 @@ async function startGateway(options: HarnessOptions = {}): Promise<GatewayHarnes
     interrupt: () => {},
     requestChanges: (path: string, notes: string) => {
       requestChangesCalls.push({ path, notes });
+    },
+    answerQuestion: (path: string, answer: string) => {
+      answerQuestionCalls.push({ path, answer });
+    },
+    resolveEscalation: (path: string, choice: 'let-debug-try' | 'give-guidance' | 'take-over', notes?: string) => {
+      resolveEscalationCalls.push({ path, choice, notes });
     },
     onState: () => () => {},
     getState: () => null,
@@ -438,6 +460,8 @@ async function startGateway(options: HarnessOptions = {}): Promise<GatewayHarnes
     },
     permissionCalls: () => [...permissionCalls],
     requestChangesCalls: () => [...requestChangesCalls],
+    answerQuestionCalls: () => [...answerQuestionCalls],
+    resolveEscalationCalls: () => [...resolveEscalationCalls],
     close: async () => {
       await gateway.close();
       await new Promise<void>((resolve) => {
@@ -780,6 +804,57 @@ describe('ws-gateway gate-request-changes routing', () => {
 
     await settle();
     expect(harness.requestChangesCalls()).toEqual([]);
+  });
+});
+
+describe('ws-gateway question-answer routing', () => {
+  it('routes a question-answer for a pinned path to bridge.answerQuestion(path, answer)', async () => {
+    const harness = await startGateway({ pinnedPaths: [PROJECT_PATH] });
+    const client = await openClient(harness.url);
+
+    client.send({ type: 'question-answer', path: PROJECT_PATH, answer: 'yes, proceed' });
+
+    await settle();
+    expect(harness.answerQuestionCalls()).toEqual([{ path: PROJECT_PATH, answer: 'yes, proceed' }]);
+  });
+
+  it('is a no-op for an unpinned path (fails closed)', async () => {
+    const harness = await startGateway({ pinnedPaths: [] }); // PROJECT_PATH is NOT pinned
+    const client = await openClient(harness.url);
+
+    client.send({ type: 'question-answer', path: PROJECT_PATH, answer: 'yes, proceed' });
+
+    await settle();
+    expect(harness.answerQuestionCalls()).toEqual([]);
+  });
+});
+
+describe('ws-gateway escalation-choice routing', () => {
+  it('routes an escalation-choice for a pinned path to bridge.resolveEscalation(path, choice, notes)', async () => {
+    const harness = await startGateway({ pinnedPaths: [PROJECT_PATH] });
+    const client = await openClient(harness.url);
+
+    client.send({
+      type: 'escalation-choice',
+      path: PROJECT_PATH,
+      choice: 'give-guidance',
+      notes: 'try a different approach',
+    });
+
+    await settle();
+    expect(harness.resolveEscalationCalls()).toEqual([
+      { path: PROJECT_PATH, choice: 'give-guidance', notes: 'try a different approach' },
+    ]);
+  });
+
+  it('is a no-op for an unpinned path (fails closed)', async () => {
+    const harness = await startGateway({ pinnedPaths: [] }); // PROJECT_PATH is NOT pinned
+    const client = await openClient(harness.url);
+
+    client.send({ type: 'escalation-choice', path: PROJECT_PATH, choice: 'take-over' });
+
+    await settle();
+    expect(harness.resolveEscalationCalls()).toEqual([]);
   });
 });
 

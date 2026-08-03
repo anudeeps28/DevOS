@@ -8,10 +8,12 @@ import {
   type BridgeInterruptMessage,
   type BridgeStartMessage,
   type DiscoverMessage,
+  type EscalationChoiceMessage,
   type GateApproveMessage,
   type GateRequestChangesMessage,
   type GitStateMessage,
   type PermissionDecisionMessage,
+  type QuestionAnswerMessage,
   type PinMessage,
   type RosterTimelineRequestMessage,
   type SessionInputMessage,
@@ -817,6 +819,178 @@ describe('parseInboundMessage', () => {
       expect(
         parseInboundMessage(
           JSON.stringify({ type: 'bridge-interrupt', path: '/abs/project', reason }),
+        ),
+      ).toBeNull();
+    });
+  });
+
+  describe('question-answer frames', () => {
+    it('accepts a well-formed frame and SANITIZES the answer containing CR/LF/C0/ESC', () => {
+      const rawAnswer = 'yes\r\nplease\x01 go\x1b ahead';
+      const result = parseInboundMessage(
+        JSON.stringify({ type: 'question-answer', path: '/abs/project', answer: rawAnswer }),
+      ) as QuestionAnswerMessage | null;
+
+      expect(result).not.toBeNull();
+      expect(result?.type).toBe('question-answer');
+      expect(result?.path).toBe('/abs/project');
+      expect(result?.answer).toBe(sanitizeNotes(rawAnswer));
+      expect(Object.isFrozen(result)).toBe(true);
+    });
+
+    it('accepts an answer exactly at MAX_STEER_TEXT_LENGTH', () => {
+      const answer = 'x'.repeat(MAX_STEER_TEXT_LENGTH);
+      const result = parseInboundMessage(
+        JSON.stringify({ type: 'question-answer', path: '/abs/project', answer }),
+      );
+      expect(result).not.toBeNull();
+    });
+
+    it('rejects an answer over MAX_STEER_TEXT_LENGTH', () => {
+      const answer = 'x'.repeat(MAX_STEER_TEXT_LENGTH + 1);
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'question-answer', path: '/abs/project', answer }),
+        ),
+      ).toBeNull();
+    });
+
+    it('rejects a missing, empty, or relative path', () => {
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'question-answer', answer: 'yes' })),
+      ).toBeNull();
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'question-answer', path: '', answer: 'yes' }),
+        ),
+      ).toBeNull();
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'question-answer', path: 'rel/dir', answer: 'yes' }),
+        ),
+      ).toBeNull();
+    });
+
+    it('rejects a missing or non-string answer', () => {
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'question-answer', path: '/abs/project' })),
+      ).toBeNull();
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'question-answer', path: '/abs/project', answer: 42 }),
+        ),
+      ).toBeNull();
+    });
+
+    it('rejects an answer that sanitizes down to empty', () => {
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'question-answer', path: '/abs/project', answer: '\n\r' }),
+        ),
+      ).toBeNull();
+    });
+  });
+
+  describe('escalation-choice frames', () => {
+    it('accepts "let-debug-try" with no notes, frozen', () => {
+      const result = parseInboundMessage(
+        JSON.stringify({ type: 'escalation-choice', path: '/abs/project', choice: 'let-debug-try' }),
+      );
+      expect(result).toEqual<EscalationChoiceMessage>({
+        type: 'escalation-choice',
+        path: '/abs/project',
+        choice: 'let-debug-try',
+      });
+      expect(Object.isFrozen(result)).toBe(true);
+      expect(result as unknown as Record<string, unknown>).not.toHaveProperty('notes');
+    });
+
+    it('accepts "take-over" with no notes', () => {
+      const result = parseInboundMessage(
+        JSON.stringify({ type: 'escalation-choice', path: '/abs/project', choice: 'take-over' }),
+      );
+      expect(result).toEqual<EscalationChoiceMessage>({
+        type: 'escalation-choice',
+        path: '/abs/project',
+        choice: 'take-over',
+      });
+    });
+
+    it('accepts "let-debug-try"/"take-over" with valid notes present, sanitized', () => {
+      const result = parseInboundMessage(
+        JSON.stringify({
+          type: 'escalation-choice',
+          path: '/abs/project',
+          choice: 'take-over',
+          notes: 'fyi\r\nsome context',
+        }),
+      ) as EscalationChoiceMessage | null;
+      expect(result).not.toBeNull();
+      expect(result?.notes).toBe(sanitizeNotes('fyi\r\nsome context'));
+    });
+
+    it('accepts "give-guidance" with required, sanitized notes', () => {
+      const result = parseInboundMessage(
+        JSON.stringify({
+          type: 'escalation-choice',
+          path: '/abs/project',
+          choice: 'give-guidance',
+          notes: 'try approach B\r\ninstead',
+        }),
+      ) as EscalationChoiceMessage | null;
+      expect(result).not.toBeNull();
+      expect(result?.choice).toBe('give-guidance');
+      expect(result?.notes).toBe(sanitizeNotes('try approach B\r\ninstead'));
+      expect(Object.isFrozen(result)).toBe(true);
+    });
+
+    it('rejects "give-guidance" with empty or absent notes', () => {
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'escalation-choice', path: '/abs/project', choice: 'give-guidance' }),
+        ),
+      ).toBeNull();
+      expect(
+        parseInboundMessage(
+          JSON.stringify({
+            type: 'escalation-choice',
+            path: '/abs/project',
+            choice: 'give-guidance',
+            notes: '\n\r',
+          }),
+        ),
+      ).toBeNull();
+    });
+
+    it('rejects a bad choice enum value', () => {
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'escalation-choice', path: '/abs/project', choice: 'maybe' }),
+        ),
+      ).toBeNull();
+    });
+
+    it('rejects a missing, empty, or relative path', () => {
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'escalation-choice', choice: 'take-over' })),
+      ).toBeNull();
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'escalation-choice', path: '', choice: 'take-over' }),
+        ),
+      ).toBeNull();
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'escalation-choice', path: 'rel/dir', choice: 'take-over' }),
+        ),
+      ).toBeNull();
+    });
+
+    it('rejects an over-long notes on the optional-notes choices', () => {
+      const notes = 'x'.repeat(MAX_STEER_TEXT_LENGTH + 1);
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'escalation-choice', path: '/abs/project', choice: 'take-over', notes }),
         ),
       ).toBeNull();
     });
