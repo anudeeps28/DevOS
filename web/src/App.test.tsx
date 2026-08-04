@@ -48,6 +48,7 @@ function defaultProjectsResult(overrides: Partial<UseProjectsResult> = {}): UseP
     answerQuestion: vi.fn(),
     resolveEscalation: vi.fn(),
     spawnSession: vi.fn(),
+    kickOffNextStage: vi.fn(),
     bridgeStart,
     transcripts: {},
     requestTranscript: vi.fn(),

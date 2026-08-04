@@ -12,6 +12,7 @@
 
 import { isAbsolute } from 'node:path';
 import { isValidRole } from './session/roles.js';
+import { isValidStageWord, type LifecycleStageWord } from './session/stage-actions.js';
 import type { Phase } from './lifecycle/story-state-reader.js';
 
 // Boundary size limits (defense-in-depth for the first client-writable surface).
@@ -352,6 +353,17 @@ export interface SessionSpawnMessage {
   readonly workItemId?: string;
 }
 
+/**
+ * Inbound: kick off the next lifecycle stage's slash-command launch for a pinned
+ * project path. `stage` is a server-authoritative allowlisted lifecycle stage word
+ * (New/Decide/Define/Build/Ship) — no prompt text crosses the wire.
+ */
+export interface KickOffNextStageMessage {
+  readonly type: 'kick-off-next-stage';
+  readonly path: string;
+  readonly stage: LifecycleStageWord;
+}
+
 /** Outbound: a live-state snapshot for a single owned session. */
 export interface SessionStateSnapshot {
   readonly type: 'session-state';
@@ -582,7 +594,8 @@ export type InboundMessage =
   | SessionPersonasMessage
   | WorkItemSessionsRequestMessage
   | RosterTimelineRequestMessage
-  | EvidenceRequestMessage;
+  | EvidenceRequestMessage
+  | KickOffNextStageMessage;
 
 /** Every registry message the server emits to a client. */
 export type OutboundMessage =
@@ -787,6 +800,25 @@ export function parseInboundMessage(data: unknown): InboundMessage | null {
       // Conditional spread keeps workItemId absent (never `undefined`) for exactOptionalPropertyTypes.
       ...(typeof workItemId === 'string' ? { workItemId } : {}),
     });
+  }
+
+  // `kick-off-next-stage` requires a non-empty ABSOLUTE path (like session-spawn) AND
+  // an allowlisted lifecycle stage word (validated against the canonical stage list).
+  // No prompt text crosses the wire — only the stage word.
+  if (type === 'kick-off-next-stage') {
+    const { path, stage } = frame;
+    if (
+      typeof path !== 'string' ||
+      path.length === 0 ||
+      path.length > MAX_PATH_LENGTH ||
+      !isAbsolute(path)
+    ) {
+      return null;
+    }
+    if (!isValidStageWord(stage)) {
+      return null;
+    }
+    return Object.freeze<KickOffNextStageMessage>({ type: 'kick-off-next-stage', path, stage });
   }
 
   // `session-transcript-request` carries a session id (opaque, not a path) — a

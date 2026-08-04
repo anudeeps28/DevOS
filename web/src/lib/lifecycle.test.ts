@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { resolveStage } from '@/lib/lifecycle';
+import { nextStageAction, resolveStage } from '@/lib/lifecycle';
+import type { LifecycleStage } from '@/lib/lifecycle';
 import type { LifecycleSignals, TrackerState } from '@/lib/ws-client';
 
 function signals(overrides: Partial<LifecycleSignals> = {}): LifecycleSignals {
@@ -87,5 +88,23 @@ describe('resolveStage — tracker reuse', () => {
 
   it('local Build signal outranks a tracker Define/Decide signal', () => {
     expect(resolveStage(signals({ hasStartedStory: true }), tracker())).toBe('Build');
+  });
+});
+
+describe('nextStageAction — display-only launcher label/active', () => {
+  const cases: readonly [LifecycleStage, { label: string; active: boolean }][] = [
+    ['New', { label: '/grill-me', active: true }],
+    ['Decide', { label: '/architect', active: true }],
+    ['Define', { label: '/implement', active: true }],
+    ['Build', { label: '', active: false }],
+    ['Ship', { label: '/improve-harness', active: true }],
+  ];
+
+  it.each(cases)('%s → %o', (stage, expected) => {
+    expect(nextStageAction(stage)).toEqual(expected);
+  });
+
+  it('Build is the only stage where the launcher goes quiet', () => {
+    expect(nextStageAction('Build').active).toBe(false);
   });
 });
