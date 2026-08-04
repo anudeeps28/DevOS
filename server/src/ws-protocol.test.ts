@@ -13,6 +13,7 @@ import {
   type GateApproveMessage,
   type GateRequestChangesMessage,
   type GitStateMessage,
+  type KickOffNextStageMessage,
   type PermissionDecisionMessage,
   type QuestionAnswerMessage,
   type PinMessage,
@@ -1045,6 +1046,78 @@ describe('parseInboundMessage', () => {
       expect(
         parseInboundMessage(
           JSON.stringify({ type: 'escalation-choice', path: '/abs/project', choice: 'take-over', notes }),
+        ),
+      ).toBeNull();
+    });
+  });
+
+  describe('kick-off-next-stage', () => {
+    it.each(['New', 'Decide', 'Define', 'Build', 'Ship'] as const)(
+      'parses a valid frame for stage %s',
+      (stage) => {
+        const result = parseInboundMessage(
+          JSON.stringify({ type: 'kick-off-next-stage', path: '/abs/project', stage }),
+        );
+        expect(result).toEqual<KickOffNextStageMessage>({
+          type: 'kick-off-next-stage',
+          path: '/abs/project',
+          stage,
+        });
+        expect(Object.isFrozen(result)).toBe(true);
+      },
+    );
+
+    it('rejects a non-allowlisted stage word', () => {
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'kick-off-next-stage', path: '/abs/project', stage: 'Foo' }),
+        ),
+      ).toBeNull();
+    });
+
+    it('rejects an empty stage string', () => {
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'kick-off-next-stage', path: '/abs/project', stage: '' }),
+        ),
+      ).toBeNull();
+    });
+
+    it('rejects a numeric stage', () => {
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'kick-off-next-stage', path: '/abs/project', stage: 1 }),
+        ),
+      ).toBeNull();
+    });
+
+    it('rejects a missing stage', () => {
+      expect(
+        parseInboundMessage(JSON.stringify({ type: 'kick-off-next-stage', path: '/abs/project' })),
+      ).toBeNull();
+    });
+
+    it('rejects a relative path', () => {
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'kick-off-next-stage', path: 'rel/dir', stage: 'New' }),
+        ),
+      ).toBeNull();
+    });
+
+    it('rejects an empty path', () => {
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'kick-off-next-stage', path: '', stage: 'New' }),
+        ),
+      ).toBeNull();
+    });
+
+    it('rejects an over-long path', () => {
+      const path = `/${'a'.repeat(4096)}`;
+      expect(
+        parseInboundMessage(
+          JSON.stringify({ type: 'kick-off-next-stage', path, stage: 'New' }),
         ),
       ).toBeNull();
     });

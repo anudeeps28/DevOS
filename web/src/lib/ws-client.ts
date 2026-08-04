@@ -504,6 +504,8 @@ export interface WsClient {
   readonly requestEvidence: (path: string, workItemId: string) => void;
   /** Spawn an owned session for a pinned project + role; no-op (warns) when the socket is not open. */
   readonly spawnSession: (path: string, role: string, workItemId?: string) => void;
+  /** Kick off the next stage for a project path; no-op (warns) when the socket is not open. */
+  readonly kickOffNextStage: (path: string, stage: string) => void;
   /** Request the buffered transcript of a live owned session; no-op (warns) when the socket is not open. */
   readonly requestTranscript: (sessionId: string) => void;
   /** Steer a live owned session with mid-run user text; no-op (warns) when the socket is not open. */
@@ -2180,6 +2182,10 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     });
   }
 
+  function kickOffNextStage(path: string, stage: string): void {
+    sendFrame({ type: 'kick-off-next-stage', path, stage });
+  }
+
   function requestTranscript(sessionId: string): void {
     sendFrame({ type: 'session-transcript-request', sessionId });
   }
@@ -2368,6 +2374,7 @@ export function createWsClient(options: WsClientOptions = {}): WsClient {
     requestWorkItemSessions,
     requestEvidence,
     spawnSession,
+    kickOffNextStage,
     requestTranscript,
     sendSessionInput,
     interruptSession,

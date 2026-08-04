@@ -25,6 +25,7 @@ import { readRoster } from './session/roster-reader.js';
 import { buildRosterTimeline } from './session/roster-timeline.js';
 import type { SessionManager } from './session/session-manager.js';
 import type { SessionStore } from './session/session-store.js';
+import { kickoffPromptForStage } from './session/stage-actions.js';
 import { readSkills } from './skills/skills-reader.js';
 import { readTrackerState } from './tracker/tracker-reader.js';
 import {
@@ -1078,6 +1079,39 @@ export function attachWsGateway(server: Server, options: WsGatewayOptions): WsGa
         } catch (err) {
           // A spawn failure (e.g. queue full) must never crash the gateway.
           console.error('[ws] session-spawn failed', err);
+        }
+        return;
+      }
+
+      // Kick-off-next-stage: launch the server-authoritative kickoff prompt for a
+      // pinned project's current lifecycle stage. Mirrors session-spawn's two-layer
+      // access control (pinned + within project roots) since it ultimately spawns an
+      // owned session; fails closed on either check. Build (and any stage with no
+      // mapped prompt) is a silent no-op — the launcher goes quiet. The role is
+      // hardcoded 'builder' server-side (the client never picks it).
+      if (message.type === 'kick-off-next-stage') {
+        // Access control (layer 1): only spawn for pinned projects (fails closed).
+        if (!isPinnedPath(message.path)) return;
+        // Access control (layer 2): the spawn cwd runs a `claude` subprocess with bash +
+        // file tools, so it MUST resolve within a configured PROJECT_ROOT — pinning alone
+        // doesn't bound the cwd (pin takes any absolute path). Fails closed on any path
+        // that can't be contained. (Realpath is async → awaited here.)
+        if (!(await isWithinProjectRoots(message.path, options.projectRoots))) {
+          console.warn('[ws] rejected kick-off-next-stage — path outside project roots');
+          return;
+        }
+        const prompt = kickoffPromptForStage(message.stage);
+        if (prompt === null) return;
+        try {
+          await options.sessionManager.spawn({
+            projectPath: message.path,
+            role: 'builder',
+            prompt,
+            currentStage: message.stage,
+          });
+        } catch (err) {
+          // A spawn failure (e.g. queue full) must never crash the gateway.
+          console.error('[ws] kick-off-next-stage failed', err);
         }
         return;
       }

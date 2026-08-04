@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 
 import type { UseProjectsResult } from '@/hooks/useProjects';
-import { resolveStage } from '@/lib/lifecycle';
+import { nextStageAction, resolveStage } from '@/lib/lifecycle';
 import type { GitState, LifecycleSignals, SessionState, TrackerState } from '@/lib/ws-client';
 import { cn } from '@/lib/utils';
 
@@ -201,6 +201,45 @@ function StageBadge({
 }
 
 /**
+ * Launcher button for the pinned card's "kick off next stage" action. Render-only:
+ *  - no server signals yet → renders nothing (mirrors StageBadge's loading gate — no
+ *    stage to launch from until signals arrive),
+ *  - else derives the stage via resolveStage and its launcher label/active state via
+ *    nextStageAction, and renders a button that calls back with (path, stage).
+ * Build has no next-skill label, so the button goes quiet: disabled, plain label.
+ */
+function KickOffButton({
+  path,
+  signals,
+  trackerState,
+  onKickOff,
+}: {
+  path: string;
+  signals: LifecycleSignals | undefined;
+  trackerState: TrackerState | undefined;
+  onKickOff: (path: string, stage: string) => void;
+}): JSX.Element | null {
+  if (signals === undefined) return null;
+
+  const stage = resolveStage(signals, trackerState);
+  const action = nextStageAction(stage);
+
+  return (
+    <button
+      data-testid={`kick-off-${path}`}
+      data-stage={stage}
+      data-active={String(action.active)}
+      type="button"
+      disabled={!action.active}
+      onClick={() => onKickOff(path, stage)}
+      className="w-fit rounded-md border border-border px-2 py-0.5 text-xs font-medium text-muted-foreground hover:text-foreground disabled:opacity-50"
+    >
+      {action.active ? `Kick off next stage → ${action.label}` : 'Kick off next stage'}
+    </button>
+  );
+}
+
+/**
  * Minimal owned-session control for one pinned card. Render-only (state lives in the
  * hook): a one-click "Spawn" button that starts a session for this project, plus a
  * running-count indicator. Deliberately thin — NO transcript, steering, or permission
@@ -280,6 +319,7 @@ export type ProjectPinProps = Pick<
   | 'requestTrackerState'
   | 'lifecycleSignals'
   | 'requestLifecycleSignals'
+  | 'kickOffNextStage'
   | 'sessions'
   | 'spawnSession'
 > & { readonly onAssignWork: (path: string, workItemId: string) => void };
@@ -304,6 +344,7 @@ export function ProjectPin({
   requestTrackerState,
   lifecycleSignals,
   requestLifecycleSignals,
+  kickOffNextStage,
   sessions,
   spawnSession,
   onAssignWork,
@@ -447,6 +488,12 @@ export function ProjectPin({
                     path={project.path}
                     signals={lifecycleSignals[project.path]}
                     trackerState={trackerStates[project.path]}
+                  />
+                  <KickOffButton
+                    path={project.path}
+                    signals={lifecycleSignals[project.path]}
+                    trackerState={trackerStates[project.path]}
+                    onKickOff={kickOffNextStage}
                   />
                 </div>
                 <div className="flex items-center gap-1.5">

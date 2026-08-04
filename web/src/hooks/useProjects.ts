@@ -135,6 +135,8 @@ export interface UseProjectsResult {
   ) => void;
   /** Spawn an owned session for a pinned project + role; delegates to the live client. */
   readonly spawnSession: (path: string, role: string, workItemId?: string) => void;
+  /** Kick off the next stage for a pinned project; delegates to the live client. */
+  readonly kickOffNextStage: (path: string, stage: string) => void;
   /** Start (or resume) a Bridge pipeline run for a pinned project, optionally carrying a work-item id; delegates to the live client. */
   readonly bridgeStart: (path: string, workItemId?: string) => void;
   /** Folded per-session transcripts keyed by session id (upserted + sorted by seq, bounded). */
@@ -448,6 +450,10 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     }
   }
 
+  function kickOffNextStage(path: string, stage: string): void {
+    clientRef.current?.kickOffNextStage(path, stage);
+  }
+
   function bridgeStart(path: string, workItemId?: string): void {
     // Forward only the args given — don't pass an explicit `undefined` workItemId.
     if (workItemId !== undefined) {
@@ -531,6 +537,7 @@ export function useProjects(options: UseProjectsOptions = {}): UseProjectsResult
     answerQuestion,
     resolveEscalation,
     spawnSession,
+    kickOffNextStage,
     bridgeStart,
     transcripts,
     requestTranscript,

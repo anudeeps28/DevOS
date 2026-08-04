@@ -66,6 +66,7 @@ function makeFakeClient() {
   const requestWorkItemSessions = vi.fn();
   const requestEvidence = vi.fn();
   const spawnSession = vi.fn();
+  const kickOffNextStage = vi.fn();
   const requestTranscript = vi.fn();
   const sendSessionInput = vi.fn();
   const interruptSession = vi.fn();
@@ -182,6 +183,7 @@ function makeFakeClient() {
     requestWorkItemSessions,
     requestEvidence,
     spawnSession,
+    kickOffNextStage,
     requestTranscript,
     sendSessionInput,
     interruptSession,
@@ -209,6 +211,7 @@ function makeFakeClient() {
     requestWorkItemSessions,
     requestEvidence,
     spawnSession,
+    kickOffNextStage,
     requestTranscript,
     sendSessionInput,
     interruptSession,

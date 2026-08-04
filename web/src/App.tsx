@@ -44,6 +44,7 @@ function App() {
     requestTrackerState,
     lifecycleSignals,
     requestLifecycleSignals,
+    kickOffNextStage,
     sessions,
     sessionPersonas,
     bridgeStates,
@@ -127,6 +128,7 @@ function App() {
                 requestTrackerState={requestTrackerState}
                 lifecycleSignals={lifecycleSignals}
                 requestLifecycleSignals={requestLifecycleSignals}
+                kickOffNextStage={kickOffNextStage}
                 sessions={sessions}
                 spawnSession={spawnSession}
                 onAssignWork={(path, workItemId) => {

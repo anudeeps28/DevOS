@@ -57,3 +57,27 @@ export function resolveStage(
 
   return stage;
 }
+
+/** Display-only next-skill button state for a given lifecycle stage. */
+export type NextStageAction = {
+  readonly label: string;
+  readonly active: boolean;
+};
+
+const NEXT_STAGE_ACTIONS: Readonly<Record<LifecycleStage, NextStageAction>> = {
+  New: { label: '/grill-me', active: true },
+  Decide: { label: '/architect', active: true },
+  Define: { label: '/implement', active: true },
+  Build: { label: '', active: false },
+  Ship: { label: '/improve-harness', active: true },
+};
+
+/**
+ * DISPLAY-ONLY next-skill label for the stage launcher button. The authoritative
+ * stage→prompt map lives server-side in `server/src/session/stage-actions.ts` — this
+ * mirror carries no wire authority and exists only to render the button's label/active
+ * state. Build has no next-skill label, so the launcher goes quiet (`active: false`).
+ */
+export function nextStageAction(stage: LifecycleStage): NextStageAction {
+  return NEXT_STAGE_ACTIONS[stage];
+}

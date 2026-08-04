@@ -21,6 +21,7 @@ const requestGitState = vi.fn();
 const requestTrackerState = vi.fn();
 const requestLifecycleSignals = vi.fn();
 const spawnSession = vi.fn();
+const kickOffNextStage = vi.fn();
 const onAssignWork = vi.fn();
 let projects: readonly RegistryProject[] = [];
 let candidates: readonly RegistryCandidate[] = [];
@@ -44,6 +45,7 @@ function renderPin() {
       requestTrackerState={requestTrackerState}
       lifecycleSignals={lifecycleSignals}
       requestLifecycleSignals={requestLifecycleSignals}
+      kickOffNextStage={kickOffNextStage}
       sessions={sessions}
       spawnSession={spawnSession}
       onAssignWork={onAssignWork}
@@ -430,6 +432,61 @@ describe('ProjectPin', () => {
 
       expect(requestLifecycleSignals).toHaveBeenCalledWith('/abs/one');
       expect(requestLifecycleSignals).toHaveBeenCalledWith('/abs/two');
+    });
+  });
+
+  describe('kick off next stage launcher', () => {
+    it('renders nothing until lifecycle signals have arrived', () => {
+      projects = [sampleProject('/abs/one')];
+      // lifecycleSignals intentionally empty → no stage to launch from yet.
+      renderPin();
+
+      expect(screen.queryByTestId('kick-off-/abs/one')).toBeNull();
+    });
+
+    it('at Decide, the launcher is active and labelled with the next skill', () => {
+      projects = [sampleProject('/abs/one')];
+      lifecycleSignals = { '/abs/one': makeSignals({ hasDecideDocs: true }) };
+      renderPin();
+
+      const button = screen.getByTestId('kick-off-/abs/one');
+      expect(button).toHaveAttribute('data-stage', 'Decide');
+      expect(button).toHaveAttribute('data-active', 'true');
+      expect(button).toBeEnabled();
+      expect(button).toHaveTextContent('/architect');
+    });
+
+    it('calls kickOffNextStage(path, stage) on click', () => {
+      projects = [sampleProject('/abs/one')];
+      lifecycleSignals = { '/abs/one': makeSignals({ hasDecideDocs: true }) };
+      renderPin();
+
+      fireEvent.click(screen.getByTestId('kick-off-/abs/one'));
+
+      expect(kickOffNextStage).toHaveBeenCalledTimes(1);
+      expect(kickOffNextStage).toHaveBeenCalledWith('/abs/one', 'Decide');
+    });
+
+    it('goes quiet at Build: disabled, plain label, no next-skill arrow', () => {
+      projects = [sampleProject('/abs/one')];
+      lifecycleSignals = { '/abs/one': makeSignals({ hasStartedStory: true }) };
+      renderPin();
+
+      const button = screen.getByTestId('kick-off-/abs/one');
+      expect(button).toHaveAttribute('data-stage', 'Build');
+      expect(button).toHaveAttribute('data-active', 'false');
+      expect(button).toBeDisabled();
+      expect(button).toHaveTextContent('Kick off next stage');
+      expect(button).not.toHaveTextContent('→');
+    });
+
+    it('offers no set-stage / stage-picker control (advance is emergent, not set)', () => {
+      projects = [sampleProject('/abs/one')];
+      lifecycleSignals = { '/abs/one': makeSignals({ hasDecideDocs: true }) };
+      renderPin();
+
+      expect(screen.queryByTestId('set-stage-/abs/one')).toBeNull();
+      expect(screen.queryByTestId('stage-picker-/abs/one')).toBeNull();
     });
   });
 

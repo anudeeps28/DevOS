@@ -64,6 +64,7 @@ function makeFakeClient() {
     requestWorkItemSessions: () => {},
     requestEvidence: () => {},
     spawnSession: () => {},
+    kickOffNextStage: () => {},
     requestTranscript: () => {},
     sendSessionInput: () => {},
     interruptSession: () => {},
